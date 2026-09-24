@@ -109,8 +109,8 @@ export class Gateway {
   // user opens the window. The window is minimized on startup.
   private async _setUpHomeTab() {
     const pages = this.shared.context.pages();
-    // With --no-startup-window there is no window yet; create it minimized.
-    const home = pages.find(p => p.url().startsWith(this.baseUrl)) ?? pages[0] ?? await this.shared.newBackgroundPage(this.baseUrl, 'minimized');
+    // With --no-startup-window there is no window yet.
+    const home = pages.find(p => p.url().startsWith(this.baseUrl)) ?? pages[0] ?? await this.shared.newBackgroundPage(this.baseUrl, true);
     // Sessions do not survive a gateway restart, so tabs left from a previous
     // run (and windows Chrome restored) are orphans. One window keeps every
     // session's tabs, and so its tab group, together.
@@ -118,11 +118,25 @@ export class Gateway {
       if (page !== home)
         await page.close().catch(() => {});
     }
-    await home.goto(this.baseUrl).catch(() => {});
+    await this._adoptHome(home);
+    await this.shared.startFocusGuard(this._homeTargetId!);
+  }
+
+  private async _adoptHome(home: Page) {
+    if (!home.url().startsWith(this.baseUrl))
+      await home.goto(this.baseUrl).catch(() => {});
     await this.groups?.pin(home).catch(() => {});
     this._homeTargetId = await this.shared.targetId(home);
-    await this.shared.setWindowState(this._homeTargetId, 'minimized').catch(() => {});
-    await this.shared.startFocusGuard(this._homeTargetId);
+    this.shared.setHomeTarget(this._homeTargetId);
+    await this.shared.hideApp();
+    // Closing the window (red button) closes every tab in it; put a fresh,
+    // hidden window back so agents have somewhere to open tabs.
+    home.once('close', () => {
+      if (this._stopping)
+        return;
+      console.error('browser window was closed; creating a new hidden one');
+      void this.shared.newBackgroundPage(this.baseUrl, true).then(page => this._adoptHome(page)).catch(e => console.error(e));
+    });
   }
 
   toolSchemas() {

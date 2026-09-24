@@ -6,7 +6,7 @@ An MCP server that lets any number of agent sessions (Claude Code chats,
 their subagents, Codex, other MCP clients) work in parallel in **one normal,
 logged-in browser**. Every session gets its own Chrome tab group and only sees
 its own tabs, while all of them share the browser's cookies and logins. The
-browser runs minimized in the background and does not steal focus.
+browser runs hidden in the background and does not steal focus.
 
 Under the hood every session runs the stock
 [Playwright MCP](https://github.com/microsoft/playwright-mcp) tools (snapshots,
@@ -38,8 +38,10 @@ Stock Playwright MCP is built for one agent at a time:
 - **Subagents, automatically**: Claude Code subagents are recognized and get
   their own tab group, running in parallel. Other clients call
   `browser_subagent_start`.
-- **Quiet**: the browser starts without a window and stays minimized; tabs open
-  in the background; links that open new tabs become background tabs.
+- **Quiet**: the browser starts without a window and stays out of sight
+  (minimized and hidden, so no window thumbnail in the Dock); tabs open in the
+  background; links that open new tabs become background tabs. Minimizing the
+  window hides the browser; closing it gets a fresh hidden window.
 - **Tab links**: `browser_tab_link` gives the agent a link to put in the chat;
   clicking it opens the window on that tab (for logins, captchas, review).
 - **Cleanup**: a session's tabs close when its client process exits or after a
@@ -183,8 +185,11 @@ the gateway created). Change the location or the retention with `filesDir` and
   everyday browser profile.
 - `playwright-core` is pinned to an exact version because the gateway relies on
   internal parts of it; startup fails loudly if they change.
-- A page's own `window.open()` (typically a sign-in popup) can still raise the
-  window for about a second before the gateway hands focus back.
+- A page's own `window.open()` (typically a sign-in popup) can still show the
+  browser for about a second before the gateway hides it again.
+- Closing the browser window (red button) closes every agent's tabs in it; the
+  gateway puts a new hidden window back. Use the yellow button or Cmd+H instead.
+- The browser's icon stays in the Dock while it runs (it is a normal Chrome).
 - `browser_pdf_save` only works in headless profiles.
 
 ## Commands

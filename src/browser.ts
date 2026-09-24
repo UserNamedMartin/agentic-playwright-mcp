@@ -4,7 +4,7 @@
 // window state, activation).
 import type { Browser, BrowserContext, CDPSession, Page } from 'playwright-core';
 import { playwright } from './internals.js';
-import { activatePid, frontmostPid, mainScreen } from './macos.js';
+import { activatePid, frontmostPid, hidePid, isHiddenPid, mainScreen, unhidePid } from './macos.js';
 
 export class SharedBrowser {
   readonly browser: Browser;
@@ -20,7 +20,8 @@ export class SharedBrowser {
   private _userFocusAt = 0;
   private _otherFrontmost: number | undefined;
   private _homeTargetId: string | undefined;
-  private _lastWindowState: string | undefined;
+  private _lastHidden = false;
+  private _headless: boolean | undefined;
   private _guarding = false;
 
   private constructor(browser: Browser, context: BrowserContext, cdp: CDPSession) {
@@ -80,8 +81,8 @@ export class SharedBrowser {
   // Opens a tab without activating it, so a minimized window stays minimized
   // and focus stays wherever the user is. Playwright's context.newPage() opens
   // tabs in the foreground, which un-minimizes the window.
-  async newBackgroundPage(url = 'about:blank', window?: 'minimized'): Promise<Page> {
-    const creation = this._cdp.send('Target.createTarget', { url, background: true, focus: false, ...(window ? { newWindow: true, windowState: window } : {}) } as any);
+  async newBackgroundPage(url = 'about:blank', newWindow = false): Promise<Page> {
+    const creation = this._cdp.send('Target.createTarget', { url, background: true, focus: false, ...(newWindow ? { newWindow: true, windowState: 'minimized' } : {}) } as any);
     this._inFlight.add(creation);
     const { targetId } = await creation.finally(() => this._inFlight.delete(creation));
     this._created.add(targetId);
@@ -129,6 +130,10 @@ export class SharedBrowser {
   async focusTab(targetId: string) {
     this._userFocusAt = Date.now();
     console.error(`focus: showing tab ${targetId.slice(0, 8)} (front was pid ${frontmostPid()})`);
+    // A hidden app's window cannot be un-minimized, so unhide first.
+    const pid = await this.pid();
+    if (pid && process.platform === 'darwin')
+      unhidePid(pid);
     await this.setWindowState(targetId, 'normal');
     await this._moveToMainScreen(targetId).catch(() => {});
     await this._cdp.send('Target.activateTarget', { targetId });
@@ -169,41 +174,76 @@ export class SharedBrowser {
     return this._pid;
   }
 
+  async isHeadless() {
+    if (this._headless === undefined) {
+      const { product } = await this._cdp.send('Browser.getVersion');
+      this._headless = product.startsWith('HeadlessChrome');
+    }
+    return this._headless;
+  }
+
   async activateApp() {
-    const { product } = await this._cdp.send('Browser.getVersion');
-    if (product.startsWith('HeadlessChrome'))
+    if (await this.isHeadless())
       return;
     const pid = await this.pid();
     if (pid)
       activatePid(pid);
   }
 
-  // Pages can still raise the browser on their own: a popup from window.open or
-  // a target=_blank link opens in the foreground. The guard samples which app
-  // is in front and the window state once a second, and after a new page
-  // appears puts things back the way they were: focus to the previous app, the
-  // window minimized again. Explicit focusTab() requests are left alone.
-  async startFocusGuard(homeTargetId: string) {
-    if (process.platform !== 'darwin')
+  // Out of sight = window minimized AND app hidden (like Cmd+H). Hidden, its
+  // minimized window leaves no thumbnail in the Dock; minimized, new tabs do
+  // not bring the app back into view.
+  async hideApp() {
+    if (process.platform !== 'darwin' || await this.isHeadless())
       return;
+    const pid = await this.pid();
+    if (!pid)
+      return;
+    if (this._homeTargetId && await this._windowState().catch(() => undefined) !== 'minimized')
+      await this.setWindowState(this._homeTargetId, 'minimized').catch(() => {});
+    hidePid(pid);
+    this._lastHidden = true;
+  }
+
+  // Keeps the browser out of the user's way:
+  // - minimizing the window (yellow button) also hides the browser, so the
+  //   minimized window never shows as a thumbnail in the Dock;
+  // - pages can still raise the browser on their own (a window.open popup);
+  //   after a new page appears the guard hides it again and gives focus back.
+  // Explicit focusTab() requests are left alone.
+  async startFocusGuard(homeTargetId: string) {
     this._homeTargetId = homeTargetId;
+    if (process.platform !== 'darwin' || await this.isHeadless())
+      return;
     const pid = await this.pid();
     const sample = async () => {
-      if (this._guarding)
+      if (this._guarding || !pid)
         return;
       const front = frontmostPid();
       if (front && front !== pid)
         this._otherFrontmost = front;
-      this._lastWindowState = await this._windowState().catch(() => undefined);
+      this._lastHidden = isHiddenPid(pid);
+      const state = await this._windowState().catch(() => undefined);
+      if (!this._lastHidden && state === 'minimized') {
+        console.error('window minimized; hiding the browser too');
+        await this.hideApp();
+      } else if (this._lastHidden && state && state !== 'minimized' && Date.now() - this._userFocusAt > 3000) {
+        // Hidden with Cmd+H: minimize too, or the next new tab would show it.
+        await this.setWindowState(this._homeTargetId!, 'minimized').catch(() => {});
+      }
     };
     await sample();
-    setInterval(() => void sample(), 1000).unref();
+    setInterval(() => void sample(), 500).unref();
     // Browser-level target events arrive sooner than Playwright's page event.
     this._cdp.on('Target.targetCreated', ({ targetInfo }) => {
       if (targetInfo.type === 'page')
         void this._guardFocus();
     });
     await this._cdp.send('Target.setDiscoverTargets', { discover: true });
+  }
+
+  setHomeTarget(targetId: string) {
+    this._homeTargetId = targetId;
   }
 
   private async _windowState() {
@@ -216,7 +256,9 @@ export class SharedBrowser {
     if (!this._homeTargetId || this._guarding || Date.now() - this._userFocusAt < 10_000)
       return;
     const pid = await this.pid();
-    const wasMinimized = this._lastWindowState === 'minimized';
+    if (!pid)
+      return;
+    const wasHidden = this._lastHidden;
     const wasBehind = this._otherFrontmost !== undefined && frontmostPid() !== pid;
     this._guarding = true;
     try {
@@ -226,15 +268,12 @@ export class SharedBrowser {
         if (Date.now() - this._userFocusAt < 10_000)
           break;
         const raised = frontmostPid() === pid;
-        const unminimized = wasMinimized && await this._windowState().catch(() => 'minimized') !== 'minimized';
-        if (!raised && !unminimized)
-          continue;
-        if (unminimized) {
-          console.error('focus guard: page raised the window; minimizing it again');
-          await this.setWindowState(this._homeTargetId, 'minimized').catch(() => {});
-        }
-        if (raised && wasBehind && this._otherFrontmost) {
-          console.error(`focus guard: page took focus; giving it back to pid ${this._otherFrontmost}`);
+        const shown = wasHidden && !isHiddenPid(pid);
+        if (shown) {
+          console.error('focus guard: a page showed the browser; hiding it again');
+          await this.hideApp();
+        } else if (raised && wasBehind && this._otherFrontmost) {
+          console.error(`focus guard: a page took focus; giving it back to pid ${this._otherFrontmost}`);
           activatePid(this._otherFrontmost);
         }
       }

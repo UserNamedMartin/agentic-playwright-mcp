@@ -27,6 +27,9 @@ Read README.md first for what the project does. This file is about changing it.
   internal name used in `internals.ts`, `session.ts` and `gateway.ts`
   (`BrowserBackend`, `Context` methods, `_tabs`, `_currentTab`, tool shapes).
   `verifyInternals()`/`verifyContext()` must keep failing loudly on mismatch.
+- Out of sight means window minimized AND app hidden: hidden apps leave no
+  window thumbnail in the Dock, minimized windows keep new tabs from showing the
+  app, and a hidden app's window cannot be un-minimized (unhide first).
 - Never let agent work steal focus: new tabs via `SharedBrowser.newBackgroundPage`,
   never `context.newPage()` or `page.bringToFront()`. Only explicit user
   requests (`focusTab`) may raise the window.

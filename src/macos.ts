@@ -57,3 +57,28 @@ export function mainScreen(): ScreenRect | undefined {
     return undefined;
   }
 }
+
+function appCall(pid: number, expression: string): string | undefined {
+  if (process.platform !== 'darwin')
+    return undefined;
+  try {
+    return execFileSync('osascript', ['-l', 'JavaScript', '-e',
+      `ObjC.import('AppKit'); var a = $.NSRunningApplication.runningApplicationWithProcessIdentifier(${pid}); a ? String(${expression}) : ''`], { encoding: 'utf8' }).trim();
+  } catch {
+    return undefined;
+  }
+}
+
+// Hiding (like Cmd+H) keeps the app out of sight without a minimized-window
+// thumbnail in the Dock, and unlike activation it works from the background.
+export function hidePid(pid: number) {
+  appCall(pid, 'a.hide');
+}
+
+export function unhidePid(pid: number) {
+  appCall(pid, 'a.unhide');
+}
+
+export function isHiddenPid(pid: number): boolean {
+  return appCall(pid, 'a.hidden') === 'true';
+}
