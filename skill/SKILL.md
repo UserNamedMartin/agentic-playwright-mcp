@@ -1,6 +1,6 @@
 ---
 name: agentic-browser
-description: How to use the shared agent browser (the `browser` MCP server, tools named browser_*, from agentic-playwright-mcp). Read before the first browser call in a chat, and before spawning subagents that will use the browser. Covers tab groups, subagents, logins, tab links, what is shared between chats, and the rule to report every browser problem to the user.
+description: How to use the shared agent browser (the `browser` MCP server, tools named browser_*, from agentic-playwright-mcp). Read before the first browser call in a chat, and before spawning subagents that will use the browser. Covers tab groups, subagents, logins and credentials, tab links, what is shared between chats, and the rule to report every browser problem to the user.
 ---
 
 # Shared agent browser
@@ -23,7 +23,8 @@ work, with a few differences described here.
 - Close tabs you no longer need with `browser_tabs` action `close`. Do not use
   `browser_close`.
 - Everything happens in the background: the user does not see the window
-  unless you give them a link (below). Never assume they are watching.
+  unless you give them a link (see "Showing pages to the user"). Never assume
+  they are watching.
 - Only use the browser when the task needs it. When the user checks a UI
   themselves, do not open pages or take screenshots to "verify" unless asked.
 
@@ -47,39 +48,54 @@ In other clients (Codex and others) a subagent first calls
 `"agent": "<id>"` in every browser call. Put that into the prompt of any
 subagent you spawn there.
 
-## Logins, captchas, anything for the user
+## Logins
 
-- Never type passwords, codes or payment details. When a page needs the user
-  (login, 2FA, captcha, consent, review), tell them what is needed, call
-  `browser_tab_link` and give them its link as a markdown link, e.g.
-  `[Open the login page](http://127.0.0.1:8931/focus?target=…)`. Clicking it
-  brings the browser window to the front on that tab. Then wait for them to
-  confirm before continuing.
-- Give such a link whenever the user might want to look at a page (a result,
-  something to double-check). It opens nothing by itself; the user decides.
+The browser is not logged in everywhere yet; logins get added as tasks need
+them. When a task needs a site or service where the browser is not signed in
+(a login page, "sign in to continue", a members-only page, an empty account
+view):
+
+1. **Look for credentials in the project first**: files the project keeps for
+   this (`.env`, credential or secrets files, notes in the project's docs or
+   memory) and environment variables. If you find ones for this service, sign
+   in with them.
+2. **Otherwise stop and give the user the choice**, in one message: which
+   service needs a login and what for, and either
+   - they sign in themselves: give a `browser_tab_link` link to the login page,
+     or
+   - they send the credentials in the chat and you sign in.
+
+   Then wait for their answer.
+3. Codes the user receives (2FA, SMS, email codes) always come from the user:
+   ask for the code, or let them enter it via the tab link.
+
+Using credentials:
+
+- Use them only to sign in to the service they belong to. Do not repeat them in
+  your replies, and do not write them into files, commit messages or logs
+  unless the user asks you to save them.
+- Never enter payment details (card numbers, bank transfers, purchases) unless
+  the user explicitly asks for that specific action.
+- If sign-in fails (wrong password, account locked, a captcha, "this browser may
+  not be secure"), stop after one attempt and tell the user; do not retry with
+  guesses. For Google's "browser may not be secure", the user can run
+  `agentic-playwright-mcp login <profile>`, sign in there and quit that window.
+
+Do not work around a missing login: no other accounts, no public or cached
+copies, no other browser tools, and no carrying on with partial data as if
+nothing happened. Logins are shared by all chats of this setup, so one sign-in
+fixes it for every agent.
+
+## Showing pages to the user
+
+- When the user should look at or act in a page (a captcha, a consent screen, a
+  result to review, something to double-check), call `browser_tab_link` and
+  give them its link as a markdown link, e.g.
+  `[Open the results](http://127.0.0.1:8931/focus?target=…)`. Clicking it
+  brings the browser window to the front on that tab; nothing opens until they
+  click.
 - `browser_show_tab` opens the window immediately, without asking. Use it only
   when the user explicitly asks to see a page right now ("покажи").
-- If a site refuses to sign in inside the automated browser (for example Google
-  saying the browser may not be secure), tell the user to run
-  `agentic-playwright-mcp login <profile>`, sign in there, and quit that window.
-
-## No login? Stop and say so
-
-The browser is not logged in everywhere yet; the user adds logins as they are
-needed. When a task needs a site or service where the browser is not signed in
-(a login page, "sign in to continue", a paywall for members, an empty account
-view), especially the user's own accounts (Google, study portals, messengers,
-LinkedIn, banking, work tools):
-
-1. Stop the task at that point.
-2. Tell the user which service needs a login and what for, and give a
-   `browser_tab_link` link to its login page so they can sign in right there.
-3. Wait for them to confirm, then continue.
-
-Do not work around a missing login: no other accounts, no guessing, no public
-or cached copies, no other browser tools, and no carrying on with partial data
-as if nothing happened. Logins are shared by all chats of this setup, so one
-sign-in fixes it for every agent.
 
 ## Shared between all chats of this setup
 
@@ -108,7 +124,7 @@ clearly marked paragraph, even if you worked around it:
 - a tool error, timeout or crash (quote the exact error text);
 - the wrong tab, a missing tab or group, tabs that belong to someone else;
 - the browser window or focus jumping in front of the user;
-- a missing login (see "No login? Stop and say so");
+- a missing login (see "Logins");
 - a site that refuses the automated browser;
 - anything that behaves differently from this skill.
 
