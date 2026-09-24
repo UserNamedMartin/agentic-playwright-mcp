@@ -19,6 +19,7 @@ import { renderDashboard } from './dashboard.js';
 import { openInBackgroundBinding, popupInterceptScript } from './popups.js';
 import { TranscriptIndex } from './subagents.js';
 import { cleanFolders, sessionFolder, subagentFolder } from './files.js';
+import { baseIcon, renderDockIcon } from './docktile.js';
 import { appMimeType, openTabWindowTool, tabLinkHtml, tabLinkResource, tabLinkResourceUri, tabLinkTool } from './apps.js';
 
 export type GatewayOptions = {
@@ -33,6 +34,11 @@ export type GatewayOptions = {
   filesDir: string;
   // Chat folders unused this long are deleted.
   filesRetentionDays?: number;
+  // Dock icon label (up to 3 characters) and its tag color; see docktile.ts.
+  badge?: string;
+  badgeColor?: string;
+  executablePath?: string;
+  dockIconCache?: string;
 };
 
 type Transport = { transport: StreamableHTTPServerTransport; sessionKey: string };
@@ -87,6 +93,7 @@ export class Gateway {
     }));
     await new Promise<void>(resolve => this._server!.listen(this.options.port, this.options.host ?? '127.0.0.1', resolve));
     await this._setUpHomeTab();
+    await this._applyDockTile();
     this._sweeper = setInterval(() => void this._sweep(), 15_000);
     this._sweeper.unref();
     console.error(`[${this.options.profile}] gateway on ${this.baseUrl}/mcp, browser ${this.options.cdpEndpoint}, ` +
@@ -377,9 +384,34 @@ export class Gateway {
   }
 
   private _filesSweptAt = 0;
+  private _dockImage: string | undefined;
+  private _dockAppliedAt = 0;
+
+  // Chrome may redraw its own Dock icon (downloads, restarts of the tile), so
+  // the image is rendered once and re-applied now and then.
+  private async _applyDockTile() {
+    const { badge, badgeColor, executablePath, dockIconCache } = this.options;
+    if (!badge || !executablePath || !dockIconCache || await this.shared.isHeadless())
+      return;
+    try {
+      if (!this._dockImage) {
+        const icon = baseIcon(executablePath, dockIconCache);
+        const worker = await this.groups?.extensionWorker();
+        if (!icon || !worker)
+          return;
+        this._dockImage = await renderDockIcon(worker, icon, badge, badgeColor ?? '#d93025');
+      }
+      await this.shared.setDockTile(this._dockImage);
+      this._dockAppliedAt = Date.now();
+    } catch (e) {
+      console.error(`dock icon: ${(e as Error).message}`);
+    }
+  }
 
   private async _sweep() {
     const now = Date.now();
+    if (now - this._dockAppliedAt > 60 * 1000)
+      await this._applyDockTile();
     if (now - this._filesSweptAt > 60 * 60 * 1000) {
       this._filesSweptAt = now;
       const inUse = new Set([...this.sessions.values()].map(s => s.filesDir));

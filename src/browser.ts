@@ -242,6 +242,10 @@ export class SharedBrowser {
     await this._cdp.send('Target.setDiscoverTargets', { discover: true });
   }
 
+  async setDockTile(image: string) {
+    await this._cdp.send('Browser.setDockTile' as any, { image });
+  }
+
   setHomeTarget(targetId: string) {
     this._homeTargetId = targetId;
   }

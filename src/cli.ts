@@ -6,6 +6,7 @@ import { closeBrowser, runPlainBrowser } from './launcher.js';
 import { addProfile, getProfile, loadProfiles, removeProfile, updateProfile } from './profiles.js';
 import { runProfile } from './supervisor.js';
 import { finickyConfig, installUrlHandler, openLink } from './urlhandler.js';
+import { validateBadge } from './docktile.js';
 import { installService, isServiceInstalled, startService, stopService, uninstallService } from './service.js';
 
 const usage = `agentic-playwright-mcp — many agents, one real browser, one tab group each.
@@ -17,6 +18,9 @@ Quick start:
 
 Profiles (one persistent browser + gateway each):
   profile add <name> [--browser chrome|brave|chromium|edge|<path>] [--port N] [--cdp-port N] [--headless]
+              [--badge <up to 3 chars>] [--badge-color <css color>]
+  badge <profile> <label> [--badge-color <css color>]
+                               label shown on the browser's Dock icon (macOS)
   profile list
   profile remove <name>
 
@@ -56,6 +60,8 @@ async function main() {
       'exclude': { type: 'string' },
       'always': { type: 'boolean' },
       'force': { type: 'boolean' },
+      'badge': { type: 'string' },
+      'badge-color': { type: 'string' },
       'help': { type: 'boolean', short: 'h' },
     },
   });
@@ -73,6 +79,8 @@ async function main() {
           port: values.port ? Number(values.port) : undefined,
           cdpPort: values['cdp-port'] ? Number(values['cdp-port']) : undefined,
           headless: values.headless,
+          badge: values.badge,
+          badgeColor: values['badge-color'],
         });
         console.log(`Created profile "${profile.name}": gateway port ${profile.port}, browser ${profile.executablePath}`);
         console.log(`Next: agentic-playwright-mcp start ${profile.name}   (or: service install ${profile.name})`);
@@ -150,6 +158,8 @@ async function main() {
         port: values.port ? Number(values.port) : undefined,
         cdpPort: values['cdp-port'] ? Number(values['cdp-port']) : undefined,
         headless: values.headless,
+        badge: values.badge,
+        badgeColor: values['badge-color'],
       });
       console.log(`Profile "${profile.name}": gateway http://127.0.0.1:${profile.port}/mcp, browser ${profile.executablePath}`);
       if (process.platform === 'darwin') {
@@ -160,6 +170,15 @@ async function main() {
       }
       console.log('');
       printClientConfig(profile);
+      return;
+    }
+    case 'badge': {
+      // badge <profile> <label> [--badge-color <css color>]
+      const profile = getProfile(requireArg(sub, 'profile'));
+      const label = requireArg(arg, 'label');
+      validateBadge(label);
+      updateProfile(profile.name, { badge: label, ...(values['badge-color'] ? { badgeColor: values['badge-color'] } : {}) });
+      console.log(`Dock badge of "${profile.name}" set to "${label}". Restart the profile to apply (service install ${profile.name}).`);
       return;
     }
     case 'link-handler': {

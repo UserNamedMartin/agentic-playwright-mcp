@@ -4,6 +4,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { defaultBadgeColors } from './docktile.js';
 
 export type Profile = {
   name: string;
@@ -21,6 +22,10 @@ export type Profile = {
   filesDir?: string;
   filesRetentionDays?: number;
   stopAfterMs?: number;
+  // Dock icon label (up to 3 characters, default: the name's first letters)
+  // and tag color (default: one per profile).
+  badge?: string;
+  badgeColor?: string;
 };
 
 export const homeDir = process.env.AGENTIC_PLAYWRIGHT_HOME ?? path.join(os.homedir(), '.agentic-playwright-mcp');
@@ -62,6 +67,14 @@ function saveProfiles(profiles: Profile[]) {
   fs.writeFileSync(profilesFile, JSON.stringify(profiles, null, 2) + '\n');
 }
 
+export function profileBadge(profile: Profile) {
+  const index = Math.max(0, loadProfiles().findIndex(p => p.name === profile.name));
+  return {
+    badge: profile.badge ?? profile.name.replace(/[^\p{L}\p{N}]/gu, '').slice(0, 3).toUpperCase(),
+    badgeColor: profile.badgeColor ?? defaultBadgeColors[index % defaultBadgeColors.length],
+  };
+}
+
 export function getProfile(name: string): Profile {
   const profile = loadProfiles().find(p => p.name === name);
   if (!profile)
@@ -69,7 +82,7 @@ export function getProfile(name: string): Profile {
   return profile;
 }
 
-export function addProfile(name: string, options: { browser?: string; port?: number; cdpPort?: number; headless?: boolean }): Profile {
+export function addProfile(name: string, options: { browser?: string; port?: number; cdpPort?: number; headless?: boolean; badge?: string; badgeColor?: string }): Profile {
   if (!/^[a-z0-9][a-z0-9_-]*$/i.test(name))
     throw new Error('Profile names may contain letters, digits, "-" and "_".');
   const profiles = loadProfiles();
@@ -83,6 +96,8 @@ export function addProfile(name: string, options: { browser?: string; port?: num
     userDataDir: path.join(homeDir, 'profiles', name, 'browser-data'),
     executablePath: resolveExecutable(options.browser ?? 'chrome'),
     headless: options.headless,
+    ...(options.badge ? { badge: options.badge } : {}),
+    ...(options.badgeColor ? { badgeColor: options.badgeColor } : {}),
   };
   saveProfiles([...profiles, profile]);
   return profile;

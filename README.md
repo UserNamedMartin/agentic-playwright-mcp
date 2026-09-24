@@ -48,6 +48,9 @@ Stock Playwright MCP is built for one agent at a time:
   day without browser use.
 - **Per-tab device emulation**: `browser_emulate_device` emulates a phone in
   one tab without affecting other agents.
+- **Dock badges** (macOS): each profile's browser icon carries a short label
+  (up to 3 characters, e.g. `CR`, `10C`) in a colored tag, so several agent
+  browsers are easy to tell apart.
 - **Files stay out of your projects**: screenshots, snapshots, downloads,
   videos and traces go to a per-chat folder, deleted after a week without use.
 
@@ -97,6 +100,17 @@ your everyday passwords and bookmarks into the agents' browser.
 
 Run `setup` once per profile. Each gets its own port; point each client (or
 each client configuration) at the profile it should use.
+
+### Telling profiles apart in the Dock
+
+Each profile's browser shows its own label on the Dock icon: by default the
+first letters of the profile name in a per-profile color. Set your own (up to
+3 characters, any CSS color), then restart the profile:
+
+```sh
+agentic-playwright-mcp badge work WRK --badge-color "#1a73e8"
+agentic-playwright-mcp service install work
+```
 
 ### Running only while a client app is open
 
@@ -196,7 +210,8 @@ the gateway created). Change the location or the retention with `filesDir` and
 
 ```
 setup <profile> [--browser chrome|brave|chromium|edge|<path>] [--headless]
-profile add <name> [--browser …] [--port N] [--cdp-port N] [--headless]
+profile add <name> [--browser …] [--port N] [--cdp-port N] [--headless] [--badge X] [--badge-color C]
+badge <profile> <label> [--badge-color <css color>]
 profile list | profile remove <name>
 start <profile>                  browser and gateway in the foreground
 service install|uninstall <profile>

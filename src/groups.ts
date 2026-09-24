@@ -77,6 +77,10 @@ export class TabGroups {
     await worker?.evaluate(key => (self as any).apmForgetGroup(key), session.info.id).catch(() => {});
   }
 
+  async extensionWorker() {
+    return await this._ensureWorker();
+  }
+
   // Finds our service worker among all extension workers by probing for the
   // function it defines. Playwright hands out a new Worker object whenever
   // Chrome restarts a suspended MV3 worker.
