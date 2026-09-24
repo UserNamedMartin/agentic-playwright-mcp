@@ -1,0 +1,9 @@
+agentic-playwright-mcp
+
+This project builds on Playwright and Playwright MCP by Microsoft Corporation
+(https://github.com/microsoft/playwright), licensed under the Apache License 2.0.
+It depends on the playwright-core package and reuses its MCP browser tools;
+parts of the gateway follow the structure of Playwright MCP's server code.
+
+This project is not affiliated with or endorsed by Microsoft. "Playwright" is
+a trademark of Microsoft Corporation.

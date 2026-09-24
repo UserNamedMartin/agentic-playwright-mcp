@@ -1,0 +1,8 @@
+{
+  "manifest_version": 3,
+  "name": "Agentic Playwright MCP",
+  "description": "Groups each agent session's tabs into its own tab group.",
+  "version": "0.1.0",
+  "permissions": ["tabs", "tabGroups", "debugger", "storage"],
+  "background": { "service_worker": "sw.js" }
+}
