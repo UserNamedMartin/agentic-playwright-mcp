@@ -46,6 +46,8 @@ Stock Playwright MCP is built for one agent at a time:
   day without browser use.
 - **Per-tab device emulation**: `browser_emulate_device` emulates a phone in
   one tab without affecting other agents.
+- **Files stay out of your projects**: screenshots, snapshots, downloads,
+  videos and traces go to a per-chat folder, deleted after a week without use.
 
 ## Requirements
 
@@ -133,6 +135,24 @@ UI: hosts that render MCP Apps show a card with an Open button that opens the
 tab through the host, with no browser or router involved. As of September 2026
 the Claude desktop app's Code tab does not yet render MCP Apps from
 user-configured servers; once it does, prefer the button over the router.
+
+## Files
+
+Everything a session saves goes to its own folder, never into the project the
+agent works in:
+
+```
+~/.agentic-playwright-mcp/profiles/<profile>/files/
+  2026-09-24_fix-the-login-page_a1b2c3d4/      one folder per chat
+    page-….yml  shots/home.png  report.pdf
+    pricing-research_e5f6a7b8/                 one per subagent
+```
+
+The first tool result of a session gives the agent the folder's path; later
+results use paths relative to it. A chat that comes back finds its folder
+again. Folders nobody has read or written for 7 days are deleted (only folders
+the gateway created). Change the location or the retention with `filesDir` and
+`filesRetentionDays` in `profiles.json`.
 
 ## How it works
 

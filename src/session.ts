@@ -7,6 +7,7 @@ import fs from 'node:fs';
 import type { Page } from 'playwright-core';
 import type { SharedBrowser } from './browser.js';
 import type { TabGroups } from './groups.js';
+import { touchFolder } from './files.js';
 import { pwTools, verifyContext } from './internals.js';
 
 export type SessionInfo = {
@@ -28,11 +29,16 @@ export class AgentSession {
   private _groups: TabGroups | undefined;
   private _config: any;
   private _tools: any[];
-  private _defaultCwd: string;
+  // Everything this session saves goes here (see files.ts).
+  readonly filesDir: string;
+  private _filesNoted = false;
+  private _touchedAt = 0;
+  private _retentionDays: number;
 
-  constructor(info: SessionInfo, shared: SharedBrowser, config: any, tools: any[], defaultCwd: string, groups?: TabGroups) {
+  constructor(info: SessionInfo, shared: SharedBrowser, config: any, tools: any[], filesDir: string, groups?: TabGroups, retentionDays = 7) {
     this.info = info;
-    this._defaultCwd = defaultCwd;
+    this.filesDir = filesDir;
+    this._retentionDays = retentionDays;
     this._shared = shared;
     this._config = config;
     this._tools = tools;
@@ -40,11 +46,13 @@ export class AgentSession {
   }
 
   async start() {
-    if (!this.info.cwd)
-      fs.mkdirSync(this._defaultCwd, { recursive: true });
-    const backend = new pwTools.BrowserBackend(this._config, this._shared.context, this._tools, {});
-    // Snapshots, screenshots and downloads land in the agent's own working directory when we know it.
-    await backend.initialize({ cwd: this.info.cwd ?? this._defaultCwd, clientName: this.info.title });
+    fs.mkdirSync(this.filesDir, { recursive: true });
+    // The session folder is both the output dir and the workspace, so relative
+    // file names land there too, never in the agent's project. Unrestricted
+    // access lets the agent still upload project files by absolute path.
+    const config = { ...this._config, outputDir: this.filesDir, allowUnrestrictedFileAccess: true };
+    const backend = new pwTools.BrowserBackend(config, this._shared.context, this._tools, {});
+    await backend.initialize({ cwd: this.filesDir, clientName: this.info.title });
     verifyContext(backend._context);
     this._patchContext(backend._context);
     this.backend = backend;
@@ -73,7 +81,19 @@ export class AgentSession {
         return { content: [{ type: 'text', text: `### Error\nTab "${tab}" not found. Call browser_tabs to list your tabs.` }], isError: true };
       context._currentTab = target;
     }
+    if (Date.now() - this._touchedAt > 5 * 60 * 1000) {
+      touchFolder(this.filesDir);
+      this._touchedAt = Date.now();
+    }
     const result = await this.backend.callTool(name, args, signal);
+    // Tell the agent once where its files go; paths in later results are
+    // relative to this folder.
+    if (!this._filesNoted && !result.isError) {
+      this._filesNoted = true;
+      result.content.push({ type: 'text', text: `### Files\nFiles this browser session saves (screenshots, snapshots, downloads, videos, ` +
+        `traces, relative file names) go to ${this.filesDir}; paths in results are relative to it. The folder is deleted after ` +
+        `${this._retentionDays} days without use: copy anything worth keeping into the project.` });
+    }
     // browser_close disposes the backend; the next call gets a fresh one.
     if (this.backend._disposed)
       this.backend = undefined;

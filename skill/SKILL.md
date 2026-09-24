@@ -112,8 +112,15 @@ affects your current tab. Reset it with `"reset": true` when done. Do not use
 
 ## Files
 
-Snapshots, screenshots, videos and downloads are saved under your working
-directory (`.playwright-mcp/`). Give the user the path when a file matters.
+Everything the browser saves (screenshots, snapshots, downloads, videos,
+traces, and any file you name with a relative path) goes into this chat's own
+files folder, never into the project. The first browser result tells you its
+path; paths in later results are relative to it. Subagents get a subfolder.
+
+- The folder is temporary: it is deleted after a week without use. Copy
+  anything worth keeping into the project yourself (and tell the user where).
+- To upload a project file, pass its absolute path.
+- Give the user the full path when a file matters to them.
 
 ## Report every problem (hard requirement)
 

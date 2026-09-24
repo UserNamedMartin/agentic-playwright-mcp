@@ -16,6 +16,10 @@ export type Profile = {
   // Run only while a matching process is running (regexes over the full
   // command line). Empty or missing: always run.
   activateWith?: { match: string; exclude?: string }[];
+  // Per-chat file folders (default <home>/profiles/<name>/files) and how many
+  // days an unused chat folder is kept (default 7).
+  filesDir?: string;
+  filesRetentionDays?: number;
   stopAfterMs?: number;
 };
 

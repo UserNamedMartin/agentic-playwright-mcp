@@ -27,7 +27,8 @@ export async function runProfile(profile: Profile, options: Options) {
       port: profile.port,
       caps: options.caps ?? profile.caps,
       keepTabsOnExit: options.keepTabsOnExit,
-      outputDir: path.join(homeDir, 'profiles', profile.name, 'output'),
+      filesDir: profile.filesDir ?? path.join(homeDir, 'profiles', profile.name, 'files'),
+      filesRetentionDays: profile.filesRetentionDays,
     });
     await gateway.start();
   };

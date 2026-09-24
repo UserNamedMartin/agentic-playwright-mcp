@@ -18,6 +18,7 @@ import { extraTools } from './tools.js';
 import { renderDashboard } from './dashboard.js';
 import { openInBackgroundBinding, popupInterceptScript } from './popups.js';
 import { TranscriptIndex } from './subagents.js';
+import { cleanFolders, sessionFolder, subagentFolder } from './files.js';
 import { appMimeType, openTabWindowTool, tabLinkHtml, tabLinkResource, tabLinkResourceUri, tabLinkTool } from './apps.js';
 
 export type GatewayOptions = {
@@ -28,8 +29,10 @@ export type GatewayOptions = {
   caps?: string[];
   idleTimeoutMs?: number;
   keepTabsOnExit?: boolean;
-  // Working directory for sessions that did not report one (output files go here).
-  outputDir: string;
+  // Root of the per-chat file folders (see files.ts).
+  filesDir: string;
+  // Chat folders unused this long are deleted.
+  filesRetentionDays?: number;
 };
 
 type Transport = { transport: StreamableHTTPServerTransport; sessionKey: string };
@@ -208,7 +211,8 @@ export class Gateway {
       return session;
     }
     console.error(`session opened: ${info.title} (${info.id}${info.pid ? `, pid ${info.pid}` : ''})`);
-    session = new AgentSession(info, this.shared, this._config, this._tools, this.options.outputDir, this.groups);
+    session = new AgentSession(info, this.shared, this._config, this._tools,
+        sessionFolder(this.options.filesDir, info.id, info.title), this.groups, this._retentionDays);
     this.sessions.set(info.id, session);
     return session;
   }
@@ -265,7 +269,8 @@ export class Gateway {
     let sub = this.sessions.get(id);
     if (!sub) {
       const info: SessionInfo = { id, title: `${session.info.title} · ${caller.description}`.slice(0, 60), pid: session.info.pid, cwd: session.info.cwd };
-      sub = new AgentSession(info, this.shared, this._config, this._tools, this.options.outputDir, this.groups);
+      sub = new AgentSession(info, this.shared, this._config, this._tools,
+          subagentFolder(session.filesDir, caller.agentId, caller.description), this.groups, this._retentionDays);
       this.sessions.set(id, sub);
       console.error(`subagent session opened: ${info.title}`);
     }
@@ -310,7 +315,8 @@ export class Gateway {
       pid: parent.info.pid,
       cwd: parent.info.cwd,
     };
-    const session = new AgentSession(info, this.shared, this._config, this._tools, this.options.outputDir, this.groups);
+    const session = new AgentSession(info, this.shared, this._config, this._tools,
+        subagentFolder(parent.filesDir, handle, label), this.groups, this._retentionDays);
     this.sessions.set(info.id, session);
     return { content: [{ type: 'text', text: `Your agent id is "${handle}". Pass "agent": "${handle}" in every browser call; ` +
       'your tabs live in their own tab group and other agents cannot see them.' }] };
@@ -352,8 +358,20 @@ export class Gateway {
     return false;
   }
 
+  private get _retentionDays() {
+    return this.options.filesRetentionDays ?? 7;
+  }
+
+  private _filesSweptAt = 0;
+
   private async _sweep() {
     const now = Date.now();
+    if (now - this._filesSweptAt > 60 * 60 * 1000) {
+      this._filesSweptAt = now;
+      const inUse = new Set([...this.sessions.values()].map(s => s.filesDir));
+      for (const name of cleanFolders(this.options.filesDir, this._retentionDays * 24 * 60 * 60 * 1000, inUse))
+        console.error(`files: deleted ${name} (unused for ${this._retentionDays} days)`);
+    }
     const idleTimeout = this.options.idleTimeoutMs ?? 24 * 60 * 60 * 1000;
     for (const session of [...this.sessions.values()]) {
       if (!this.sessions.has(session.info.id))

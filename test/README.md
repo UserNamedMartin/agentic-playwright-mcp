@@ -19,6 +19,7 @@ node dist/cli.js start test
 | `subagents.mjs <mcp url>` | several callers in one session, each with its own `tab` |
 | `auto-subagents.mjs <mcp url> <scratch dir>` | automatic subagent detection from fake Claude Code transcripts |
 | `apps.mjs <mcp url> <cdp url>` | MCP Apps tab-link widget, rendered in a fake host page |
+| `files.mjs <mcp url>` | run from a scratch dir: screenshots, snapshots and downloads land in the session's files folder, not in the cwd |
 | `inspect.mjs <cdp url>` | prints the browser's tab groups and tabs |
 | `focus-timeline.mjs <cdp url> <link> [ms]` | macOS, headed profile: front app and window state after opening a link (set `OPEN_ARGS` to pass flags to `open`) |
 
