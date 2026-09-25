@@ -14,7 +14,8 @@ export class SharedBrowser {
   private _seen = new Map<string, Page>();
   private _waiters = new Map<string, (page: Page) => void>();
   // Tabs this gateway created for some session, and creations still in flight.
-  private _created = new Set<string>();
+  // Tabs the gateway opened itself, until they close.
+  _created = new Set<string>();
   private _inFlight = new Set<Promise<unknown>>();
   private _pid: number | undefined;
   private _userFocusAt = 0;
@@ -48,7 +49,10 @@ export class SharedBrowser {
     const shared = new SharedBrowser(browser, context, cdp);
     // Tabs that really close. Pages also emit "close" when the connection
     // drops, which must not cost a session its tabs.
-    cdp.on('Target.targetDestroyed', ({ targetId }) => onTargetDestroyed?.(targetId));
+    cdp.on('Target.targetDestroyed', ({ targetId }) => {
+      shared._created.delete(targetId);
+      onTargetDestroyed?.(targetId);
+    });
     await cdp.send('Target.setDiscoverTargets', { discover: true });
     await shared._openCanary(cdpEndpoint).catch(() => {});
     return shared;

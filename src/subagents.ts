@@ -8,6 +8,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
+const scanChunkBytes = 4 * 1024 * 1024;
+// Tool calls remembered per chat; a lookup is for a call made just now.
+const maxCallers = 5000;
+
 export type Caller = { kind: 'main' } | { kind: 'subagent'; agentId: string; description: string };
 
 export class TranscriptIndex {
@@ -18,15 +22,20 @@ export class TranscriptIndex {
   private _callers = new Map<string, Caller>();
   private _descriptions = new Map<string, string>();
   private _customTitle: string | undefined;
+  private _scanning: Promise<void> | undefined;
 
-  constructor(configDir: string, sessionId: string) {
+  private _onTitleChange: (() => void) | undefined;
+
+  // onTitleChange: a /rename was found by a background scan.
+  constructor(configDir: string, sessionId: string, onTitleChange?: () => void) {
     this._configDir = configDir;
     this._sessionId = sessionId;
+    this._onTitleChange = onTitleChange;
   }
 
   async lookup(toolUseId: string): Promise<Caller | undefined> {
     for (let attempt = 0; attempt < 5; attempt++) {
-      this._scan();
+      await this._scanSoon();
       const caller = this._callers.get(toolUseId);
       if (caller)
         return caller;
@@ -36,16 +45,28 @@ export class TranscriptIndex {
   }
 
   // The chat's title as set with /rename in the Claude Code CLI, if any.
+  // Returns what is known now; a scan for newer lines starts in the
+  // background and the next call sees its result.
   customTitle(): string | undefined {
-    this._scan();
+    void this._scanSoon().catch(() => {});
     return this._customTitle;
   }
 
-  private _scan() {
+  // One scan at a time; callers during a scan wait for it.
+  private _scanSoon(): Promise<void> {
+    const before = this._customTitle;
+    return this._scanning ??= this._scan().finally(() => {
+      this._scanning = undefined;
+      if (this._customTitle !== before)
+        this._onTitleChange?.();
+    });
+  }
+
+  private async _scan() {
     const dir = this._findDir();
     if (!dir)
       return;
-    this._scanFile(path.join(dir, `${this._sessionId}.jsonl`), { kind: 'main' });
+    await this._scanFile(path.join(dir, `${this._sessionId}.jsonl`), { kind: 'main' });
     const subagentsDir = path.join(dir, this._sessionId, 'subagents');
     let files: string[] = [];
     try {
@@ -58,44 +79,66 @@ export class TranscriptIndex {
       if (!match)
         continue;
       const agentId = match[1];
-      this._scanFile(path.join(subagentsDir, file), { kind: 'subagent', agentId, description: this._description(subagentsDir, agentId) });
+      await this._scanFile(path.join(subagentsDir, file), { kind: 'subagent', agentId, description: this._description(subagentsDir, agentId) });
     }
   }
 
-  // Reads only what was appended since the last scan, up to the last full line.
-  private _scanFile(file: string, caller: Caller) {
+  // Reads only what was appended since the last scan, up to the last full
+  // line, in chunks and without blocking: long chats have transcripts of
+  // 100 MB and more, and every session shares this process.
+  private async _scanFile(file: string, caller: Caller) {
     let size: number;
     try {
-      size = fs.statSync(file).size;
+      size = (await fs.promises.stat(file)).size;
     } catch {
       return;
     }
-    const offset = this._offsets.get(file) ?? 0;
+    let offset = this._offsets.get(file) ?? 0;
     if (size <= offset)
       return;
-    const fd = fs.openSync(file, 'r');
+    const handle = await fs.promises.open(file, 'r');
     try {
-      const buffer = Buffer.alloc(size - offset);
-      fs.readSync(fd, buffer, 0, buffer.length, offset);
-      const lastNewline = buffer.lastIndexOf(0x0a);
-      if (lastNewline < 0)
-        return;
-      const text = buffer.subarray(0, lastNewline + 1).toString('utf8');
-      for (const line of text.split('\n')) {
-        if (caller.kind === 'main' && line.includes('"custom-title"'))
-          this._customTitle = customTitle(line) ?? this._customTitle;
-        if (!line.includes('"tool_use"'))
+      let carry = Buffer.alloc(0);
+      while (offset + carry.length < size) {
+        const chunk = Buffer.alloc(Math.min(scanChunkBytes, size - offset - carry.length));
+        const { bytesRead } = await handle.read(chunk, 0, chunk.length, offset + carry.length);
+        if (!bytesRead)
+          break;
+        const data = Buffer.concat([carry, chunk.subarray(0, bytesRead)]);
+        const lastNewline = data.lastIndexOf(0x0a);
+        if (lastNewline < 0) {
+          carry = data;
           continue;
-        for (const id of toolUseIds(line)) {
-          // A subagent attribution always wins over the main transcript.
-          if (caller.kind === 'main' && this._callers.get(id)?.kind === 'subagent')
-            continue;
-          this._callers.set(id, caller);
         }
+        this._indexLines(data.subarray(0, lastNewline + 1).toString('utf8'), caller);
+        offset += lastNewline + 1;
+        this._offsets.set(file, offset);
+        carry = data.subarray(lastNewline + 1);
       }
-      this._offsets.set(file, offset + lastNewline + 1);
     } finally {
-      fs.closeSync(fd);
+      await handle.close();
+    }
+  }
+
+  private _indexLines(text: string, caller: Caller) {
+    for (const line of text.split('\n')) {
+      if (caller.kind === 'main' && line.includes('"custom-title"'))
+        this._customTitle = customTitle(line) ?? this._customTitle;
+      if (!line.includes('"tool_use"'))
+        continue;
+      for (const id of toolUseIds(line)) {
+        // A subagent attribution always wins over the main transcript.
+        if (caller.kind === 'main' && this._callers.get(id)?.kind === 'subagent')
+          continue;
+        this._callers.delete(id);
+        this._callers.set(id, caller);
+      }
+    }
+    // Lookups are for calls being made now; the oldest ids can go.
+    for (const id of this._callers.keys()) {
+      if (this._callers.size <= maxCallers)
+        break;
+      this._callers.delete(id);
     }
   }
 

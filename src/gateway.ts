@@ -603,7 +603,7 @@ export class Gateway implements SessionHost {
       return undefined;
     let index = this._transcripts.get(root.info.id);
     if (!index) {
-      index = new TranscriptIndex(configDir, claudeSessionId);
+      index = new TranscriptIndex(configDir, claudeSessionId, () => this._refreshTitles());
       this._transcripts.set(root.info.id, index);
     }
     return index;
@@ -945,6 +945,9 @@ export class Gateway implements SessionHost {
       console.error(`session closed: ${session.info.title} (${session.targets.size} tab(s))`);
     this.sessions.delete(session.info.id);
     this._transcripts.delete(session.info.id);
+    const chat = session.info.desktopChat;
+    if (chat && ![...this.sessions.values()].some(s => s.info.desktopChat === chat))
+      this._desktopChats.delete(chat);
     for (const [id, entry] of this._transports) {
       if (entry.sessionKey === session.info.id) {
         this._transports.delete(id);
