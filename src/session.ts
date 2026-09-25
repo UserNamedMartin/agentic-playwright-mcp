@@ -5,11 +5,12 @@
 // background.
 import fs from 'node:fs';
 import path from 'node:path';
-import type { Page } from 'playwright-core';
+import type { CDPSession, Page } from 'playwright-core';
 import type { SharedBrowser } from './browser.js';
 import type { TabGroups } from './groups.js';
 import { touchFolder } from './files.js';
 import { pwTools, verifyContext } from './internals.js';
+import { releaseContextWide } from './scoped.js';
 import { describePasskeyRequests, type PasskeyRequest } from './passkeys.js';
 import type { PermissionRequest } from './permissions.js';
 
@@ -257,6 +258,30 @@ export class AgentSession {
     }
   }
 
+  // Offline mode of this session's tabs (browser_network_state_set). Set per
+  // page over CDP: the stock tool sets it on the whole shared context.
+  offline = false;
+  private _networkSessions = new Map<Page, CDPSession>();
+
+  async setOffline(offline: boolean) {
+    this.offline = offline;
+    for (const page of this.owned)
+      await this._emulateOffline(page, offline);
+  }
+
+  async _emulateOffline(page: Page, offline: boolean) {
+    let cdp = this._networkSessions.get(page);
+    if (!cdp) {
+      if (!offline)
+        return;
+      cdp = await page.context().newCDPSession(page);
+      this._networkSessions.set(page, cdp);
+      page.once('close', () => this._networkSessions.delete(page));
+      await cdp.send('Network.enable');
+    }
+    await cdp.send('Network.emulateNetworkConditions', { offline, latency: 0, downloadThroughput: -1, uploadThroughput: -1 });
+  }
+
   private _queue: Promise<unknown> = Promise.resolve();
   private _running: { name: string; since: number } | undefined;
 
@@ -359,6 +384,7 @@ export class AgentSession {
       for (const page of pages)
         await page.close().catch(() => {});
     }
+    await releaseContextWide(this, this._shared.context).catch(() => {});
     await backend?.dispose().catch(() => {});
   }
 
@@ -409,6 +435,55 @@ export class AgentSession {
       await session._groups?.addPage(session, page).catch(() => {});
       this._currentTab = this._tabs.find((tab: any) => tab.page === page);
       return this._currentTab;
+    };
+
+    // The stock versions of the following act on every page of the shared
+    // browser context; here they act on this session's tabs only.
+    context._agentSession = session;
+
+    context.addRoute = async function(entry: any) {
+      await this.ensureBrowserContext();
+      for (const tab of this._tabs)
+        await tab.page.route(entry.pattern, entry.handler);
+      this._routes.push(entry);
+    };
+
+    context.removeRoute = async function(pattern?: string) {
+      const removed = this._routes.filter((route: any) => !pattern || route.pattern === pattern);
+      for (const route of removed) {
+        for (const tab of this._tabs)
+          await tab.page.unroute(route.pattern, route.handler).catch(() => {});
+      }
+      this._routes = this._routes.filter((route: any) => !removed.includes(route));
+      return removed.length;
+    };
+
+    context.startVideoRecording = async function(fileName: string, params: any) {
+      if (this._video)
+        throw new Error('Video recording has already been started.');
+      this._video = { params, fileName, fileNames: [] };
+      for (const tab of this._tabs)
+        await this._startPageVideo(tab.page);
+    };
+
+    context.stopVideoRecording = async function() {
+      if (!this._video)
+        return [];
+      const video = this._video;
+      this._video = undefined;
+      for (const page of session.owned)
+        await page.screencast.stop().catch(() => {});
+      return [...video.fileNames];
+    };
+
+    // New tabs of the session get its routes and network state too.
+    const onPageCreated = context._onPageCreated.bind(context);
+    context._onPageCreated = function(page: Page) {
+      onPageCreated(page);
+      for (const route of this._routes)
+        void page.route(route.pattern, route.handler).catch(() => {});
+      if (session.offline)
+        void session._emulateOffline(page, true).catch(() => {});
     };
 
     // Stock selectTab calls page.bringToFront(), which raises the window.

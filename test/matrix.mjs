@@ -299,13 +299,18 @@ try {
 
   // Tracing.
   works('browser_start_tracing', await A.call('browser_start_tracing'));
+  // Tracing covers the whole context: one chat at a time, and the others are
+  // told who has it instead of stopping someone else's trace.
   const traceB = await B.call('browser_start_tracing');
-  expect('browser_start_tracing', 'B can trace while A does', !traceB.isError, traceB.text);
-  if (!traceB.isError)
-    await B.call('browser_stop_tracing');
+  expect('browser_start_tracing', 'B is told another chat is tracing', traceB.isError && traceB.text.includes('chat-A'), traceB.text);
+  const stopB = await B.call('browser_stop_tracing');
+  expect('browser_stop_tracing', 'B cannot stop A\'s trace', stopB.isError && stopB.text.includes('chat-A'), stopB.text);
   const stopA = await A.call('browser_stop_tracing');
   works('browser_stop_tracing', stopA, 'A stops its own trace');
   expect('browser_stop_tracing', 'A\'s trace saved in A\'s folder', !stopA.text.includes('chat-B'), stopA.text);
+  const traceB2 = await B.call('browser_start_tracing');
+  expect('browser_start_tracing', 'B can trace once A stopped', !traceB2.isError, traceB2.text, 'BROKEN');
+  await B.call('browser_stop_tracing');
 
   // Video.
   works('browser_start_video', await A.call('browser_start_video', {}));
@@ -318,12 +323,20 @@ try {
   const videos = video.text.match(/\.webm/g)?.length ?? 0;
   expect('browser_start_video', 'records only A\'s tabs', videos <= 1, `${videos} videos for 1 tab`);
 
-  // Recorder.
+  // Recorder: it can only be enabled on the whole context, so its (hidden)
+  // overlay reaches B's pages; what matters is that B keeps working and that
+  // A's recording holds only A's actions.
   works('browser_start_recording', await A.call('browser_start_recording'));
   await sleep(500);
-  const recB = await B.eval('() => [...document.querySelectorAll("*")].some(e => e.tagName.startsWith("X-PW"))');
-  expect('browser_start_recording', 'no recorder UI in B', recB === false, 'recorder overlay injected into B\'s page');
-  works('browser_stop_recording', await A.call('browser_stop_recording'));
+  const recB = await B.eval('() => [...new Set([...document.querySelectorAll("*")].map(e => e.tagName).filter(t => t.startsWith("X-PW")))].join(",") || false');
+  record('browser_start_recording', 'recorder overlay in B\'s page', recB ? 'note' : 'ok', recB ? `${recB} (context-wide in Playwright)` : '');
+  await B.eval('() => { window.__clicks = 0; return 1; }');
+  await B.call('browser_click', { element: 'Go', target: '#b' });
+  expect('browser_start_recording', 'B\'s clicks still reach B\'s page', (await B.eval('() => window.__clicks')) === 1, 'click swallowed by the recorder', 'BROKEN');
+  await A.call('browser_click', { element: 'Go', target: '#b' });
+  const recording = await A.call('browser_stop_recording');
+  works('browser_stop_recording', recording);
+  expect('browser_start_recording', 'A\'s recording has no B actions', !/localhost|who=B/.test(recording.text), recording.text);
   const resume = await A.call('browser_resume', {});
   record('browser_resume', 'answers when nothing is paused', !resume.protocolError && /not paused/i.test(resume.text) ? 'ok' : 'BROKEN', resume.text);
 
@@ -391,8 +404,11 @@ try {
   if (!leftTrace.isError)
     await B.call('browser_stop_tracing');
   await B.call('browser_navigate', { url: `${urlB}&after=1` });
-  const leftRec = await B.eval('() => [...document.querySelectorAll("*")].some(e => e.tagName.startsWith("X-PW"))');
-  expect('browser_start_recording', 'recorder off when its chat ends', leftRec === false, 'recorder still injected into new pages');
+  await B.eval('() => { window.__clicks = 0; return 1; }');
+  await B.call('browser_click', { element: 'Go', target: '#b' });
+  expect('browser_start_recording', 'recorder off when its chat ends (clicks reach B)', (await B.eval('() => window.__clicks')) === 1, 'click swallowed');
+  const glass = await B.eval('() => { const g = document.querySelector("x-pw-glass"); return g ? getComputedStyle(g).display + "/" + getComputedStyle(g).pointerEvents : "none-left"; }');
+  expect('browser_start_recording', 'recorder overlay inert when its chat ends', /^none|\/none$|none-left/.test(glass), `x-pw-glass is ${glass}`);
   const leftPages = (await cdpPages()).filter(p => p.url.includes('l=1')).length;
   expect('(session end)', 'its tabs are closed', leftPages === 0, `${leftPages} tab(s) left`, 'BROKEN');
 

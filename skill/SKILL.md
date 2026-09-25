@@ -139,9 +139,10 @@ Cookies, local storage and logins are shared. The cookie and storage-state
 tools only act on the sites open in your own tabs (cookie list and delete take
 a `domain` for another site), so they cannot wipe or export other chats'
 logins. Still, unless the user asks for it, do not clear cookies or storage or
-load a storage state. Anything else that acts on the whole browser context
-(`browser_route`, network offline mode, tracing, the recorder) affects every
-other agent too: do not use it unless asked.
+load a storage state. `browser_route`, offline mode and video only act on your
+own tabs. Tracing and the action recorder cover the whole browser, so only one
+chat at a time can use them (you are told which chat has them); they stop when
+that chat ends.
 
 ## Phones and screen sizes
 

@@ -33,7 +33,69 @@ async function removeCookies(browserContext: BrowserContext, cookies: Cookie[]) 
     await browserContext.clearCookies({ name: c.name, domain: c.domain, path: c.path });
 }
 
-const replacements: Record<string, { description?: string; inputSchema?: any; handle: (context: any, params: any, response: any) => Promise<void> }> = {
+// Tracing and the recorder can only work on the whole browser context, so one
+// session at a time may use them; they stop when that session ends.
+type ContextWide = 'tracing' | 'recording';
+const owners = new WeakMap<object, Partial<Record<ContextWide, any>>>();
+const ownersOf = (browserContext: object) => {
+  let entry = owners.get(browserContext);
+  if (!entry)
+    owners.set(browserContext, entry = {});
+  return entry;
+};
+
+function exclusiveStart(kind: ContextWide, what: string) {
+  return async (context: any, params: any, response: any, original: any) => {
+    const entry = ownersOf(await context.ensureBrowserContext());
+    const owner = entry[kind];
+    if (owner && owner !== context._agentSession)
+      throw new Error(`Another chat (${owner.info.title}) is using ${what} right now; it covers the whole shared browser, so only one chat at a time can. Try again later.`);
+    await original(context, params, response);
+    entry[kind] = context._agentSession;
+  };
+}
+
+function exclusiveStop(kind: ContextWide, what: string) {
+  return async (context: any, params: any, response: any, original: any) => {
+    const entry = ownersOf(await context.ensureBrowserContext());
+    const owner = entry[kind];
+    if (owner && owner !== context._agentSession)
+      throw new Error(`${what} was started by another chat (${owner.info.title}); only that chat can stop it.`);
+    if (!owner && kind === 'tracing')
+      throw new Error('Tracing is not started');
+    await original(context, params, response);
+    delete entry[kind];
+  };
+}
+
+// Called when a session ends: stops whatever context-wide thing it left on.
+export async function releaseContextWide(session: any, browserContext: any) {
+  const entry = owners.get(browserContext);
+  if (!entry)
+    return;
+  if (entry.tracing === session) {
+    delete entry.tracing;
+    await browserContext.tracing.stop().catch(() => {});
+  }
+  if (entry.recording === session) {
+    delete entry.recording;
+    await browserContext._disableRecorder?.().catch(() => {});
+  }
+}
+
+const replacements: Record<string, { description?: string; inputSchema?: any; handle: (context: any, params: any, response: any, original: any) => Promise<void> }> = {
+  browser_network_state_set: {
+    description: 'Take your tabs offline or back online. Other chats share this browser and are not affected.',
+    handle: async (context, params, response) => {
+      await context._agentSession.setOffline(params.state === 'offline');
+      response.addTextResult(`Network is now ${params.state} in your tabs`);
+      response.addCode(`await page.context().setOffline(${params.state === 'offline'});`);
+    },
+  },
+  browser_start_tracing: { handle: exclusiveStart('tracing', 'tracing') },
+  browser_stop_tracing: { handle: exclusiveStop('tracing', 'Tracing') },
+  browser_start_recording: { handle: exclusiveStart('recording', 'the action recorder') },
+  browser_stop_recording: { handle: exclusiveStop('recording', 'The action recorder') },
   browser_cookie_list: {
     description: 'List the cookies of the sites open in your tabs (or of "domain", if given). Other chats share this browser, so other sites are left out by default.',
     handle: async (context, params, response) => {
@@ -151,7 +213,7 @@ export function scopeTools(tools: any[]) {
         description: replacement.description ?? tool.schema.description,
         inputSchema: replacement.inputSchema ?? tool.schema.inputSchema,
       },
-      handle: replacement.handle,
+      handle: (context: any, params: any, response: any) => replacement.handle(context, params, response, tool.handle),
     };
   });
 }
