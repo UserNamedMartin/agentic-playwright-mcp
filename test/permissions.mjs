@@ -80,12 +80,21 @@ try {
   await sleep(500);
   check('deny reaches the waiting page', (await pageLog()).includes('notif=denied'), denied.split('\n')[1]);
 
-  await click('mic');
-  await sleep(300);
-  await call('browser_permission', { decision: 'allow', permissions: ['microphone'] });
-  await sleep(1000);
-  const mic = (await pageLog()).match(/mic=(\S+)/)?.[1];
-  check('allow reaches the waiting page', mic && mic !== 'NotAllowedError', `mic=${mic}`);
+  // Wait for the request to be reported before answering it, and for the page
+  // to get its answer: getUserMedia can take a while in a headless browser.
+  const micClick = await click('mic');
+  let micNote = notes(micClick);
+  for (let i = 0; i < 20 && !/microphone/.test(micNote); i++) {
+    await sleep(250);
+    micNote = notes(await call('browser_snapshot'));
+  }
+  const allowed = await call('browser_permission', { decision: 'allow', permissions: ['microphone'] });
+  let mic;
+  for (let i = 0; i < 25 && !mic; i++) {
+    await sleep(200);
+    mic = (await pageLog()).match(/mic=(\S+)/)?.[1];
+  }
+  check('allow reaches the waiting page', mic && mic !== 'NotAllowedError', `mic=${mic}; request: ${micNote.split('\n')[1]}; answer: ${allowed.split('\n')[1]}`);
 
   // Not held (needs a fresh click): refused at once, reported, works after allowing.
   const fontsClick = await click('fonts');

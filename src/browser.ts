@@ -35,8 +35,12 @@ export class SharedBrowser {
     context.on('page', page => void this._onPage(page));
   }
 
-  static async connect(cdpEndpoint: string, onTargetDestroyed?: (targetId: string) => void): Promise<SharedBrowser> {
-    const browser: Browser = await playwright.chromium.connectOverCDP(cdpEndpoint);
+  // onConnected hears of the connection as soon as it exists, so a caller
+  // that gives up on a stalled setup can close it.
+  static async connect(cdpEndpoint: string, onTargetDestroyed?: (targetId: string) => void,
+    onConnected?: (browser: Browser) => void): Promise<SharedBrowser> {
+    const browser: Browser = await playwright.chromium.connectOverCDP(cdpEndpoint, { timeout: 15_000 });
+    onConnected?.(browser);
     const context = browser.contexts()[0];
     if (!context)
       throw new Error(`No default browser context at ${cdpEndpoint}`);
@@ -53,7 +57,7 @@ export class SharedBrowser {
   // A second, idle DevTools connection. When the main one drops, its state
   // tells whether the browser closed every client or only ours.
   private async _openCanary(cdpEndpoint: string) {
-    const res = await fetch(`${cdpEndpoint}/json/version`);
+    const res = await fetch(`${cdpEndpoint}/json/version`, { signal: AbortSignal.timeout(5000) });
     const { webSocketDebuggerUrl } = await res.json() as { webSocketDebuggerUrl: string };
     const socket = new ws(webSocketDebuggerUrl);
     socket.on('close', (code: number, reason: Buffer) => this._canaryClosed = `closed with code ${code}${reason.length ? ` (${reason})` : ''}`);

@@ -12,7 +12,7 @@
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
-import type { Page } from 'playwright-core';
+import type { Browser, Page } from 'playwright-core';
 import crypto from 'node:crypto';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
@@ -87,6 +87,9 @@ export class Gateway implements SessionHost {
   private _ready: Promise<void> = Promise.resolve();
   // Counts dropped browser connections, to tell which calls one cut off.
   private _connection = 0;
+  // The connection an attach attempt is setting up, and the ones given up.
+  private _attaching: Browser | undefined;
+  private _abandoned = new WeakSet<Browser>();
   private _desktopChats = new Map<string, DesktopChatFile>();
   private _saveTimer: NodeJS.Timeout | undefined;
   private _permissions: PermissionDecision[] = [];
@@ -115,7 +118,7 @@ export class Gateway implements SessionHost {
     await new Promise<void>(resolve => this._server!.listen(this.options.port, this.options.host ?? '127.0.0.1', resolve));
     const saved = this._loadState();
     this._permissions = this._loadPermissions();
-    this._ready = this._attach(saved);
+    this._ready = this._attachBounded(saved);
     await this._ready;
     this._sweeper = setInterval(() => void this._sweep(), 15_000);
     this._sweeper.unref();
@@ -145,7 +148,8 @@ export class Gateway implements SessionHost {
   // Connects to the browser and sets everything up on it. Runs at startup
   // and again after the connection drops.
   private async _attach(saved?: SavedSession[]) {
-    const shared = await SharedBrowser.connect(this.options.cdpEndpoint, targetId => this._onTargetDestroyed(targetId));
+    const shared = await SharedBrowser.connect(this.options.cdpEndpoint, targetId => this._onTargetDestroyed(targetId),
+        connecting => this._attaching = connecting);
     shared.browser.on('disconnected', () => this._onDisconnected(shared));
     this.shared = shared;
     const groups = new TabGroups(shared);
@@ -168,11 +172,37 @@ export class Gateway implements SessionHost {
     await this._applyDockTile();
   }
 
+  // Most setup calls have no timeout of their own: a browser that takes the
+  // connection but never answers one would leave every session waiting on
+  // `_ready` for good. An attempt that takes too long is given up (its
+  // connection closed, so its pending calls fail) and the caller retries.
+  private async _attachBounded(saved?: SavedSession[]) {
+    let timer: NodeJS.Timeout | undefined;
+    const attempt = this._attach(saved);
+    attempt.catch(() => {});
+    const stalled = new Promise<never>((_, reject) => timer = setTimeout(() => reject(new Error(
+        `setting up the browser connection took over ${attachTimeoutMs / 1000} s`)), attachTimeoutMs));
+    try {
+      await Promise.race([attempt, stalled]);
+    } catch (e) {
+      const connection = this._attaching;
+      if (connection) {
+        this._abandoned.add(connection);
+        console.error(`gave up on a stalled attempt to set up the browser connection: ${(e as Error).message}`);
+        await connection.close().catch(() => {});
+      }
+      throw e;
+    } finally {
+      clearTimeout(timer);
+      this._attaching = undefined;
+    }
+  }
+
   // The browser itself usually lives on (it does when a Mac's display turns
   // off), so reconnect and keep every session's tabs. If it is really gone,
   // exit and let the supervisor start a new one.
   private _onDisconnected(shared: SharedBrowser) {
-    if (this._stopping || shared !== this.shared)
+    if (this._stopping || shared !== this.shared || this._abandoned.has(shared.browser))
       return;
     console.error('browser connection lost; reconnecting');
     // Whether the browser dropped every DevTools client or only ours.
@@ -190,7 +220,7 @@ export class Gateway implements SessionHost {
     let lastError: unknown;
     while (Date.now() < deadline && !this._stopping) {
       try {
-        await this._attach();
+        await this._attachBounded();
         const tabs = [...this.sessions.values()].reduce((n, s) => n + s.targets.size, 0);
         console.error(`reconnected to the browser; ${tabs} agent tab(s) kept`);
         return;
@@ -706,7 +736,7 @@ export class Gateway implements SessionHost {
 
   private async _dispatch(session: AgentSession, request: any, extra: any) {
     {
-      await this._ready;
+      await untilAborted(this._ready, extra.signal);
       const { agent, ...args } = (request.params.arguments ?? {}) as Record<string, any>;
       if (request.params.name === subagentTool.name)
         return this._startSubagent(session, String(args.label ?? 'subagent'));
@@ -976,6 +1006,25 @@ function safeOrigin(url: string) {
     return origin === 'null' ? '' : origin;
   } catch {
     return '';
+  }
+}
+
+// Longest time one attempt to set up the browser connection may take.
+const attachTimeoutMs = 15_000;
+
+// Waits for `promise`, or rejects as soon as the agent cancels the call.
+async function untilAborted<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal)
+    return await promise;
+  signal.throwIfAborted();
+  let onAbort: (() => void) | undefined;
+  try {
+    return await Promise.race([promise, new Promise<never>((_, reject) => {
+      onAbort = () => reject(signal.reason ?? new Error('cancelled'));
+      signal.addEventListener('abort', onAbort, { once: true });
+    })]);
+  } finally {
+    signal.removeEventListener('abort', onAbort!);
   }
 }
 
