@@ -87,6 +87,25 @@ copies, no other browser tools, and no carrying on with partial data as if
 nothing happened. Logins are shared by all chats of this setup, so one sign-in
 fixes it for every agent.
 
+## Permission requests (camera, microphone, location, notifications, ...)
+
+The browser never shows permission prompts. When a page asks for a
+permission, your tool result gets a "Permission requests" section saying which
+tab and site asked for what. Answer it with `browser_permission` (`decision`
+"allow" or "deny"; without `permissions` it answers all open requests):
+
+- Camera, microphone, location, notifications and MIDI requests wait up to two
+  minutes for your answer; answer right away and the page gets it.
+- Other requests (clipboard, fonts, ...) are refused at once; if the task needs
+  them, allow and repeat the action that asked.
+- Allow only what the task needs. Deny notifications unless the task is about
+  them. Never allow camera or microphone just to get past a page; ask the user
+  if unsure.
+- You can also allow ahead of time: `browser_permission` with `permissions`
+  (and `origin`, or with the site open in the current tab).
+
+Decisions apply to the whole site for every chat of this setup.
+
 ## Showing pages to the user
 
 - When the user should look at or act in a page (a captcha, a consent screen, a

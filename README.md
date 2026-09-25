@@ -51,6 +51,11 @@ Stock Playwright MCP is built for one agent at a time:
   keeps its tabs; a restarted gateway gets them back too.
 - **Cleanup**: a session's tabs close when its client process exits or after a
   day without browser use.
+- **Permission requests reach the agent**: nobody sees permission prompts in a
+  hidden browser, so pages used to wait forever. The browser refuses to prompt;
+  requests show up in the agent's tool results and the agent answers them with
+  `browser_permission` (camera, microphone, location and notifications wait
+  for the answer).
 - **Per-tab device emulation**: `browser_emulate_device` emulates a phone in
   one tab without affecting other agents.
 - **Dock badges** (macOS): each profile's browser icon carries a short label
@@ -212,6 +217,11 @@ the gateway created). Change the location or the retention with `filesDir` and
   gateway puts a new hidden window back. Use the yellow button or Cmd+H instead.
 - The browser's icon stays in the Dock while it runs (it is a normal Chrome).
 - `browser_pdf_save` only works in headless profiles.
+- Permission decisions are per site and shared by every session. The browser
+  forgets decisions made over DevTools when the connection closes, so the
+  gateway keeps them (in `sessions.json`) and sets them again. Requests the
+  page script cannot see (local network access, for example) are refused
+  silently; agents can allow them ahead of time with `browser_permission`.
 
 ## Commands
 

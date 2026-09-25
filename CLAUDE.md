@@ -14,6 +14,7 @@ Read README.md first for what the project does. This file is about changing it.
 - `src/subagents.ts` — Claude Code subagent detection from transcripts.
 - `src/files.ts` — per-chat file folders and their weekly cleanup.
 - `src/apps.ts` — MCP Apps tab-link widget; `src/tools.ts` — extra tools.
+- `src/permissions.ts` — permission requests: page hooks, notices, names.
 - `src/identity.ts` — `headersHelper` output (who is connecting).
 - `src/titles.ts` — current chat titles (Claude desktop chat files); CLI
   `/rename` titles come from `subagents.ts`.
@@ -51,7 +52,9 @@ Read README.md first for what the project does. This file is about changing it.
 
 ## Checking changes
 
-`npm run build`, then `node test/reconnect.mjs` (self-contained, headless)
+`npm run build`, then `node test/reconnect.mjs` and `node test/permissions.mjs`
+(self-contained, headless; headless Chrome grants some permissions by itself,
+so check permission changes in a headed profile too)
 and a throwaway headless profile with the other scripts in `test/` (see
 test/README.md). Anything that opens windows or moves focus needs
 a headed profile, and on someone's machine, their go-ahead first.
