@@ -64,4 +64,5 @@ Read README.md first for what the project does. This file is about changing it.
 so check permission changes in a headed profile too)
 and a throwaway headless profile with the other scripts in `test/` (see
 test/README.md). Anything that opens windows or moves focus needs
-a headed profile, and on someone's machine, their go-ahead first.
+a headed profile, and on someone's machine, their go-ahead first:
+`node test/headed.mjs` covers the fork copies and passkeys that way.

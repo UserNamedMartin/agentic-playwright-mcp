@@ -18,6 +18,7 @@ node dist/cli.js start test
 | `permissions.mjs [browser]` | self-contained, pass/fail: permission requests are reported, answered with `browser_permission`, held ones wait, unanswered ones time out |
 | `passkeys.mjs [browser]` | self-contained, pass/fail: passkey requests in a browser nobody can see are cancelled at once and reported; passkey autofill is left alone |
 | `forks.mjs [browser]` | self-contained, pass/fail: a chat forked in the Claude desktop app (fake chat files via `AGENTIC_CLAUDE_APP_SUPPORT`) starts with copies of the original chat's tabs, history and sessionStorage included; the original keeps its own |
+| `headed.mjs [browser]` | macOS, self-contained, **shows a window near the end** (run it only with the go-ahead of whoever is at the screen), pass/fail: copying a fork's tabs keeps the hidden browser hidden, minimized and in the background; passkey requests are cancelled while hidden and reach the browser's (on macOS the system's) passkey prompt once the window is in front. `SCREENSHOT=<file.png>` saves the screen with that prompt |
 | `e2e-client.mjs <mcp url> <session id> <title>` | one session: navigate, click, second tab, isolation, tab link, device emulation. Run several in parallel for concurrency |
 | `features.mjs <mcp url>` | `target=_blank` links become background tabs; manual subagent sessions |
 | `subagents.mjs <mcp url>` | several callers in one session, each with its own `tab` |
