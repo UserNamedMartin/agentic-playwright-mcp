@@ -29,6 +29,7 @@ import { cleanFolders, sessionFolder, subagentFolder } from './files.js';
 import { baseIcon, renderDockIcon } from './docktile.js';
 import { appMimeType, openTabWindowTool, tabLinkHtml, tabLinkResource, tabLinkResourceUri, tabLinkTool } from './apps.js';
 import { DesktopChatFile } from './titles.js';
+import { passkeyBinding, passkeyScript, type PasskeyRequest } from './passkeys.js';
 import { describeRequests, holdMs, permissionBinding, permissionScript, permissionTypes, type PermissionRequest } from './permissions.js';
 
 export type GatewayOptions = {
@@ -155,6 +156,9 @@ export class Gateway implements SessionHost {
     await shared.context.exposeBinding(permissionBinding, async ({ page, frame }: { page: Page; frame: any }, request: any) =>
       await this._onPermissionRequest(page, frame.url(), request));
     await shared.context.addInitScript({ content: permissionScript });
+    await shared.context.exposeBinding(passkeyBinding, async ({ page, frame }: { page: Page; frame: any }, request: any) =>
+      await this._onPasskeyRequest(page, frame.url(), request));
+    await shared.context.addInitScript({ content: passkeyScript });
     for (const decision of this._permissions)
       await shared.setPermission(decision).catch(() => {});
     await this._setUpTabs(saved);
@@ -376,6 +380,25 @@ export class Gateway implements SessionHost {
         }
       }, holdMs).unref();
     });
+  }
+
+  // A page asks for a passkey (see passkeys.ts): 'cancel' when nobody can see
+  // the browser to answer the prompt, else 'proceed'.
+  private async _onPasskeyRequest(page: Page, frameUrl: string, raw: any): Promise<'cancel' | 'proceed'> {
+    const owner = [...this.sessions.values()].find(session => session.owned.has(page));
+    const kind = raw?.kind === 'create' ? 'create' : 'get';
+    const visible = await this.shared.userCanSee(page).catch(() => false);
+    const request: PasskeyRequest = {
+      page,
+      tab: (await this.shared.targetId(page).catch(() => '')).slice(0, 8),
+      origin: safeOrigin(page.url()),
+      frameOrigin: safeOrigin(frameUrl) || safeOrigin(page.url()),
+      kind,
+      cancelled: !visible,
+    };
+    owner?.passkeyRequests.push(request);
+    console.error(`passkey request (${kind}) in ${owner?.info.title ?? 'an unowned tab'}: ${request.frameOrigin}${visible ? ' (window in front, passed on)' : ' (cancelled)'}`);
+    return visible ? 'proceed' : 'cancel';
   }
 
   // SessionHost: what the agent should hear about in its next tool result.

@@ -282,6 +282,20 @@ export class SharedBrowser {
     });
   }
 
+  // Whether someone could be looking at this tab's window: the browser is
+  // headed, not hidden, and the window is not minimized. Pages cannot tell by
+  // themselves (document.visibilityState stays "visible" in the hidden browser).
+  async userCanSee(page: Page): Promise<boolean> {
+    if (await this.isHeadless())
+      return false;
+    const pid = await this.pid();
+    if (pid && process.platform === 'darwin' && isHiddenPid(pid))
+      return false;
+    const windowId = await this.windowIdFor(await this.targetId(page));
+    const { bounds } = await this._cdp.send('Browser.getWindowBounds', { windowId });
+    return bounds.windowState !== 'minimized';
+  }
+
   async setPermission({ type, setting, origin, embeddedOrigin }: { type: string; setting: 'granted' | 'denied'; origin: string; embeddedOrigin: string }) {
     await this._cdp.send('Browser.setPermission', { permission: { name: type }, setting, origin, embeddedOrigin } as any);
   }

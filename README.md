@@ -56,6 +56,11 @@ Stock Playwright MCP is built for one agent at a time:
   requests show up in the agent's tool results and the agent answers them with
   `browser_permission` (camera, microphone, location and notifications wait
   for the answer).
+- **Passkey requests do not hang**: a passkey prompt in the hidden browser has
+  nobody to answer it, so sites used to wait until they timed out. While nobody
+  can see the browser, passkey requests are cancelled at once (the site then
+  offers its other ways to sign in) and the agent is told; with the window in
+  front (after a tab link) they go through to the browser as usual.
 - **Per-tab device emulation**: `browser_emulate_device` emulates a phone in
   one tab without affecting other agents.
 - **Dock badges** (macOS): each profile's browser icon carries a short label
@@ -102,6 +107,10 @@ with `agentic-playwright-mcp open work`, or click a tab link an agent gives you.
 Some sites (Google in particular) may refuse to sign in while the browser is
 under remote control; then run `agentic-playwright-mcp login work`, which opens
 the same profile as a plain browser, and quit it when you are done.
+
+Agents cannot use passkeys. To sign in with one yourself, open the sign-in page
+with the window in front (a tab link, or `agentic-playwright-mcp open work`)
+and start the sign-in there.
 
 Sign in to websites only, not to the browser itself: browser sync would copy
 your everyday passwords and bookmarks into the agents' browser.
@@ -222,6 +231,9 @@ the gateway created). Change the location or the retention with `filesDir` and
   gateway keeps them (in `sessions.json`) and sets them again. Requests the
   page script cannot see (local network access, for example) are refused
   silently; agents can allow them ahead of time with `browser_permission`.
+- "Nobody can see the browser" means headless, hidden, or its window
+  minimized. A passkey request in a tab behind other tabs of a shown window
+  still goes through to the browser's prompt.
 
 ## Commands
 

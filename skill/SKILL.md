@@ -69,6 +69,12 @@ view):
    Then wait for their answer.
 3. Codes the user receives (2FA, SMS, email codes) always come from the user:
    ask for the code, or let them enter it via the tab link.
+4. **Passkeys do not work for agents.** When a site asks for one, the request
+   is cancelled at once and your tool result says so under "Passkey
+   requests". Pick another way the page offers (Google: "Try another way",
+   then "Enter your password") and go on with steps 1–3. If the user wants to use
+   their passkey, give them a tab link to the sign-in page so they start it
+   there with the window in front.
 
 Using credentials:
 

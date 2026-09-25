@@ -10,6 +10,7 @@ import type { SharedBrowser } from './browser.js';
 import type { TabGroups } from './groups.js';
 import { touchFolder } from './files.js';
 import { pwTools, verifyContext } from './internals.js';
+import { describePasskeyRequests, type PasskeyRequest } from './passkeys.js';
 import type { PermissionRequest } from './permissions.js';
 
 export type SessionInfo = {
@@ -53,6 +54,8 @@ export class AgentSession {
   lastActivity = Date.now();
   subagentCount = 0;
   permissionRequests: PermissionRequest[] = [];
+  // Passkey requests of the session's pages not yet told to the agent.
+  passkeyRequests: PasskeyRequest[] = [];
   // A session exists from the moment its chat connects; it counts as started
   // (log line, files folder, tab group) only once it uses the browser.
   started = false;
@@ -202,6 +205,9 @@ export class AgentSession {
     const permissions = this._host.permissionNotes(this);
     if (permissions)
       result.content.push({ type: 'text', text: permissions });
+    const passkeys = describePasskeyRequests(this.passkeyRequests.splice(0));
+    if (passkeys)
+      result.content.push({ type: 'text', text: passkeys });
     // Remembered for a dropped connection, when the pages are already gone.
     this.currentTarget = this.currentTargetId();
     // browser_close disposes the backend; the next call gets a fresh one.
