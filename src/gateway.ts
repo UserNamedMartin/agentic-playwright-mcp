@@ -401,8 +401,10 @@ export class Gateway implements SessionHost {
     const failed: string[] = [];
     for (const targetId of original.targets) {
       try {
+        // A browser started before the extension could duplicate tabs keeps
+        // the old extension until it restarts: open the same URL then.
         const page = this.groups
-          ? await this.shared.createdPage(this.groups.duplicate(targetId))
+          ? await this.shared.createdPage(this.groups.duplicate(targetId)).catch(() => this._copyByUrl(targetId))
           : await this._copyByUrl(targetId);
         copies.push({ page, current: targetId === current });
       } catch (e) {
@@ -419,7 +421,8 @@ export class Gateway implements SessionHost {
       'Take a snapshot before acting.';
   }
 
-  // Without the companion extension there is no "Duplicate": open the same URL.
+  // Without the extension's "Duplicate": open the same URL (no history or
+  // sessionStorage).
   private async _copyByUrl(targetId: string): Promise<Page> {
     const page = await this.shared.pageByTargetId(targetId);
     if (!page)
