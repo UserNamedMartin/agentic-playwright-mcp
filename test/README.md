@@ -14,6 +14,7 @@ node dist/cli.js start test
 
 | Script | Checks |
 |---|---|
+| `reconnect.mjs [browser]` | self-contained (own headless browser, gateway and scratch home), pass/fail: tabs survive a dropped DevTools connection and a gateway restart, lazy session start, group titles follow `/rename`, same titles numbered |
 | `e2e-client.mjs <mcp url> <session id> <title>` | one session: navigate, click, second tab, isolation, tab link, device emulation. Run several in parallel for concurrency |
 | `features.mjs <mcp url>` | `target=_blank` links become background tabs; manual subagent sessions |
 | `subagents.mjs <mcp url>` | several callers in one session, each with its own `tab` |

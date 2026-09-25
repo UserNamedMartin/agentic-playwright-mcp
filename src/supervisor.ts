@@ -32,19 +32,25 @@ export async function runProfile(profile: Profile, options: Options) {
       ...profileBadge(profile),
       executablePath: profile.executablePath,
       dockIconCache: path.join(homeDir, 'profiles', profile.name, 'dock-icon-base.png'),
+      stateFile: path.join(homeDir, 'profiles', profile.name, 'sessions.json'),
     });
     await gateway.start();
   };
 
-  const stop = async (reason: string) => {
-    console.error(`[${profile.name}] stopping: ${reason}`);
-    await gateway?.stop();
+  const stop = async (reason: string, { keepBrowser = false } = {}) => {
+    console.error(`[${profile.name}] stopping: ${reason}${keepBrowser ? ' (the browser and its tabs stay for the next start)' : ''}`);
+    await gateway?.stop({ keepBrowser });
     gateway = undefined;
-    await closeBrowser(profile).catch(() => {});
+    if (!keepBrowser)
+      await closeBrowser(profile).catch(() => {});
   };
 
+  // Ctrl+C in the foreground stops everything. SIGTERM comes from the service
+  // manager (a service restart, or logout, which quits the browser anyway):
+  // leave the browser running so the restarted gateway gives agents their
+  // tabs back.
   process.on('SIGINT', () => void stop('SIGINT').finally(() => process.exit(0)));
-  process.on('SIGTERM', () => void stop('SIGTERM').finally(() => process.exit(0)));
+  process.on('SIGTERM', () => void stop('SIGTERM', { keepBrowser: true }).finally(() => process.exit(0)));
 
   if (!rules.length) {
     await start();

@@ -31,7 +31,8 @@ work, with a few differences described here.
 ## Tabs do not live forever
 
 Your tabs and group are closed when this chat's process ends (app quit, chat
-archived) or after 24 hours without any browser call. When you resume an older
+archived) or after 24 hours without any browser call. A gateway restart or the
+user's laptop sleeping does not close them. When you resume an older
 chat, first check `browser_tabs`: if your tabs are gone, reopen what you need
 from the URLs in the conversation instead of assuming the old state.
 

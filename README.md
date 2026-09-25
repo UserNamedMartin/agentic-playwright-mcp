@@ -33,8 +33,10 @@ Stock Playwright MCP is built for one agent at a time:
   so sites treat it like any other browser.
 - **Isolation**: each session sees and controls only the tabs it opened, plus
   popups those tabs open.
-- **Tab groups**: each session's tabs sit in a named, colored tab group (the
-  chat title when the client reports it).
+- **Tab groups**: each session's tabs sit in a named, colored tab group,
+  created when the chat first uses the browser. The group is titled after the
+  chat and follows renames (Claude desktop app chats, and `/rename` in the
+  Claude Code CLI); chats with the same title are numbered.
 - **Subagents, automatically**: Claude Code subagents are recognized and get
   their own tab group, running in parallel. Other clients call
   `browser_subagent_start`.
@@ -44,6 +46,9 @@ Stock Playwright MCP is built for one agent at a time:
   window hides the browser; closing it gets a fresh hidden window.
 - **Tab links**: `browser_tab_link` gives the agent a link to put in the chat;
   clicking it opens the window on that tab (for logins, captchas, review).
+- **Tabs survive hiccups**: when the connection to the browser drops (macOS
+  drops it when the display turns off) the gateway reconnects and every chat
+  keeps its tabs; a restarted gateway gets them back too.
 - **Cleanup**: a session's tabs close when its client process exits or after a
   day without browser use.
 - **Per-tab device emulation**: `browser_emulate_device` emulates a phone in
@@ -78,7 +83,7 @@ claude mcp add-json -s user browser '{"type":"http","url":"http://127.0.0.1:8931
 ```
 
 The `headersHelper` tells the gateway which chat is connecting, so tab groups
-get the chat's title, a resumed chat gets its tabs back, and tabs close as soon
+get the chat's title (and follow renames), a resumed chat gets its tabs back, and tabs close as soon
 as the chat's process exits. Without it every MCP connection is simply its own
 session.
 
@@ -225,8 +230,14 @@ identity                         headersHelper output
 ```
 
 Data lives in `~/.agentic-playwright-mcp` (override with
-`AGENTIC_PLAYWRIGHT_HOME`): `profiles.json`, and per profile the browser data
-and `gateway.log`.
+`AGENTIC_PLAYWRIGHT_HOME`): `profiles.json`, and per profile the browser data,
+`gateway.log` and `sessions.json` (which chat owns which tab, so a restarted
+gateway can hand the tabs back).
+
+Stopping the service (`launchctl kickstart -k`, reinstalling it) leaves the
+browser running, so agents keep their tabs across a gateway restart;
+`service uninstall` closes it. `start` in the foreground closes the browser on
+Ctrl+C.
 
 ## Development
 

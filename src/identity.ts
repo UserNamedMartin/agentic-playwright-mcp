@@ -7,6 +7,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { desktopChat } from './titles.js';
 
 type Proc = { pid: number; ppid: number; command: string; env: Record<string, string> };
 
@@ -19,7 +20,8 @@ export function identityHeaders(): Record<string, string> {
     return headers;
   const sessionId = sessionEnvVars.map(name => agent.env[name]).find(Boolean) ?? `pid-${agent.pid}`;
   const cwd = processCwd(agent.pid);
-  const desktop = claudeDesktopChat(agent.env['CLAUDE_CODE_HOST_SESSION_ID']);
+  const hostSessionId = agent.env['CLAUDE_CODE_HOST_SESSION_ID'];
+  const desktop = desktopChat(hostSessionId);
   const title = desktop?.title ?? (cwd ? path.basename(cwd) : undefined) ?? `agent ${agent.pid}`;
   // Where Claude Code writes this chat's transcripts; the gateway reads them to
   // tell subagents apart (see subagents.ts).
@@ -32,6 +34,10 @@ export function identityHeaders(): Record<string, string> {
   headers['x-agent-session-id'] = encodeURIComponent(sessionId);
   headers['x-agent-pid'] = String(agent.pid);
   headers['x-agent-title'] = encodeURIComponent(title.slice(0, 60));
+  // The chat may still be untitled or get renamed later; the gateway reads the
+  // current title from the desktop app's chat file.
+  if (hostSessionId)
+    headers['x-agent-desktop-chat'] = encodeURIComponent(hostSessionId);
   if (cwd)
     headers['x-agent-cwd'] = encodeURIComponent(cwd);
   return headers;
@@ -85,53 +91,4 @@ function processCwd(pid: number): string | undefined {
   } catch {
     return undefined;
   }
-}
-
-// Claude Desktop keeps one JSON file per chat, named after the host session id.
-function claudeDesktopChat(hostSessionId: string | undefined): { title?: string; cliSessionId?: string } | undefined {
-  if (!hostSessionId)
-    return undefined;
-  const supportDir = process.platform === 'darwin' ? path.join(os.homedir(), 'Library', 'Application Support') : path.join(os.homedir(), '.config');
-  let appDirs: string[] = [];
-  try {
-    appDirs = fs.readdirSync(supportDir).filter(name => /^Claude/.test(name));
-  } catch {
-    return undefined;
-  }
-  for (const appDir of appDirs) {
-    const found = findFile(path.join(supportDir, appDir, 'claude-code-sessions'), `${hostSessionId}.json`, 3);
-    if (!found)
-      continue;
-    try {
-      const chat = JSON.parse(fs.readFileSync(found, 'utf8'));
-      return {
-        title: typeof chat.title === 'string' && chat.title.trim() ? chat.title.trim() : undefined,
-        cliSessionId: typeof chat.cliSessionId === 'string' ? chat.cliSessionId : undefined,
-      };
-    } catch {}
-  }
-  return undefined;
-}
-
-function findFile(dir: string, name: string, depth: number): string | undefined {
-  let entries: fs.Dirent[];
-  try {
-    entries = fs.readdirSync(dir, { withFileTypes: true });
-  } catch {
-    return undefined;
-  }
-  for (const entry of entries) {
-    if (entry.isFile() && entry.name === name)
-      return path.join(dir, entry.name);
-  }
-  if (depth === 0)
-    return undefined;
-  for (const entry of entries) {
-    if (entry.isDirectory()) {
-      const found = findFile(path.join(dir, entry.name), name, depth - 1);
-      if (found)
-        return found;
-    }
-  }
-  return undefined;
 }

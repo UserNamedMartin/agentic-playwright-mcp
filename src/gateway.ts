@@ -4,7 +4,14 @@
 // not by the MCP transport, so a reconnecting or resumed chat gets its tabs
 // back. Sessions are cleaned up when the client process is gone, when the MCP
 // session is deleted, or after a long idle period.
+//
+// Tabs outlive the gateway's connection to the browser: when the connection
+// drops (it does when a Mac's display turns off) the gateway reconnects and
+// hands every session its tabs again, and sessions with tabs are saved to a
+// state file so a restarted gateway finds them too.
+import fs from 'node:fs';
 import http from 'node:http';
+import path from 'node:path';
 import type { Page } from 'playwright-core';
 import crypto from 'node:crypto';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
@@ -12,7 +19,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { CallToolRequestSchema, ListResourcesRequestSchema, ListToolsRequestSchema, ReadResourceRequestSchema, isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { SharedBrowser } from './browser.js';
 import { TabGroups } from './groups.js';
-import { AgentSession, type SessionInfo } from './session.js';
+import { AgentSession, type SessionHost, type SessionInfo } from './session.js';
 import { pwTools, z, verifyInternals } from './internals.js';
 import { extraTools } from './tools.js';
 import { renderDashboard } from './dashboard.js';
@@ -21,6 +28,7 @@ import { TranscriptIndex } from './subagents.js';
 import { cleanFolders, sessionFolder, subagentFolder } from './files.js';
 import { baseIcon, renderDockIcon } from './docktile.js';
 import { appMimeType, openTabWindowTool, tabLinkHtml, tabLinkResource, tabLinkResourceUri, tabLinkTool } from './apps.js';
+import { DesktopChatFile } from './titles.js';
 
 export type GatewayOptions = {
   profile: string;
@@ -39,11 +47,22 @@ export type GatewayOptions = {
   badgeColor?: string;
   executablePath?: string;
   dockIconCache?: string;
+  // Sessions with open tabs, so a restarted gateway gives them back.
+  stateFile?: string;
 };
 
 type Transport = { transport: StreamableHTTPServerTransport; sessionKey: string };
 
-export class Gateway {
+type SavedSession = {
+  info: SessionInfo;
+  filesDir?: string;
+  lastActivity: number;
+  startedAt: number;
+  targets: string[];
+  current?: string;
+};
+
+export class Gateway implements SessionHost {
   readonly options: GatewayOptions;
   readonly sessions = new Map<string, AgentSession>();
   shared!: SharedBrowser;
@@ -56,6 +75,11 @@ export class Gateway {
   private _tools: any[] = [];
   private _server: http.Server | undefined;
   private _sweeper: NodeJS.Timeout | undefined;
+  // Resolves once the browser is connected; tool calls wait for it while the
+  // gateway reconnects.
+  private _ready: Promise<void> = Promise.resolve();
+  private _desktopChats = new Map<string, DesktopChatFile>();
+  private _saveTimer: NodeJS.Timeout | undefined;
 
   constructor(options: GatewayOptions) {
     this.options = options;
@@ -72,61 +96,142 @@ export class Gateway {
       caps: this.options.caps ?? ['devtools', 'network', 'storage', 'testing'],
     });
     this._tools = [...pwTools.filteredTools(this._config), ...extraTools(this)];
-    this.shared = await SharedBrowser.connect(this.options.cdpEndpoint);
-    this.shared.browser.on('disconnected', () => {
-      if (this._stopping)
-        return;
-      console.error('Browser disconnected; exiting so the supervisor can restart the gateway.');
-      process.exit(1);
-    });
-    const groups = new TabGroups(this.shared);
-    this.groups = await groups.init() ? groups : undefined;
-    await this.shared.context.exposeBinding(openInBackgroundBinding, async ({ page }: { page: Page }, url: string) => {
-      const owner = [...this.sessions.values()].find(session => session.owned.has(page));
-      await owner?.openInBackground(url);
-    });
-    await this.shared.context.addInitScript({ content: popupInterceptScript });
     this._server = http.createServer((req, res) => void this._handle(req, res).catch(e => {
       console.error(e);
       if (!res.headersSent)
         res.writeHead(500).end(String(e));
     }));
     await new Promise<void>(resolve => this._server!.listen(this.options.port, this.options.host ?? '127.0.0.1', resolve));
-    await this._setUpHomeTab();
-    await this._applyDockTile();
+    const saved = this._loadState();
+    this._ready = this._attach(saved);
+    await this._ready;
     this._sweeper = setInterval(() => void this._sweep(), 15_000);
     this._sweeper.unref();
+    const restored = [...this.sessions.values()].filter(s => s.owned.size);
     console.error(`[${this.options.profile}] gateway on ${this.baseUrl}/mcp, browser ${this.options.cdpEndpoint}, ` +
-      `tab groups ${this.groups ? 'on' : 'off'}`);
+      `tab groups ${this.groups ? 'on' : 'off'}${restored.length ? `; restored ${restored.length} session(s) with their tabs` : ''}`);
   }
 
-  async stop() {
+  // keepBrowser: leave the browser and every session's tabs as they are, for
+  // the next gateway to pick up (a service restart). Otherwise close them.
+  async stop({ keepBrowser = false } = {}) {
     this._stopping = true;
     clearInterval(this._sweeper);
     for (const { transport } of this._transports.values())
       await transport.close().catch(() => {});
-    for (const session of this.sessions.values())
-      await this._closeSession(session);
+    if (keepBrowser) {
+      this._saveState();
+    } else {
+      for (const session of this.sessions.values())
+        await this._closeSession(session);
+    }
     this._server?.close();
+    // Over CDP this only disconnects; the supervisor closes the browser.
     await this.shared?.browser.close().catch(() => {});
+  }
+
+  // Connects to the browser and sets everything up on it. Runs at startup
+  // and again after the connection drops.
+  private async _attach(saved?: SavedSession[]) {
+    const shared = await SharedBrowser.connect(this.options.cdpEndpoint, targetId => this._onTargetDestroyed(targetId));
+    shared.browser.on('disconnected', () => this._onDisconnected(shared));
+    this.shared = shared;
+    const groups = new TabGroups(shared);
+    this.groups = await groups.init() ? groups : undefined;
+    await shared.context.exposeBinding(openInBackgroundBinding, async ({ page }: { page: Page }, url: string) => {
+      const owner = [...this.sessions.values()].find(session => session.owned.has(page));
+      await owner?.openInBackground(url);
+    });
+    await shared.context.addInitScript({ content: popupInterceptScript });
+    await this._setUpTabs(saved);
+    this._dockAppliedAt = 0;
+    await this._applyDockTile();
+  }
+
+  // The browser itself usually lives on (it does when a Mac's display turns
+  // off), so reconnect and keep every session's tabs. If it is really gone,
+  // exit and let the supervisor start a new one.
+  private _onDisconnected(shared: SharedBrowser) {
+    if (this._stopping || shared !== this.shared)
+      return;
+    console.error('browser connection lost; reconnecting');
+    // Whether the browser dropped every DevTools client or only ours.
+    setTimeout(() => console.error(`the gateway's second DevTools connection is ${shared.canaryState()}`), 1000).unref();
+    for (const session of this.sessions.values())
+      session.detach();
+    shared.dispose();
+    this._saveState();
+    this._ready = this._reconnect();
+  }
+
+  private async _reconnect() {
+    const deadline = Date.now() + 60_000;
+    let lastError: unknown;
+    while (Date.now() < deadline && !this._stopping) {
+      try {
+        await this._attach();
+        const tabs = [...this.sessions.values()].reduce((n, s) => n + s.targets.size, 0);
+        console.error(`reconnected to the browser; ${tabs} agent tab(s) kept`);
+        return;
+      } catch (e) {
+        lastError = e;
+        await new Promise(r => setTimeout(r, 1000));
+      }
+    }
+    console.error(`Could not reconnect to the browser (${(lastError as Error)?.message}); exiting so the supervisor can restart the gateway.`);
+    process.exit(1);
   }
 
   // The status page is the one tab no agent owns: it keeps the window alive
   // when all agents have closed theirs, and shows who is working when the
   // user opens the window. The window is minimized on startup.
-  private async _setUpHomeTab() {
+  // Tabs of known sessions (after a reconnect, or saved before a restart) go
+  // back to their sessions; anything else is an orphan from an earlier run
+  // (or a window Chrome restored) and is closed. One window keeps every
+  // session's tabs, and so its tab group, together.
+  private async _setUpTabs(saved?: SavedSession[]) {
     const pages = this.shared.context.pages();
-    // With --no-startup-window there is no window yet.
-    const home = pages.find(p => p.url().startsWith(this.baseUrl)) ?? pages[0] ?? await this.shared.newBackgroundPage(this.baseUrl, true);
-    // Sessions do not survive a gateway restart, so tabs left from a previous
-    // run (and windows Chrome restored) are orphans. One window keeps every
-    // session's tabs, and so its tab group, together.
+    const byTarget = new Map<string, Page>();
     for (const page of pages) {
-      if (page !== home)
+      const id = await this.shared.targetId(page).catch(() => undefined);
+      if (id)
+        byTarget.set(id, page);
+    }
+    for (const entry of saved ?? []) {
+      if (!entry.targets.some(id => byTarget.has(id)))
+        continue;
+      if (entry.info.pid !== undefined && !isAlive(entry.info.pid))
+        continue;
+      // The chat may have reconnected already, while the gateway was starting.
+      let session = this.sessions.get(entry.info.id);
+      if (session?.started)
+        continue;
+      if (!session) {
+        session = new AgentSession(entry.info, this, this._config, this._tools, this._retentionDays);
+        this.sessions.set(entry.info.id, session);
+      }
+      session.filesDir = entry.filesDir;
+      session.startedAt = entry.startedAt;
+      entry.targets.forEach(id => session.targets.add(id));
+      session.currentTarget = entry.current;
+      session.lastActivity = entry.lastActivity;
+    }
+    const kept = new Set<string>();
+    for (const session of this.sessions.values()) {
+      session.restore(byTarget);
+      session.targets.forEach(id => kept.add(id));
+    }
+    const homeId = [...byTarget].find(([, page]) => page.url().startsWith(this.baseUrl))?.[0]
+      ?? [...byTarget.keys()].find(id => !kept.has(id));
+    // With --no-startup-window there may be no window yet.
+    const home = homeId ? byTarget.get(homeId)! : await this.shared.newBackgroundPage(this.baseUrl, true);
+    for (const [id, page] of byTarget) {
+      if (page !== home && !kept.has(id))
         await page.close().catch(() => {});
     }
     await this._adoptHome(home);
     await this.shared.startFocusGuard(this._homeTargetId!);
+    this._saveState();
   }
 
   private async _adoptHome(home: Page) {
@@ -136,14 +241,142 @@ export class Gateway {
     this._homeTargetId = await this.shared.targetId(home);
     this.shared.setHomeTarget(this._homeTargetId);
     await this.shared.hideApp();
+  }
+
+  // A tab really closed (not just a dropped connection).
+  private _onTargetDestroyed(targetId: string) {
+    let changed = false;
+    for (const session of this.sessions.values())
+      changed = session.targets.delete(targetId) || changed;
+    if (changed)
+      this.onTabsChanged();
     // Closing the window (red button) closes every tab in it; put a fresh,
     // hidden window back so agents have somewhere to open tabs.
-    home.once('close', () => {
-      if (this._stopping)
-        return;
+    if (targetId === this._homeTargetId && !this._stopping) {
       console.error('browser window was closed; creating a new hidden one');
-      void this.shared.newBackgroundPage(this.baseUrl, true).then(page => this._adoptHome(page)).catch(e => console.error(e));
-    });
+      this._homeTargetId = undefined;
+      const shared = this.shared;
+      void shared.newBackgroundPage(this.baseUrl, true).then(async page => {
+        if (shared === this.shared)
+          await this._adoptHome(page);
+      }).catch(e => console.error(e));
+    }
+  }
+
+  // SessionHost
+  filesFolder(session: AgentSession): string {
+    const [rootId, sub] = session.info.id.split('#');
+    if (sub === undefined)
+      return sessionFolder(this.options.filesDir, session.info.id, session.info.title);
+    const root = this.sessions.get(rootId);
+    const rootDir = root ? root.ensureFilesDir() : sessionFolder(this.options.filesDir, rootId, session.info.title.split(' · ')[0]);
+    return subagentFolder(rootDir, sub, session.info.label ?? sub);
+  }
+
+  onSessionStarted(session: AgentSession) {
+    session.startedAt = Date.now();
+    this._refreshTitles();
+    console.error(`session started: ${session.info.title} (${session.info.id}${session.info.pid ? `, pid ${session.info.pid}` : ''})`);
+  }
+
+  onTabsChanged() {
+    if (this._saveTimer)
+      return;
+    this._saveTimer = setTimeout(() => {
+      this._saveTimer = undefined;
+      this._saveState();
+    }, 1000);
+    this._saveTimer.unref();
+  }
+
+  private _saveState() {
+    const file = this.options.stateFile;
+    if (!file)
+      return;
+    const sessions: SavedSession[] = [...this.sessions.values()].filter(s => s.targets.size).map(s => ({
+      info: s.info,
+      filesDir: s.filesDir,
+      lastActivity: s.lastActivity,
+      startedAt: s.startedAt,
+      targets: [...s.targets],
+      current: s.currentTargetId(),
+    }));
+    try {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(`${file}.tmp`, JSON.stringify({ version: 1, sessions }, null, 2));
+      fs.renameSync(`${file}.tmp`, file);
+    } catch (e) {
+      console.error(`could not save sessions: ${(e as Error).message}`);
+    }
+  }
+
+  private _loadState(): SavedSession[] | undefined {
+    if (!this.options.stateFile)
+      return undefined;
+    try {
+      const state = JSON.parse(fs.readFileSync(this.options.stateFile, 'utf8'));
+      return Array.isArray(state?.sessions) ? state.sessions : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  // Tab group titles follow the chat's title: the desktop app's chat title,
+  // or a title set with /rename in the CLI; otherwise what the client sent.
+  // Chats with the same title are told apart with a number.
+  private _refreshTitles() {
+    const active = new Set([...this.sessions.values()].filter(s => s.started).map(s => s.info.id.split('#')[0]));
+    const roots = [...active].map(id => this.sessions.get(id)).filter((s): s is AgentSession => !!s)
+        .sort((a, b) => a.startedAt - b.startedAt);
+    const seen = new Map<string, number>();
+    const titles = new Map<string, string>();
+    for (const root of roots) {
+      const base = (this._chatTitle(root) ?? root.info.fallbackTitle ?? root.info.title).slice(0, 56);
+      const n = (seen.get(base) ?? 0) + 1;
+      seen.set(base, n);
+      titles.set(root.info.id, n > 1 ? `${base} (${n})` : base);
+    }
+    for (const session of this.sessions.values()) {
+      const [rootId, sub] = session.info.id.split('#');
+      const rootTitle = titles.get(rootId);
+      if (!rootTitle)
+        continue;
+      const title = sub === undefined ? rootTitle : `${rootTitle} · ${session.info.label ?? sub}`.slice(0, 60);
+      if (title === session.info.title)
+        continue;
+      if (session.targets.size)
+        console.error(`session renamed: ${session.info.title} -> ${title}`);
+      session.info.title = title;
+      void this.groups?.rename(session).catch(() => {});
+      this.onTabsChanged();
+    }
+  }
+
+  private _chatTitle(root: AgentSession): string | undefined {
+    const { desktopChat, claudeSessionId, configDir } = root.info;
+    if (desktopChat) {
+      let file = this._desktopChats.get(desktopChat);
+      if (!file)
+        this._desktopChats.set(desktopChat, file = new DesktopChatFile(desktopChat));
+      const title = file.read()?.title;
+      if (title)
+        return title;
+    }
+    if (claudeSessionId && configDir)
+      return this._transcriptIndex(root)?.customTitle();
+    return undefined;
+  }
+
+  private _transcriptIndex(root: AgentSession) {
+    const { claudeSessionId, configDir } = root.info;
+    if (!claudeSessionId || !configDir)
+      return undefined;
+    let index = this._transcripts.get(root.info.id);
+    if (!index) {
+      index = new TranscriptIndex(configDir, claudeSessionId);
+      this._transcripts.set(root.info.id, index);
+    }
+    return index;
   }
 
   toolSchemas() {
@@ -168,8 +401,10 @@ export class Gateway {
     const url = new URL(req.url ?? '/', this.baseUrl);
     if (url.pathname === '/mcp')
       return await this._handleMcp(req, res);
-    if (url.pathname === '/focus')
+    if (url.pathname === '/focus') {
+      await this._ready;
       return await this._handleFocus(url, res);
+    }
     if (url.pathname === '/' && req.method === 'GET') {
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
       res.end(renderDashboard(this));
@@ -224,16 +459,16 @@ export class Gateway {
         cwd: info.cwd ?? session.info.cwd,
         claudeSessionId: info.claudeSessionId ?? session.info.claudeSessionId,
         configDir: info.configDir ?? session.info.configDir,
+        desktopChat: info.desktopChat ?? session.info.desktopChat,
+        fallbackTitle: info.fallbackTitle,
       });
-      if (info.title !== session.info.title) {
-        session.info.title = info.title;
-        void this.groups?.rename(session).catch(() => {});
-      }
+      if (session.started)
+        this._refreshTitles();
       return session;
     }
-    console.error(`session opened: ${info.title} (${info.id}${info.pid ? `, pid ${info.pid}` : ''})`);
-    session = new AgentSession(info, this.shared, this._config, this._tools,
-        sessionFolder(this.options.filesDir, info.id, info.title), this.groups, this._retentionDays);
+    // Nothing is created in the browser or on disk until the chat actually
+    // uses the browser (AgentSession.start).
+    session = new AgentSession(info, this, this._config, this._tools, this._retentionDays);
     this.sessions.set(info.id, session);
     return session;
   }
@@ -252,6 +487,7 @@ export class Gateway {
       return { contents: [{ uri: tabLinkResourceUri, mimeType: appMimeType, text: tabLinkHtml }] };
     });
     server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
+      await this._ready;
       const { agent, ...args } = (request.params.arguments ?? {}) as Record<string, any>;
       if (request.params.name === subagentTool.name)
         return this._startSubagent(session, String(args.label ?? 'subagent'));
@@ -275,25 +511,17 @@ export class Gateway {
   // Claude Code subagents are recognized from the chat's transcripts, so they
   // get their own sub-session without passing anything.
   private async _autoTarget(session: AgentSession, toolUseId: unknown): Promise<AgentSession> {
-    const { claudeSessionId, configDir } = session.info;
-    if (typeof toolUseId !== 'string' || !claudeSessionId || !configDir)
+    if (typeof toolUseId !== 'string')
       return session;
-    let index = this._transcripts.get(session.info.id);
-    if (!index) {
-      index = new TranscriptIndex(configDir, claudeSessionId);
-      this._transcripts.set(session.info.id, index);
-    }
-    const caller = await index.lookup(toolUseId).catch(() => undefined);
+    const caller = await this._transcriptIndex(session)?.lookup(toolUseId).catch(() => undefined);
     if (caller?.kind !== 'subagent')
       return session;
     const id = `${session.info.id}#${caller.agentId}`;
     let sub = this.sessions.get(id);
     if (!sub) {
-      const info: SessionInfo = { id, title: `${session.info.title} · ${caller.description}`.slice(0, 60), pid: session.info.pid, cwd: session.info.cwd };
-      sub = new AgentSession(info, this.shared, this._config, this._tools,
-          subagentFolder(session.filesDir, caller.agentId, caller.description), this.groups, this._retentionDays);
+      const info: SessionInfo = { id, title: `${session.info.title} · ${caller.description}`.slice(0, 60), label: caller.description, pid: session.info.pid, cwd: session.info.cwd };
+      sub = new AgentSession(info, this, this._config, this._tools, this._retentionDays);
       this.sessions.set(id, sub);
-      console.error(`subagent session opened: ${info.title}`);
     }
     return sub;
   }
@@ -329,16 +557,18 @@ export class Gateway {
   // The gateway picks the id, so two subagents can never collide.
   private _startSubagent(parent: AgentSession, label: string) {
     const slug = label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 24) || 'subagent';
-    const handle = `${slug}-${++parent.subagentCount}`;
+    let handle: string;
+    do
+      handle = `${slug}-${++parent.subagentCount}`;
+    while (this.sessions.has(`${parent.info.id}#${handle}`));
     const info: SessionInfo = {
       id: `${parent.info.id}#${handle}`,
       title: `${parent.info.title} · ${label}`.slice(0, 60),
+      label,
       pid: parent.info.pid,
       cwd: parent.info.cwd,
     };
-    const session = new AgentSession(info, this.shared, this._config, this._tools,
-        subagentFolder(parent.filesDir, handle, label), this.groups, this._retentionDays);
-    this.sessions.set(info.id, session);
+    this.sessions.set(info.id, new AgentSession(info, this, this._config, this._tools, this._retentionDays));
     return { content: [{ type: 'text', text: `Your agent id is "${handle}". Pass "agent": "${handle}" in every browser call; ` +
       'your tabs live in their own tab group and other agents cannot see them.' }] };
   }
@@ -412,9 +642,10 @@ export class Gateway {
     const now = Date.now();
     if (now - this._dockAppliedAt > 60 * 1000)
       await this._applyDockTile();
+    this._refreshTitles();
     if (now - this._filesSweptAt > 60 * 60 * 1000) {
       this._filesSweptAt = now;
-      const inUse = new Set([...this.sessions.values()].map(s => s.filesDir));
+      const inUse = new Set([...this.sessions.values()].map(s => s.filesDir).filter((dir): dir is string => !!dir));
       for (const name of cleanFolders(this.options.filesDir, this._retentionDays * 24 * 60 * 60 * 1000, inUse))
         console.error(`files: deleted ${name} (unused for ${this._retentionDays} days)`);
     }
@@ -435,7 +666,8 @@ export class Gateway {
       if (child.info.id.startsWith(`${session.info.id}#`))
         await this._closeSession(child);
     }
-    console.error(`session closed: ${session.info.title} (${session.owned.size} tab(s))`);
+    if (session.started)
+      console.error(`session closed: ${session.info.title} (${session.targets.size} tab(s))`);
     this.sessions.delete(session.info.id);
     this._transcripts.delete(session.info.id);
     for (const [id, entry] of this._transports) {
@@ -446,6 +678,7 @@ export class Gateway {
     }
     await session.dispose({ closeTabs: !this.options.keepTabsOnExit });
     await this.groups?.forget(session);
+    this.onTabsChanged();
   }
 }
 
@@ -473,13 +706,16 @@ export function sessionInfoFromHeaders(headers: http.IncomingHttpHeaders, client
   };
   const id = header('x-agent-session-id') ?? `anon-${crypto.randomUUID().slice(0, 8)}`;
   const pid = Number(header('x-agent-pid')) || undefined;
+  const title = header('x-agent-title') ?? `${clientName ?? 'agent'} ${id.slice(-6)}`;
   return {
     id,
     pid,
     cwd: header('x-agent-cwd'),
     claudeSessionId: header('x-agent-claude-session'),
     configDir: header('x-agent-config-dir'),
-    title: header('x-agent-title') ?? `${clientName ?? 'agent'} ${id.slice(-6)}`,
+    desktopChat: header('x-agent-desktop-chat'),
+    title,
+    fallbackTitle: title,
   };
 }
 

@@ -17,6 +17,7 @@ export class TranscriptIndex {
   private _offsets = new Map<string, number>();
   private _callers = new Map<string, Caller>();
   private _descriptions = new Map<string, string>();
+  private _customTitle: string | undefined;
 
   constructor(configDir: string, sessionId: string) {
     this._configDir = configDir;
@@ -32,6 +33,12 @@ export class TranscriptIndex {
       await new Promise(r => setTimeout(r, 50));
     }
     return undefined;
+  }
+
+  // The chat's title as set with /rename in the Claude Code CLI, if any.
+  customTitle(): string | undefined {
+    this._scan();
+    return this._customTitle;
   }
 
   private _scan() {
@@ -75,6 +82,8 @@ export class TranscriptIndex {
         return;
       const text = buffer.subarray(0, lastNewline + 1).toString('utf8');
       for (const line of text.split('\n')) {
+        if (caller.kind === 'main' && line.includes('"custom-title"'))
+          this._customTitle = customTitle(line) ?? this._customTitle;
         if (!line.includes('"tool_use"'))
           continue;
         for (const id of toolUseIds(line)) {
@@ -130,5 +139,14 @@ function toolUseIds(line: string): string[] {
     return Array.isArray(content) ? content.filter((b: any) => b?.type === 'tool_use' && typeof b.id === 'string').map((b: any) => b.id) : [];
   } catch {
     return [];
+  }
+}
+
+function customTitle(line: string): string | undefined {
+  try {
+    const entry = JSON.parse(line);
+    return entry?.type === 'custom-title' && typeof entry.customTitle === 'string' && entry.customTitle.trim() ? entry.customTitle.trim() : undefined;
+  } catch {
+    return undefined;
   }
 }

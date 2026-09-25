@@ -3,7 +3,7 @@
 // the few browser-level calls Playwright does not expose (background tabs,
 // window state, activation).
 import type { Browser, BrowserContext, CDPSession, Page } from 'playwright-core';
-import { playwright } from './internals.js';
+import { playwright, ws } from './internals.js';
 import { activatePid, frontmostPid, hidePid, isHiddenPid, mainScreen, unhidePid } from './macos.js';
 
 export class SharedBrowser {
@@ -23,6 +23,10 @@ export class SharedBrowser {
   private _lastHidden = false;
   private _headless: boolean | undefined;
   private _guarding = false;
+  private _guardTimer: NodeJS.Timeout | undefined;
+  private _disposed = false;
+  private _canary: any;
+  private _canaryClosed: string | undefined;
 
   private constructor(browser: Browser, context: BrowserContext, cdp: CDPSession) {
     this.browser = browser;
@@ -31,13 +35,47 @@ export class SharedBrowser {
     context.on('page', page => void this._onPage(page));
   }
 
-  static async connect(cdpEndpoint: string): Promise<SharedBrowser> {
+  static async connect(cdpEndpoint: string, onTargetDestroyed?: (targetId: string) => void): Promise<SharedBrowser> {
     const browser: Browser = await playwright.chromium.connectOverCDP(cdpEndpoint);
     const context = browser.contexts()[0];
     if (!context)
       throw new Error(`No default browser context at ${cdpEndpoint}`);
     const cdp = await browser.newBrowserCDPSession();
-    return new SharedBrowser(browser, context, cdp);
+    const shared = new SharedBrowser(browser, context, cdp);
+    // Tabs that really close. Pages also emit "close" when the connection
+    // drops, which must not cost a session its tabs.
+    cdp.on('Target.targetDestroyed', ({ targetId }) => onTargetDestroyed?.(targetId));
+    await cdp.send('Target.setDiscoverTargets', { discover: true });
+    await shared._openCanary(cdpEndpoint).catch(() => {});
+    return shared;
+  }
+
+  // A second, idle DevTools connection. When the main one drops, its state
+  // tells whether the browser closed every client or only ours.
+  private async _openCanary(cdpEndpoint: string) {
+    const res = await fetch(`${cdpEndpoint}/json/version`);
+    const { webSocketDebuggerUrl } = await res.json() as { webSocketDebuggerUrl: string };
+    const socket = new ws(webSocketDebuggerUrl);
+    socket.on('close', (code: number, reason: Buffer) => this._canaryClosed = `closed with code ${code}${reason.length ? ` (${reason})` : ''}`);
+    socket.on('error', () => {});
+    this._canary = socket;
+  }
+
+  canaryState() {
+    return this._canaryClosed ?? 'still open';
+  }
+
+  // The connection is gone: stop timers so a replacement can take over.
+  dispose() {
+    this._disposed = true;
+    clearInterval(this._guardTimer);
+    this._canary?.close();
+  }
+
+  // The target id of a page seen before, without asking the browser (works
+  // after a disconnect too).
+  cachedTargetId(page: Page): string | undefined {
+    return this._targetIds.get(page);
   }
 
   async targetId(page: Page): Promise<string> {
@@ -176,8 +214,10 @@ export class SharedBrowser {
 
   async isHeadless() {
     if (this._headless === undefined) {
-      const { product } = await this._cdp.send('Browser.getVersion');
-      this._headless = product.startsWith('HeadlessChrome');
+      // New headless (Chrome 132+) reports a normal product name, but keeps
+      // "HeadlessChrome" in the user agent.
+      const { product, userAgent } = await this._cdp.send('Browser.getVersion');
+      this._headless = product.startsWith('HeadlessChrome') || userAgent.includes('HeadlessChrome');
     }
     return this._headless;
   }
@@ -217,7 +257,7 @@ export class SharedBrowser {
       return;
     const pid = await this.pid();
     const sample = async () => {
-      if (this._guarding || !pid)
+      if (this._guarding || !pid || this._disposed)
         return;
       const front = frontmostPid();
       if (front && front !== pid)
@@ -233,13 +273,13 @@ export class SharedBrowser {
       }
     };
     await sample();
-    setInterval(() => void sample(), 500).unref();
+    this._guardTimer = setInterval(() => void sample(), 500);
+    this._guardTimer.unref();
     // Browser-level target events arrive sooner than Playwright's page event.
     this._cdp.on('Target.targetCreated', ({ targetInfo }) => {
       if (targetInfo.type === 'page')
         void this._guardFocus();
     });
-    await this._cdp.send('Target.setDiscoverTargets', { discover: true });
   }
 
   async setDockTile(image: string) {
@@ -266,7 +306,7 @@ export class SharedBrowser {
     const wasBehind = this._otherFrontmost !== undefined && frontmostPid() !== pid;
     this._guarding = true;
     try {
-      for (let i = 0; i < 30; i++) {
+      for (let i = 0; i < 30 && !this._disposed; i++) {
         await new Promise(r => setTimeout(r, 100));
         // The user asked to see the window (tab link, browser_show_tab): stand down.
         if (Date.now() - this._userFocusAt < 10_000)

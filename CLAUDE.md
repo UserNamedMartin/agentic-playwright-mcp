@@ -15,6 +15,8 @@ Read README.md first for what the project does. This file is about changing it.
 - `src/files.ts` — per-chat file folders and their weekly cleanup.
 - `src/apps.ts` — MCP Apps tab-link widget; `src/tools.ts` — extra tools.
 - `src/identity.ts` — `headersHelper` output (who is connecting).
+- `src/titles.ts` — current chat titles (Claude desktop chat files); CLI
+  `/rename` titles come from `subagents.ts`.
 - `src/launcher.ts`, `supervisor.ts`, `service.ts`, `profiles.ts`,
   `urlhandler.ts`, `macos.ts` — running profiles on the machine.
 - `extension/` — companion extension (tab groups), loaded over CDP.
@@ -39,11 +41,17 @@ Read README.md first for what the project does. This file is about changing it.
   processes cannot activate other apps themselves.
 - Never rewrite `~/Applications/Agentic Browser Links.app` unless its script
   changed: macOS App Management protection flags it.
+- Tabs belong to sessions by CDP target id (`AgentSession.targets`), not by
+  `Page`: pages also emit "close" when the browser connection drops, only
+  `Target.targetDestroyed` means a tab really closed. The gateway must survive
+  a dropped connection (it reconnects) and a restart (`sessions.json`) without
+  closing anyone's tabs.
 - Keep personal data out of the repo: no user names, paths, profile names or
   ports of a particular machine.
 
 ## Checking changes
 
-`npm run build`, then run a throwaway headless profile and the scripts in
-`test/` (see test/README.md). Anything that opens windows or moves focus needs
+`npm run build`, then `node test/reconnect.mjs` (self-contained, headless)
+and a throwaway headless profile with the other scripts in `test/` (see
+test/README.md). Anything that opens windows or moves focus needs
 a headed profile, and on someone's machine, their go-ahead first.

@@ -141,8 +141,12 @@ async function main() {
       const profile = getProfile(requireArg(arg, 'profile'));
       if (sub === 'install')
         return installService(profile);
-      if (sub === 'uninstall')
-        return uninstallService(profile);
+      if (sub === 'uninstall') {
+        uninstallService(profile);
+        // Stopping the service leaves the browser running (see supervisor.ts).
+        await closeBrowser(profile);
+        return;
+      }
       break;
     }
     case 'config': {

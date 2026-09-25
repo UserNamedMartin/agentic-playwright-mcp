@@ -3,7 +3,8 @@
 import { escapeHtml, type Gateway } from './gateway.js';
 
 export function renderDashboard(gateway: Gateway) {
-  const rows = [...gateway.sessions.values()].map(session => {
+  const sessions = [...gateway.sessions.values()].filter(session => session.started);
+  const rows = sessions.map(session => {
     const tabs = [...session.owned].map(page => `<li>${escapeHtml(page.url())}</li>`).join('');
     const idle = Math.round((Date.now() - session.lastActivity) / 1000);
     return `<tr><td>${escapeHtml(session.info.title)}</td><td>${session.owned.size}<ul>${tabs}</ul></td><td>${idle}s ago</td></tr>`;
@@ -20,6 +21,6 @@ export function renderDashboard(gateway: Gateway) {
   @media (prefers-color-scheme: dark) { body { background: #1b1b1b; color: #ddd; } td, th { border-color: #333; } }
 </style>
 <h1>${escapeHtml(gateway.options.profile)}</h1>
-<p>${gateway.sessions.size} agent session(s) · tab groups ${gateway.groups ? 'on' : 'off'}</p>
+<p>${sessions.length} agent session(s) · tab groups ${gateway.groups ? 'on' : 'off'}</p>
 <table><tr><th>Session</th><th>Tabs</th><th>Last activity</th></tr>${rows}</table>`;
 }

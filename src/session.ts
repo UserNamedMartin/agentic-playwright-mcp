@@ -12,54 +12,146 @@ import { pwTools, verifyContext } from './internals.js';
 
 export type SessionInfo = {
   id: string;
+  // Tab group title; kept in sync with the chat's title (see Gateway._refreshTitle).
   title: string;
   pid?: number;
   cwd?: string;
   claudeSessionId?: string;
   configDir?: string;
+  // Claude desktop app chat id, to look the current title up.
+  desktopChat?: string;
+  // Subagents: their task, shown after the chat title.
+  label?: string;
+  // The title the client sent, used when no better one is known.
+  fallbackTitle?: string;
+};
+
+// What a session needs from the gateway. Both are replaced when the gateway
+// reconnects to the browser, so sessions always look them up.
+export type SessionHost = {
+  readonly shared: SharedBrowser;
+  readonly groups: TabGroups | undefined;
+  // Creates (or finds again) the session's files folder.
+  filesFolder(session: AgentSession): string;
+  onSessionStarted(session: AgentSession): void;
+  onTabsChanged(): void;
 };
 
 export class AgentSession {
   readonly info: SessionInfo;
   readonly owned = new Set<Page>();
+  // Target ids of the owned tabs. Unlike `owned` they survive a dropped browser
+  // connection, so the tabs can be found again after reconnecting.
+  readonly targets = new Set<string>();
+  // Target id of the current tab when the session was last detached or restored.
+  currentTarget: string | undefined;
   backend: any;
   lastActivity = Date.now();
   subagentCount = 0;
-  private _shared: SharedBrowser;
-  private _groups: TabGroups | undefined;
+  // A session exists from the moment its chat connects; it counts as started
+  // (log line, files folder, tab group) only once it uses the browser.
+  started = false;
+  startedAt = 0;
+  // Everything this session saves goes here (see files.ts); set on start.
+  filesDir: string | undefined;
+  private _host: SessionHost;
   private _config: any;
   private _tools: any[];
-  // Everything this session saves goes here (see files.ts).
-  readonly filesDir: string;
   private _filesNoted = false;
   private _touchedAt = 0;
   private _retentionDays: number;
+  // Tabs found again after a reconnect or restart, adopted by the next backend.
+  private _restored: { pages: Page[]; current?: Page } | undefined;
 
-  constructor(info: SessionInfo, shared: SharedBrowser, config: any, tools: any[], filesDir: string, groups?: TabGroups, retentionDays = 7) {
+  constructor(info: SessionInfo, host: SessionHost, config: any, tools: any[], retentionDays = 7) {
     this.info = info;
-    this.filesDir = filesDir;
+    this._host = host;
     this._retentionDays = retentionDays;
-    this._shared = shared;
     this._config = config;
     this._tools = tools;
-    this._groups = groups;
+  }
+
+  ensureFilesDir(): string {
+    if (!this.filesDir) {
+      this.filesDir = this._host.filesFolder(this);
+      fs.mkdirSync(this.filesDir, { recursive: true });
+    }
+    return this.filesDir;
+  }
+
+  private get _shared() {
+    return this._host.shared;
+  }
+
+  private get _groups() {
+    return this._host.groups;
   }
 
   async start() {
-    fs.mkdirSync(this.filesDir, { recursive: true });
+    if (!this.started) {
+      this.started = true;
+      this._host.onSessionStarted(this);
+    }
+    const filesDir = this.ensureFilesDir();
     // The session folder is both the output dir and the workspace, so relative
     // file names land there too, never in the agent's project. Unrestricted
     // access lets the agent still upload project files by absolute path.
-    const config = { ...this._config, outputDir: this.filesDir, allowUnrestrictedFileAccess: true };
+    const config = { ...this._config, outputDir: filesDir, allowUnrestrictedFileAccess: true };
     const backend = new pwTools.BrowserBackend(config, this._shared.context, this._tools, {});
-    await backend.initialize({ cwd: this.filesDir, clientName: this.info.title });
+    await backend.initialize({ cwd: filesDir, clientName: this.info.title });
     verifyContext(backend._context);
     this._patchContext(backend._context);
     this.backend = backend;
+    const restored = this._restored;
+    this._restored = undefined;
+    if (restored?.pages.length) {
+      const context = backend._context;
+      await context.ensureBrowserContext();
+      for (const page of restored.pages)
+        this._adopt(context, page);
+      context._currentTab = context._tabs.find((tab: any) => tab.page === restored.current) ?? context._tabs[0];
+    }
   }
 
-  // Calls of one session run one at a time: parallel subagents share this
-  // session, and the stock Context has a single "current tab".
+  // The browser connection dropped: the backend and its pages are dead, but
+  // the tabs are still open in the browser (see `targets`).
+  detach() {
+    const backend = this.backend;
+    this.backend = undefined;
+    this.owned.clear();
+    this._restored = undefined;
+    void backend?.dispose().catch(() => {});
+  }
+
+  // Hands the session its tabs again after a reconnect or a gateway restart.
+  restore(pages: Map<string, Page>) {
+    const found: Page[] = [];
+    for (const targetId of [...this.targets]) {
+      const page = pages.get(targetId);
+      if (!page) {
+        this.targets.delete(targetId);
+        continue;
+      }
+      found.push(page);
+      this.owned.add(page);
+      page.once('close', () => this.owned.delete(page));
+    }
+    if (found.length) {
+      // The agent was told where its files are before.
+      this.started = true;
+      this._filesNoted = true;
+    }
+    this._restored = { pages: found, current: this.currentTarget ? pages.get(this.currentTarget) : undefined };
+  }
+
+  // For the saved state: the current tab's target id.
+  currentTargetId(): string | undefined {
+    const page = this.backend?._context?.currentTab()?.page;
+    return (page && this._shared.cachedTargetId(page)) ?? this.currentTarget;
+  }
+
+  // Calls of one session run one at a time: the stock Context has a single
+  // "current tab".
   async callTool(name: string, args: any, signal?: AbortSignal) {
     const run = this._queue.then(() => this._callTool(name, args, signal));
     this._queue = run.catch(() => {});
@@ -82,7 +174,7 @@ export class AgentSession {
       context._currentTab = target;
     }
     if (Date.now() - this._touchedAt > 5 * 60 * 1000) {
-      touchFolder(this.filesDir);
+      touchFolder(this.ensureFilesDir());
       this._touchedAt = Date.now();
     }
     const result = await this.backend.callTool(name, args, signal);
@@ -94,6 +186,8 @@ export class AgentSession {
         `traces, relative file names) go to ${this.filesDir}; paths in results are relative to it. The folder is deleted after ` +
         `${this._retentionDays} days without use: copy anything worth keeping into the project.` });
     }
+    // Remembered for a dropped connection, when the pages are already gone.
+    this.currentTarget = this.currentTargetId();
     // browser_close disposes the backend; the next call gets a fresh one.
     if (this.backend._disposed)
       this.backend = undefined;
@@ -140,16 +234,30 @@ export class AgentSession {
   async dispose({ closeTabs }: { closeTabs: boolean }) {
     const backend = this.backend;
     this.backend = undefined;
+    const pages = [...this.owned, ...this._restored?.pages ?? []];
+    this._restored = undefined;
     if (closeTabs) {
-      for (const page of [...this.owned])
+      for (const page of pages)
         await page.close().catch(() => {});
     }
     await backend?.dispose().catch(() => {});
   }
 
   private _adopt(context: any, page: Page) {
-    this.owned.add(page);
-    page.once('close', () => this.owned.delete(page));
+    if (!this.owned.has(page)) {
+      this.owned.add(page);
+      page.once('close', () => this.owned.delete(page));
+    }
+    const targetId = this._shared.cachedTargetId(page);
+    if (targetId) {
+      this.targets.add(targetId);
+    } else {
+      void this._shared.targetId(page).then(id => {
+        this.targets.add(id);
+        this._host.onTabsChanged();
+      }, () => {});
+    }
+    this._host.onTabsChanged();
     if (!context._tabs.some((tab: any) => tab.page === page))
       context._onPageCreated(page);
   }
