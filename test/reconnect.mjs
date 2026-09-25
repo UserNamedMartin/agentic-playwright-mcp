@@ -164,6 +164,17 @@ try {
   check('other chat keeps its tab', bTabs.length === 1);
   check('groups kept after the drop', (await groupTitles()).includes('Renamed chat (2)'));
 
+  // A drop in the middle of calls: a read-only one is repeated by the gateway,
+  // an action reports what happened instead of a raw error.
+  const waiting = a.call('browser_wait_for', { time: 2 });
+  const evaluating = b.call('browser_evaluate', { function: '() => new Promise(r => setTimeout(() => r("done"), 2000))' });
+  await sleep(500);
+  dropConnections();
+  const waited = await waiting;
+  check('read-only call cut off by a drop is repeated', !waited.includes('Error'), waited.split('\n')[1]);
+  const evaluated = await evaluating;
+  check('action cut off by a drop says so', evaluated.includes('connection to the browser dropped'), evaluated.split('\n')[1]?.slice(0, 80));
+
   // Restart the gateway (service restart = SIGTERM): the browser and tabs stay.
   const beforeRestart = tabIds(withLink);
   const stateFile = path.join(home, 'profiles', 'test', 'sessions.json');

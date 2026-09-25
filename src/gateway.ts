@@ -78,6 +78,8 @@ export class Gateway implements SessionHost {
   // Resolves once the browser is connected; tool calls wait for it while the
   // gateway reconnects.
   private _ready: Promise<void> = Promise.resolve();
+  // Counts dropped browser connections, to tell which calls one cut off.
+  private _connection = 0;
   private _desktopChats = new Map<string, DesktopChatFile>();
   private _saveTimer: NodeJS.Timeout | undefined;
 
@@ -157,6 +159,7 @@ export class Gateway implements SessionHost {
     console.error('browser connection lost; reconnecting');
     // Whether the browser dropped every DevTools client or only ours.
     setTimeout(() => console.error(`the gateway's second DevTools connection is ${shared.canaryState()}`), 1000).unref();
+    this._connection++;
     for (const session of this.sessions.values())
       session.detach();
     shared.dispose();
@@ -503,9 +506,36 @@ export class Gateway implements SessionHost {
         console.error(`tab link button clicked in ${session.info.title}`);
         return await this._openTabWindow(String(args.targetId ?? ''));
       }
-      return await target.callTool(request.params.name, args, extra.signal);
+      return await this._callWithRetry(target, request.params.name, args, extra.signal);
     });
     return server;
+  }
+
+  // A call that was running when the browser connection dropped fails (its
+  // page objects are gone) although nothing is wrong with the agent's request.
+  // Calls that change nothing are repeated once the gateway has reconnected;
+  // for the others the agent is told what happened, since the action may or
+  // may not have taken effect.
+  private async _callWithRetry(session: AgentSession, name: string, args: any, signal?: AbortSignal) {
+    for (let attempt = 0; ; attempt++) {
+      const generation = this._connection;
+      let result: any;
+      try {
+        result = await session.callTool(name, args, signal);
+      } catch (e) {
+        if (generation === this._connection)
+          throw e;
+      }
+      if (generation === this._connection)
+        return result;
+      await this._ready;
+      if (attempt === 0 && isSafeToRepeat(this._tools, name, args)) {
+        console.error(`${name} from ${session.info.title} was cut off by the reconnect; repeating it`);
+        continue;
+      }
+      return errorResult('The connection to the browser dropped while this call ran and has been restored; your tabs ' +
+        'are still open. The action may or may not have taken effect: check the page (browser_snapshot) before repeating it.');
+    }
   }
 
   // Claude Code subagents are recognized from the chat's transcripts, so they
@@ -694,6 +724,15 @@ const subagentTool = {
   },
   annotations: { title: 'Start a subagent browser session', readOnlyHint: false, destructiveHint: false, openWorldHint: false },
 };
+
+// Calls that only read, or that land in the same state when repeated.
+function isSafeToRepeat(tools: any[], name: string, args: any) {
+  if (name === 'browser_navigate' || (name === 'browser_tabs' && ['list', 'select'].includes(args?.action)))
+    return true;
+  const type = tools.find(tool => tool.schema.name === name)?.schema.type;
+  // Recording, tracing and video calls start or stop something.
+  return (type === 'readOnly' || type === 'assertion') && !/_(recording|tracing|video)|video_/.test(name);
+}
 
 function errorResult(text: string) {
   return { content: [{ type: 'text' as const, text: `### Error\n${text}` }], isError: true };
