@@ -199,10 +199,49 @@ try {
   works('browser_verify_value', await A.call('browser_verify_value', { type: 'textbox', element: 'field', target: '#t', value: 'filled' }));
   works('browser_wait_for', await A.call('browser_wait_for', { time: 1 }));
   works('browser_evaluate', await A.call('browser_evaluate', { function: '() => 1' }));
+  // run_code's page: the browser seen through it holds only A's tabs.
+  const runCode = async (who, code) => (await who.call('browser_run_code_unsafe', { code })).text;
   const code = await A.call('browser_run_code_unsafe', { code: 'async page => page.context().pages().map(p => p.url()).join(" ")' });
   works('browser_run_code_unsafe', code);
-  record('browser_run_code_unsafe', 'sees other chats\' pages', code.text.includes('who=B') ? 'note' : 'ok',
-    code.text.includes('who=B') ? 'page.context() is the shared context: A can read and drive B\'s tabs (by design "unsafe")' : '');
+  expect('browser_run_code_unsafe', 'context().pages() lists only A\'s tabs', !code.text.includes('who=B') && code.text.includes('who=A'), code.text);
+  expect('browser_run_code_unsafe', 'context().browser() is not reachable', /null/.test(await runCode(A, 'async page => String(page.context().browser())')), '');
+  await B.eval('() => { document.cookie = "b_run=1; path=/"; return 1; }');
+  await runCode(A, 'async page => { await page.context().clearCookies(); return "cleared"; }');
+  expect('browser_run_code_unsafe', 'context().clearCookies() leaves B\'s cookies', (await B.eval('() => document.cookie')).includes('b_run'), 'B lost its cookie');
+  await runCode(A, 'async page => { await page.context().route("**/probe-run*", r => r.fulfill({ body: "RUN-HIJACK" })); return 1; }');
+  const runRouted = await B.eval(`() => fetch('/probe-run').then(r => r.text(), () => 'FAILED')`);
+  expect('browser_run_code_unsafe', 'context().route() does not reach B', runRouted === 'REAL', `B got ${runRouted}`);
+  const aRouted = await A.eval(`() => fetch('/probe-run').then(r => r.text(), () => 'FAILED')`);
+  expect('browser_run_code_unsafe', 'context().route() works for A', aRouted === 'RUN-HIJACK', `A got ${aRouted}`, 'BROKEN');
+  await runCode(A, 'async page => { await page.context().unrouteAll(); return 1; }');
+  await runCode(A, 'async page => { await page.context().setOffline(true); return 1; }');
+  const runOffline = await B.eval(`() => fetch('/probe-run-off').then(r => r.text(), () => 'FAILED')`);
+  expect('browser_run_code_unsafe', 'context().setOffline() does not reach B', runOffline === 'REAL', `B: ${runOffline}`);
+  await runCode(A, 'async page => { await page.context().setOffline(false); return 1; }');
+  const refusedInit = await runCode(A, 'async page => { await page.context().addInitScript("1"); return "ran"; }');
+  expect('browser_run_code_unsafe', 'context-wide addInitScript refused with a hint', /not available here[\s\S]*page\.addInitScript/.test(refusedInit), refusedInit);
+  const newPage = await runCode(A, `async page => { const p = await page.context().newPage(); await p.goto(${JSON.stringify(urlA + '&run=new')}); return page.context().pages().length; }`);
+  const tabsAfterNew = await A.call('browser_tabs', { action: 'list' });
+  expect('browser_run_code_unsafe', 'context().newPage() is one of A\'s tabs', tabsAfterNew.text.includes('run=new'), `${newPage} / ${tabsAfterNew.text}`, 'BROKEN');
+  expect('browser_run_code_unsafe', 'context().newPage() not in B\'s tabs', !(await B.call('browser_tabs', { action: 'list' })).text.includes('run=new'), 'B lists it');
+  await A.call('browser_tabs', { action: 'close' });
+  await A.call('browser_tabs', { action: 'select', index: 0 });
+  const waiting = A.call('browser_run_code_unsafe', { code: 'async page => { try { const p = await page.context().waitForEvent("page", { timeout: 2500 }); return "got " + p.url(); } catch (e) { return "none"; } }' });
+  await sleep(500);
+  await B.call('browser_tabs', { action: 'new', url: `${urlB}&bnew=1` });
+  await B.call('browser_tabs', { action: 'close' });
+  await B.call('browser_tabs', { action: 'select', index: 0 });
+  const waited = (await waiting).text;
+  expect('browser_run_code_unsafe', 'waitForEvent("page") ignores B\'s new tab', /none/.test(waited), waited);
+  const popup = await runCode(A, 'async page => { const [p] = await Promise.all([page.context().waitForEvent("page"), page.evaluate(() => window.open(location.href + "&popup=1"))]); return "got " + p.url(); }');
+  expect('browser_run_code_unsafe', 'waitForEvent("page") sees A\'s popup', /popup=1/.test(popup), popup, 'BROKEN');
+  await A.call('browser_tabs', { action: 'close', index: 1 });
+  await A.call('browser_tabs', { action: 'select', index: 0 });
+  const D = await chat('chat-D');
+  await D.call('browser_navigate', { url: `${urlA}&d=1` });
+  await runCode(D, 'async page => { await page.context().close(); return 1; }');
+  await sleep(500);
+  expect('browser_run_code_unsafe', 'context().close() closes only its own tabs', (await B.eval('() => location.href')).includes('who=B') && !(await cdpPages()).some(p => p.url.includes('d=1')), 'B\'s tab or D\'s tab state wrong');
 
   // Tabs: only A's own.
   const tabsA = await A.call('browser_tabs', { action: 'list' });

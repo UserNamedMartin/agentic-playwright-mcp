@@ -7,13 +7,14 @@
 import fs from 'node:fs';
 import type { BrowserContext, Cookie } from 'playwright-core';
 import { z } from './internals.js';
+import { isolatedView } from './isolation.js';
 
 // Sites (http and https URLs) of the session's open tabs.
-function ownUrls(context: any): string[] {
+export function ownUrls(context: any): string[] {
   return context.tabs().map((tab: any) => tab.page.url()).filter((url: string) => /^https?:/.test(url));
 }
 
-async function ownCookies(context: any): Promise<Cookie[]> {
+export async function ownCookies(context: any): Promise<Cookie[]> {
   const urls = ownUrls(context);
   if (!urls.length)
     return [];
@@ -31,6 +32,46 @@ function domainMatches(cookie: Cookie, domain: string) {
 async function removeCookies(browserContext: BrowserContext, cookies: Cookie[]) {
   for (const c of cookies)
     await browserContext.clearCookies({ name: c.name, domain: c.domain, path: c.path });
+}
+
+// Cookies and local storage of the sites open in the session's tabs.
+export async function scopedStorageState(context: any) {
+  const browserContext: BrowserContext = await context.ensureBrowserContext();
+  const state = await browserContext.storageState();
+  const own = new Set((await ownCookies(context)).map(c => `${c.name}\n${c.domain}\n${c.path}`));
+  const origins = new Set(ownUrls(context).map(u => new URL(u).origin));
+  return {
+    cookies: state.cookies.filter(c => own.has(`${c.name}\n${c.domain}\n${c.path}`)),
+    origins: state.origins.filter(o => origins.has(o.origin)),
+  };
+}
+
+// Replaces the cookies and local storage of the sites in `state` only.
+export async function applyStorageState(context: any, state: any) {
+  const browserContext: BrowserContext = await context.ensureBrowserContext();
+  const cookies: Cookie[] = state.cookies ?? [];
+  for (const domain of new Set(cookies.map(c => c.domain)))
+    await browserContext.clearCookies({ domain });
+  if (cookies.length)
+    await browserContext.addCookies(cookies);
+  const origins: { origin: string; localStorage: { name: string; value: string }[] }[] = state.origins ?? [];
+  if (origins.length) {
+    // Written over CDP from one of the session's own tabs, so no page has
+    // to be opened on each origin (upstream opens one, in the foreground).
+    const tab = await context.ensureTab();
+    const cdp = await browserContext.newCDPSession(tab.page);
+    try {
+      for (const { origin, localStorage } of origins) {
+        const storageId = { securityOrigin: origin, isLocalStorage: true };
+        await cdp.send('DOMStorage.clear', { storageId });
+        for (const { name, value } of localStorage)
+          await cdp.send('DOMStorage.setDOMStorageItem', { storageId, key: name, value });
+      }
+    } finally {
+      await cdp.detach().catch(() => {});
+    }
+  }
+  return { cookies: cookies.length, origins: origins.length };
 }
 
 // Tracing and the recorder can only work on the whole browser context, so one
@@ -154,14 +195,7 @@ const replacements: Record<string, { description?: string; inputSchema?: any; ha
   browser_storage_state: {
     description: 'Save the cookies and local storage of the sites open in your tabs to a file. Other chats share this browser, so other sites are left out.',
     handle: async (context, params, response) => {
-      const browserContext: BrowserContext = await context.ensureBrowserContext();
-      const state = await browserContext.storageState();
-      const own = new Set((await ownCookies(context)).map(c => `${c.name}\n${c.domain}\n${c.path}`));
-      const origins = new Set(ownUrls(context).map(u => new URL(u).origin));
-      const scoped = {
-        cookies: state.cookies.filter(c => own.has(`${c.name}\n${c.domain}\n${c.path}`)),
-        origins: state.origins.filter(o => origins.has(o.origin)),
-      };
+      const scoped = await scopedStorageState(context);
       const file = await response.resolveClientOutputFile({ prefix: 'storage-state', ext: 'json', suggestedFilename: params.filename }, 'Storage state');
       response.addCode(`await page.context().storageState({ path: ${JSON.stringify(file.relativeName)} });`);
       await response.addFileResult(file, JSON.stringify(scoped, null, 2));
@@ -170,34 +204,14 @@ const replacements: Record<string, { description?: string; inputSchema?: any; ha
   browser_set_storage_state: {
     description: 'Restore cookies and local storage from a storage state file. Only the sites in the file are replaced; other sites keep their cookies and storage.',
     handle: async (context, params, response) => {
-      const browserContext: BrowserContext = await context.ensureBrowserContext();
       const file = await response.resolveClientFilename(params.filename);
-      const state = JSON.parse(fs.readFileSync(file, 'utf8'));
-      const cookies: Cookie[] = state.cookies ?? [];
-      for (const domain of new Set(cookies.map(c => c.domain)))
-        await browserContext.clearCookies({ domain });
-      if (cookies.length)
-        await browserContext.addCookies(cookies);
-      const origins: { origin: string; localStorage: { name: string; value: string }[] }[] = state.origins ?? [];
-      if (origins.length) {
-        // Written over CDP from one of the session's own tabs, so no page has
-        // to be opened on each origin (upstream opens one, in the foreground).
-        const tab = await context.ensureTab();
-        const cdp = await browserContext.newCDPSession(tab.page);
-        try {
-          for (const { origin, localStorage } of origins) {
-            const storageId = { securityOrigin: origin, isLocalStorage: true };
-            await cdp.send('DOMStorage.clear', { storageId });
-            for (const { name, value } of localStorage)
-              await cdp.send('DOMStorage.setDOMStorageItem', { storageId, key: name, value });
-          }
-        } finally {
-          await cdp.detach().catch(() => {});
-        }
-      }
-      response.addTextResult(`Storage state restored from ${params.filename}: ${cookies.length} cookie(s), local storage of ${origins.length} origin(s)`);
+      const { cookies, origins } = await applyStorageState(context, JSON.parse(fs.readFileSync(file, 'utf8')));
+      response.addTextResult(`Storage state restored from ${params.filename}: ${cookies} cookie(s), local storage of ${origins} origin(s)`);
       response.addCode(`await page.context().setStorageState(${JSON.stringify(params.filename)});`);
     },
+  },
+  browser_run_code_unsafe: {
+    handle: async (context, params, response, original) => await original(isolatedView(context), params, response),
   },
 };
 
