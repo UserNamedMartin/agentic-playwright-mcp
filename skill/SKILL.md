@@ -89,22 +89,16 @@ fixes it for every agent.
 
 ## Permission requests (camera, microphone, location, notifications, ...)
 
-The browser never shows permission prompts. When a page asks for a
-permission, your tool result gets a "Permission requests" section saying which
-tab and site asked for what. Answer it with `browser_permission` (`decision`
-"allow" or "deny"; without `permissions` it answers all open requests):
+The browser shows no permission prompts. Requests appear under "Permission
+requests" in your tool results; answer with `browser_permission` ("allow" or
+"deny"). It returns only a confirmation: call `browser_snapshot` to see the page.
 
-- Camera, microphone, location, notifications and MIDI requests wait up to two
-  minutes for your answer; answer right away and the page gets it.
-- Other requests (clipboard, fonts, ...) are refused at once; if the task needs
-  them, allow and repeat the action that asked.
-- Allow only what the task needs. Deny notifications unless the task is about
-  them. Never allow camera or microphone just to get past a page; ask the user
-  if unsure.
-- You can also allow ahead of time: `browser_permission` with `permissions`
-  (and `origin`, or with the site open in the current tab).
-
-Decisions apply to the whole site for every chat of this setup.
+- Camera, microphone, location, notifications, MIDI: the page waits up to two
+  minutes for your answer.
+- Others (clipboard, fonts, ...) need a fresh click, so they are refused at
+  once: allow, then repeat the click.
+- Allow only what the task needs; deny notifications unless the task is about
+  them. Decisions apply to the whole site, for every chat of this setup.
 
 ## Showing pages to the user
 
