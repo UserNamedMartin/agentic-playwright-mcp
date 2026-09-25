@@ -103,7 +103,8 @@ export class Gateway implements SessionHost {
     verifyInternals();
     this._config = await pwTools.resolveCLIConfigForMCP({
       cdpEndpoint: this.options.cdpEndpoint,
-      caps: this.options.caps ?? ['devtools', 'network', 'storage', 'testing'],
+      // vision: coordinate mouse tools, for canvases, maps and slider captchas.
+      caps: this.options.caps ?? ['devtools', 'network', 'storage', 'testing', 'vision'],
     });
     this._tools = scopeTools([...pwTools.filteredTools(this._config), ...extraTools(this)]);
     this._server = http.createServer((req, res) => void this._handle(req, res).catch(e => {
@@ -687,7 +688,24 @@ export class Gateway implements SessionHost {
         throw new Error(`Unknown resource ${request.params.uri}`);
       return { contents: [{ uri: tabLinkResourceUri, mimeType: appMimeType, text: tabLinkHtml }] };
     });
+    // Upstream turns a failing tool into an error result the agent can read;
+    // anything thrown on the gateway's own path would otherwise reach it as a
+    // bare JSON-RPC error. A call the agent cancelled stays a cancellation.
     server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
+      try {
+        return await this._dispatch(session, request, extra);
+      } catch (e) {
+        if (extra.signal.aborted)
+          throw e;
+        console.error(`${request.params.name} from ${session.info.title} failed: ${(e as Error).stack ?? e}`);
+        return errorResult(String((e as Error).message ?? e));
+      }
+    });
+    return server;
+  }
+
+  private async _dispatch(session: AgentSession, request: any, extra: any) {
+    {
       await this._ready;
       const { agent, ...args } = (request.params.arguments ?? {}) as Record<string, any>;
       if (request.params.name === subagentTool.name)
@@ -705,8 +723,7 @@ export class Gateway implements SessionHost {
         return await this._openTabWindow(String(args.targetId ?? ''));
       }
       return await this._callWithRetry(target, request.params.name, args, extra.signal);
-    });
-    return server;
+    }
   }
 
   // A call that was running when the browser connection dropped fails (its

@@ -178,6 +178,19 @@ try {
     works(tool, await A.call(tool, args));
     await bQuiet(tool, B);
   }
+  // Coordinate mouse tools (vision).
+  const box = await A.eval('() => { const r = document.getElementById("b").getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; }');
+  for (const [tool, args] of [
+    ['browser_mouse_move_xy', { x: box.x, y: box.y }],
+    ['browser_mouse_click_xy', { x: box.x, y: box.y }],
+    ['browser_mouse_down', {}],
+    ['browser_mouse_up', {}],
+    ['browser_mouse_wheel', { deltaX: 0, deltaY: 50 }],
+    ['browser_mouse_drag_xy', { startX: box.x, startY: box.y, endX: box.x + 40, endY: box.y }],
+  ]) {
+    works(tool, await A.call(tool, args));
+    await bQuiet(tool, B);
+  }
   const aGot = await A.eval('() => window.__log.join(" ")');
   expect('browser_click', 'A page got the input', /click:b/.test(aGot) && /input:t/.test(aGot), aGot, 'BROKEN');
   works('browser_verify_element_visible', await A.call('browser_verify_element_visible', { role: 'button', accessibleName: 'Go' }));
@@ -372,6 +385,8 @@ try {
   } else {
     record('browser_subagent_start', 'returns an agent id', 'note', sub.text.slice(0, 200));
   }
+  const bogus = await A.call('browser_open_tab_window', { targetId: 'NOPE' });
+  expect('browser_open_tab_window', 'a failure is an error result, not a protocol error', bogus.isError && !bogus.protocolError, bogus.text, 'BROKEN');
   const annotate = await A.call('browser_annotate', { timeout: 3 }, 3);
   record('browser_annotate', 'gives up instead of waiting forever (headless, no user)', annotate.protocolError ? 'BROKEN' : 'ok', annotate.protocolError ? annotate.text : '');
   expect('browser_evaluate', 'session answers after annotate', (await A.eval('() => 2')) === 2, 'session stuck', 'BROKEN');
