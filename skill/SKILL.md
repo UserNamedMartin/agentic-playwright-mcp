@@ -128,8 +128,9 @@ affects your current tab. Reset it with `"reset": true` when done. Do not use
 
 Everything the browser saves (screenshots, snapshots, downloads, videos,
 traces, and any file you name with a relative path) goes into this chat's own
-files folder, never into the project. The first browser result tells you its
-path; paths in later results are relative to it. Subagents get a subfolder.
+files folder, never into the project. Results give each file's absolute
+path: use it as is, never search the disk for a file (`find /` makes macOS
+ask the user for access). Subagents get a subfolder.
 
 - The folder is temporary: it is deleted after a week without use. Copy
   anything worth keeping into the project yourself (and tell the user where).

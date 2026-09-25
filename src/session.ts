@@ -4,6 +4,7 @@
 // sees the tabs it opened (plus popups those tabs open), and opens them in the
 // background.
 import fs from 'node:fs';
+import path from 'node:path';
 import type { Page } from 'playwright-core';
 import type { SharedBrowser } from './browser.js';
 import type { TabGroups } from './groups.js';
@@ -184,11 +185,19 @@ export class AgentSession {
     const result = await this.backend.callTool(name, args, signal);
     // Tell the agent once where its files go; paths in later results are
     // relative to this folder.
+    // Saved files are named by absolute path: given "./shot.png", agents went
+    // looking for it with `find /`, which scans other apps' data and makes
+    // macOS ask the user for access.
+    const filesDir = this.ensureFilesDir();
+    for (const part of result.content ?? []) {
+      if (part.type === 'text' && typeof part.text === 'string')
+        part.text = absolutePaths(part.text, filesDir);
+    }
     if (!this._filesNoted && !result.isError) {
       this._filesNoted = true;
       result.content.push({ type: 'text', text: `### Files\nFiles this browser session saves (screenshots, snapshots, downloads, videos, ` +
-        `traces, relative file names) go to ${this.filesDir}; paths in results are relative to it. The folder is deleted after ` +
-        `${this._retentionDays} days without use: copy anything worth keeping into the project.` });
+        `traces) go to ${filesDir}. It is deleted after ${this._retentionDays} days without use: copy anything worth ` +
+        'keeping into the project.' });
     }
     const permissions = this._host.permissionNotes(this);
     if (permissions)
@@ -308,4 +317,18 @@ export class AgentSession {
       return tab;
     };
   }
+}
+
+// Relative file paths in a result ("./shot.png", "shots/a.png", "../x.pdf")
+// become absolute. Only paths of files that exist are changed, so text from the
+// page (a link to "./about") stays as it is.
+function absolutePaths(text: string, filesDir: string) {
+  return text.replace(/(^|[\s("'`])((?:\.\.?\/)*[\w@%+~-][\w@%+~.\/-]*\.[A-Za-z0-9]{1,8})(?=$|[\s)"'`,;])/g, (match, before: string, name: string) => {
+    const file = path.resolve(filesDir, name);
+    try {
+      return fs.statSync(file).isFile() ? `${before}${file}` : match;
+    } catch {
+      return match;
+    }
+  });
 }
