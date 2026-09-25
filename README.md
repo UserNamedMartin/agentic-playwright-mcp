@@ -211,7 +211,11 @@ the gateway created). Change the location or the retention with `filesDir` and
   switches tabs (without bringing the window to the front).
 - Claude Code sends each tool call's tool-use id; the gateway looks it up in
   the chat's transcripts to tell subagents apart.
-- A small companion extension, loaded over CDP, manages the tab groups.
+- A small companion extension, loaded over CDP, manages the tab groups and
+  duplicates tabs for forked chats.
+- Page scripts added to every tab report permission and passkey requests to
+  the gateway before the browser sees them.
+- Chat titles and forks come from the Claude desktop app's chat files.
 - A pinned status page at the gateway's address keeps the window alive and
   lists the sessions.
 
@@ -281,8 +285,10 @@ npm install
 npm run build
 ```
 
-`test/` holds scripts used during development against a running gateway; see
-[test/README.md](test/README.md).
+`test/` holds self-contained pass/fail tests (`reconnect`, `permissions`,
+`passkeys`, `forks`: each starts its own headless browser and gateway;
+`headed` needs a screen and shows a window) and scripts used during
+development against a running gateway; see [test/README.md](test/README.md).
 
 ## License
 

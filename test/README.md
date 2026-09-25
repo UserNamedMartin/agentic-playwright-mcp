@@ -1,10 +1,16 @@
 # Development test scripts
 
-Scripts used while developing the gateway. Each one talks to a running gateway
-(or its browser) and prints what it observed; none of them is an automated
-pass/fail suite yet.
+Two kinds of scripts:
 
-Start a throwaway headless profile so nothing appears on screen:
+- self-contained pass/fail tests (`reconnect`, `permissions`, `passkeys`,
+  `forks`, `headed`): each starts its own browser, gateway and scratch
+  `AGENTIC_PLAYWRIGHT_HOME`, prints one line per check and exits non-zero on
+  failure. All but `headed` are headless; `headed` shows a window (macOS).
+- scripts used while developing the gateway: they talk to a running gateway
+  (or its browser) and print what they observed.
+
+For the second kind, start a throwaway headless profile so nothing appears on
+screen:
 
 ```sh
 export AGENTIC_PLAYWRIGHT_HOME=/tmp/apm-test
