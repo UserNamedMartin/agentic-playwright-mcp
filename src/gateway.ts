@@ -270,10 +270,9 @@ export class Gateway implements SessionHost {
   filesFolder(session: AgentSession): string {
     const [rootId, sub] = session.info.id.split('#');
     if (sub === undefined)
-      return sessionFolder(this.options.filesDir, session.info.id, session.info.title);
+      return sessionFolder(this.options.filesDir, session.info.id);
     const root = this.sessions.get(rootId);
-    const rootDir = root ? root.ensureFilesDir() : sessionFolder(this.options.filesDir, rootId, session.info.title.split(' · ')[0]);
-    return subagentFolder(rootDir, sub, session.info.label ?? sub);
+    return subagentFolder(root ? root.ensureFilesDir() : sessionFolder(this.options.filesDir, rootId), sub);
   }
 
   onSessionStarted(session: AgentSession) {

@@ -164,10 +164,12 @@ agent works in:
 
 ```
 ~/.agentic-playwright-mcp/profiles/<profile>/files/
-  2026-09-24_fix-the-login-page_a1b2c3d4/      one folder per chat
+  0f3c9a1e-5b7d-4e2a-9c61-2d8b4f6a7e10/      one folder per chat, named by its id
     page-….yml  shots/home.png  report.pdf
-    pricing-research_e5f6a7b8/                 one per subagent
+    a4f2e91c7b3d5e60/                        one per subagent
 ```
+
+Folders are named by id rather than by chat title, since titles change.
 
 The first tool result of a session gives the agent the folder's path; later
 results use paths relative to it. A chat that comes back finds its folder

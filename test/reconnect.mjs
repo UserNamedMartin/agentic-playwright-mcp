@@ -193,7 +193,7 @@ try {
   check('groups kept after a gateway restart', (await groupTitles()).includes('Renamed chat'));
   const shot = await a2.call('browser_take_screenshot', { filename: 'after-restart.png' });
   const folders = fs.readdirSync(filesRoot);
-  const chatA = folders.find(name => name.endsWith('_chata'));
+  const chatA = folders.find(name => name === 'chat-a');
   check('same files folder after restart', folders.length === 2 && !!chatA && fs.existsSync(path.join(filesRoot, chatA, 'after-restart.png')), folders.join(', '));
 
   await a2.call('browser_tabs', { action: 'close', index: 0 });

@@ -8,29 +8,42 @@ import path from 'node:path';
 
 const marker = '.agentic-browser-session';
 
-export function slug(text: string, max = 40) {
-  return text.toLowerCase().normalize('NFKD').replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-+|-+$/g, '').slice(0, max) || 'session';
+// Folders are named after the chat's (or subagent's) id, not its title: titles
+// change, ids do not. A folder from an older version with another name is
+// still found by the id in its marker file.
+function folderName(id: string) {
+  return id.replace(/^local_/, '').replace(/[^a-zA-Z0-9._-]+/g, '-').slice(0, 80) || 'session';
 }
 
-function shortId(id: string) {
-  return id.replace(/^local_/, '').replace(/[^a-zA-Z0-9]/g, '').slice(-8);
-}
-
-// <root>/<date>_<title>_<id>. A chat that comes back (resumed, reconnected)
-// finds its folder again by the id suffix, even if its title changed.
-export function sessionFolder(root: string, id: string, title: string): string {
-  const suffix = `_${shortId(id)}`;
+export function sessionFolder(root: string, id: string): string {
   fs.mkdirSync(root, { recursive: true });
-  const existing = fs.readdirSync(root).find(name => name.endsWith(suffix) && fs.existsSync(path.join(root, name, marker)));
-  const dir = path.join(root, existing ?? `${new Date().toISOString().slice(0, 10)}_${slug(title)}${suffix}`);
+  const dir = path.join(root, existingFolder(root, id) ?? folderName(id));
   prepare(dir, id);
   return dir;
 }
 
-export function subagentFolder(chatDir: string, id: string, description: string): string {
-  const dir = path.join(chatDir, `${slug(description, 30)}_${shortId(id)}`);
+export function subagentFolder(chatDir: string, id: string): string {
+  const dir = path.join(chatDir, existingFolder(chatDir, id) ?? folderName(id));
   prepare(dir, id);
   return dir;
+}
+
+function existingFolder(root: string, id: string): string | undefined {
+  let names: string[];
+  try {
+    names = fs.readdirSync(root);
+  } catch {
+    return undefined;
+  }
+  if (names.includes(folderName(id)))
+    return folderName(id);
+  return names.find(name => {
+    try {
+      return fs.readFileSync(path.join(root, name, marker), 'utf8').trim() === id;
+    } catch {
+      return false;
+    }
+  });
 }
 
 function prepare(dir: string, id: string) {
