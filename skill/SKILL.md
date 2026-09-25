@@ -25,6 +25,11 @@ work, with a few differences described here.
 - Everything happens in the background: the user does not see the window
   unless you give them a link (see "Showing pages to the user"). Never assume
   they are watching.
+- A chat forked in the Claude desktop app starts with copies of the original
+  chat's tabs (listed under "Tabs of the original chat" in your first result);
+  the originals stay with that chat. The copies are reloaded pages: take a
+  snapshot before acting, and on payment, one-time or form-result pages check
+  that the copy did not repeat or break something.
 - Only use the browser when the task needs it. When the user checks a UI
   themselves, do not open pages or take screenshots to "verify" unless asked.
 

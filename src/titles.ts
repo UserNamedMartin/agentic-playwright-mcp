@@ -9,7 +9,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-export type DesktopChat = { title?: string; cliSessionId?: string };
+// forkedFrom: the chat this one was forked from (the desktop app's fork command).
+export type DesktopChat = { title?: string; cliSessionId?: string; forkedFrom?: string };
 
 // Claude desktop keeps its chats under <app support>/Claude*/claude-code-sessions/<account>/<org>/<id>.json.
 // Several copies of the same chat can exist (one per app data folder); the most
@@ -47,6 +48,7 @@ export class DesktopChatFile {
       this._chat = {
         title: typeof chat.title === 'string' && chat.title.trim() ? chat.title.trim() : undefined,
         cliSessionId: typeof chat.cliSessionId === 'string' ? chat.cliSessionId : undefined,
+        forkedFrom: typeof chat.forkedFromSessionId === 'string' && chat.forkedFromSessionId !== this._hostSessionId ? chat.forkedFromSessionId : undefined,
       };
       this._mtime = newestMtime;
     } catch {}
@@ -59,7 +61,10 @@ export function desktopChat(hostSessionId: string | undefined): DesktopChat | un
 }
 
 function findDesktopChatFiles(hostSessionId: string): string[] {
-  const supportDir = process.platform === 'darwin' ? path.join(os.homedir(), 'Library', 'Application Support') : path.join(os.homedir(), '.config');
+  // AGENTIC_CLAUDE_APP_SUPPORT points tests at fake chat files (changing HOME
+  // instead would also move the browser's keychain on macOS).
+  const supportDir = process.env.AGENTIC_CLAUDE_APP_SUPPORT ??
+      (process.platform === 'darwin' ? path.join(os.homedir(), 'Library', 'Application Support') : path.join(os.homedir(), '.config'));
   let appDirs: string[] = [];
   try {
     appDirs = fs.readdirSync(supportDir).filter(name => /^Claude/.test(name));

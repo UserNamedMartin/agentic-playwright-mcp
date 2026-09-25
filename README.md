@@ -37,6 +37,10 @@ Stock Playwright MCP is built for one agent at a time:
   created when the chat first uses the browser. The group is titled after the
   chat and follows renames (Claude desktop app chats, and `/rename` in the
   Claude Code CLI); chats with the same title are numbered.
+- **Forked chats keep their tabs**: a chat forked in the Claude desktop app
+  starts with copies of the original chat's tabs, made like the browser's
+  "Duplicate" command (history and sessionStorage included); the originals stay
+  with the original chat.
 - **Subagents, automatically**: Claude Code subagents are recognized and get
   their own tab group, running in parallel. Other clients call
   `browser_subagent_start`.
@@ -231,6 +235,13 @@ the gateway created). Change the location or the retention with `filesDir` and
   gateway keeps them (in `sessions.json`) and sets them again. Requests the
   page script cannot see (local network access, for example) are refused
   silently; agents can allow them ahead of time with `browser_permission`.
+- A fork's copies are made when the fork first uses the browser, from the
+  original chat's tabs at that moment, and only for forks made in the Claude
+  desktop app (it records the original chat; CLI `--fork-session` is not
+  detected). A copy reloads its page: state the page kept only in memory is
+  lost, and pages that act when loaded (payment steps, one-time links, form
+  results) may do it again or show an error. Cookies are shared, so the copy
+  is signed in wherever the original was.
 - "Nobody can see the browser" means headless, hidden, or its window
   minimized. A passkey request in a tab behind other tabs of a shown window
   still goes through to the browser's prompt.

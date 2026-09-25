@@ -17,11 +17,12 @@ Read README.md first for what the project does. This file is about changing it.
 - `src/permissions.ts` — permission requests: page hooks, notices, names.
 - `src/passkeys.ts` — passkey (WebAuthn) requests: page hook, notice.
 - `src/identity.ts` — `headersHelper` output (who is connecting).
-- `src/titles.ts` — current chat titles (Claude desktop chat files); CLI
-  `/rename` titles come from `subagents.ts`.
+- `src/titles.ts` — current chat titles and forks (Claude desktop chat
+  files); CLI `/rename` titles come from `subagents.ts`.
 - `src/launcher.ts`, `supervisor.ts`, `service.ts`, `profiles.ts`,
   `urlhandler.ts`, `macos.ts` — running profiles on the machine.
-- `extension/` — companion extension (tab groups), loaded over CDP.
+- `extension/` — companion extension (tab groups, duplicating tabs for forked
+  chats), loaded over CDP.
 - `skill/SKILL.md` — the agent skill users install; keep it in sync with
   behavior changes.
 
@@ -48,13 +49,17 @@ Read README.md first for what the project does. This file is about changing it.
   `Target.targetDestroyed` means a tab really closed. The gateway must survive
   a dropped connection (it reconnects) and a restart (`sessions.json`) without
   closing anyone's tabs.
+- Tests must not change `HOME`: on macOS the browser then looks for its
+  keychain there and the system shows the user a "Keychain Not Found" dialog.
+  Point the gateway at fake files with variables such as
+  `AGENTIC_CLAUDE_APP_SUPPORT` instead.
 - Keep personal data out of the repo: no user names, paths, profile names or
   ports of a particular machine.
 
 ## Checking changes
 
-`npm run build`, then `node test/reconnect.mjs`, `node test/permissions.mjs`
-and `node test/passkeys.mjs`
+`npm run build`, then `node test/reconnect.mjs`, `node test/permissions.mjs`,
+`node test/passkeys.mjs` and `node test/forks.mjs`
 (self-contained, headless; headless Chrome grants some permissions by itself,
 so check permission changes in a headed profile too)
 and a throwaway headless profile with the other scripts in `test/` (see

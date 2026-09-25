@@ -40,6 +40,9 @@ export type SessionHost = {
   onTabsChanged(): void;
   // Permission requests of the session's pages the agent should hear about.
   permissionNotes(session: AgentSession): string | undefined;
+  // A forked chat's first start: copies of the original chat's tabs, adopted
+  // by the session; resolves to a note for the agent, if there were any.
+  copyForkedTabs(session: AgentSession): Promise<string | undefined>;
 };
 
 export class AgentSession {
@@ -66,6 +69,8 @@ export class AgentSession {
   private _config: any;
   private _tools: any[];
   private _filesNoted = false;
+  // Told to the agent in the next tool result.
+  private _notes: string[] = [];
   private _touchedAt = 0;
   private _retentionDays: number;
   // Tabs found again after a reconnect or restart, adopted by the next backend.
@@ -96,7 +101,8 @@ export class AgentSession {
   }
 
   async start() {
-    if (!this.started) {
+    const first = !this.started;
+    if (first) {
       this.started = true;
       this._host.onSessionStarted(this);
     }
@@ -119,6 +125,24 @@ export class AgentSession {
         this._adopt(context, page);
       context._currentTab = context._tabs.find((tab: any) => tab.page === restored.current) ?? context._tabs[0];
     }
+    if (first && !this.targets.size) {
+      const note = await this._host.copyForkedTabs(this).catch(e => `### Tabs of the original chat\nCould not copy them: ${(e as Error).message}`);
+      if (note)
+        this._notes.push(note);
+    }
+  }
+
+  // Tabs copied for a forked chat: adopted in order, the last one flagged
+  // current becomes the current tab.
+  async adoptCopies(pages: { page: Page; current: boolean }[]) {
+    const context = this.backend._context;
+    await context.ensureBrowserContext();
+    for (const { page } of pages) {
+      this._adopt(context, page);
+      await this._groups?.addPage(this, page).catch(() => {});
+    }
+    const current = pages.find(p => p.current)?.page ?? pages[0]?.page;
+    context._currentTab = context._tabs.find((tab: any) => tab.page === current) ?? context._currentTab;
   }
 
   // The browser connection dropped: the backend and its pages are dead, but
@@ -202,6 +226,8 @@ export class AgentSession {
         `traces) go to ${filesDir}. It is deleted after ${this._retentionDays} days without use: copy anything worth ` +
         'keeping into the project.' });
     }
+    for (const note of this._notes.splice(0))
+      result.content.push({ type: 'text', text: note });
     const permissions = this._host.permissionNotes(this);
     if (permissions)
       result.content.push({ type: 'text', text: permissions });

@@ -58,6 +58,19 @@ self.apmForgetGroup = serialized(async sessionKey => {
   await chrome.storage.session.set({ groups });
 });
 
+// Duplicates a tab like the browser's "Duplicate" command (history and
+// sessionStorage come along) and returns the new tab's target id.
+self.apmDuplicateTarget = async targetId => {
+  const tab = await chrome.tabs.duplicate(await tabIdForTarget(targetId));
+  for (let i = 0; i < 50; i++) {
+    const target = (await chrome.debugger.getTargets()).find(t => t.tabId === tab.id);
+    if (target)
+      return target.id;
+    await new Promise(r => setTimeout(r, 100));
+  }
+  throw new Error(`No target for the duplicate of ${targetId}`);
+};
+
 // The gateway's status page stays pinned so the window never runs out of tabs.
 self.apmPinTarget = async targetId => {
   const tabId = await tabIdForTarget(targetId);

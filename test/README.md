@@ -17,6 +17,7 @@ node dist/cli.js start test
 | `reconnect.mjs [browser]` | self-contained (own headless browser, gateway and scratch home), pass/fail: tabs survive a dropped DevTools connection and a gateway restart, lazy session start, group titles follow `/rename`, same titles numbered |
 | `permissions.mjs [browser]` | self-contained, pass/fail: permission requests are reported, answered with `browser_permission`, held ones wait, unanswered ones time out |
 | `passkeys.mjs [browser]` | self-contained, pass/fail: passkey requests in a browser nobody can see are cancelled at once and reported; passkey autofill is left alone |
+| `forks.mjs [browser]` | self-contained, pass/fail: a chat forked in the Claude desktop app (fake chat files via `AGENTIC_CLAUDE_APP_SUPPORT`) starts with copies of the original chat's tabs, history and sessionStorage included; the original keeps its own |
 | `e2e-client.mjs <mcp url> <session id> <title>` | one session: navigate, click, second tab, isolation, tab link, device emulation. Run several in parallel for concurrency |
 | `features.mjs <mcp url>` | `target=_blank` links become background tabs; manual subagent sessions |
 | `subagents.mjs <mcp url>` | several callers in one session, each with its own `tab` |

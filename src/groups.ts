@@ -60,6 +60,14 @@ export class TabGroups {
         [targetId, session.info.id, session.info.title, this.colorFor(session)]);
   }
 
+  // Duplicates a tab (see apmDuplicateTarget); resolves to the new target id.
+  async duplicate(targetId: string): Promise<string> {
+    const worker = await this._ensureWorker();
+    if (!worker)
+      throw new Error('The companion extension is not running');
+    return await worker.evaluate(t => (self as any).apmDuplicateTarget(t), targetId);
+  }
+
   async pin(page: Page) {
     const worker = await this._ensureWorker();
     const targetId = await this._shared.targetId(page);

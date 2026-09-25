@@ -120,9 +120,16 @@ export class SharedBrowser {
   // and focus stays wherever the user is. Playwright's context.newPage() opens
   // tabs in the foreground, which un-minimizes the window.
   async newBackgroundPage(url = 'about:blank', newWindow = false): Promise<Page> {
-    const creation = this._cdp.send('Target.createTarget', { url, background: true, focus: false, ...(newWindow ? { newWindow: true, windowState: 'minimized' } : {}) } as any);
+    return await this.createdPage(this._cdp.send('Target.createTarget', { url, background: true, focus: false, ...(newWindow ? { newWindow: true, windowState: 'minimized' } : {}) } as any)
+        .then(({ targetId }) => targetId));
+  }
+
+  // The page of a tab the gateway is creating (resolves to its target id).
+  // Marked as the gateway's own, so no session takes it for a popup of the tab
+  // it came from.
+  async createdPage(creation: Promise<string>): Promise<Page> {
     this._inFlight.add(creation);
-    const { targetId } = await creation.finally(() => this._inFlight.delete(creation));
+    const targetId = await creation.finally(() => this._inFlight.delete(creation));
     this._created.add(targetId);
     const seen = this._seen.get(targetId);
     if (seen) {

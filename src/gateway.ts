@@ -382,6 +382,58 @@ export class Gateway implements SessionHost {
     });
   }
 
+  // SessionHost: a chat forked in the Claude desktop app starts with copies of
+  // the original chat's tabs (the originals stay with that chat). Copies are
+  // made when the fork first uses the browser, like the browser's "Duplicate"
+  // command, so history and sessionStorage come along.
+  async copyForkedTabs(session: AgentSession): Promise<string | undefined> {
+    if (session.info.id.includes('#') || !session.info.desktopChat)
+      return undefined;
+    const forkedFrom = this._desktopChatFile(session.info.desktopChat).read()?.forkedFrom;
+    if (!forkedFrom)
+      return undefined;
+    const original = [...this.sessions.values()].find(s => s !== session && !s.info.id.includes('#') &&
+        (s.info.desktopChat === forkedFrom || s.info.id === forkedFrom));
+    if (!original?.targets.size)
+      return undefined;
+    const current = original.currentTargetId();
+    const copies: { page: Page; current: boolean }[] = [];
+    const failed: string[] = [];
+    for (const targetId of original.targets) {
+      try {
+        const page = this.groups
+          ? await this.shared.createdPage(this.groups.duplicate(targetId))
+          : await this._copyByUrl(targetId);
+        copies.push({ page, current: targetId === current });
+      } catch (e) {
+        failed.push(`${targetId.slice(0, 8)} (${(e as Error).message})`);
+      }
+    }
+    await session.adoptCopies(copies);
+    console.error(`fork ${session.info.title}: copied ${copies.length} tab(s) of ${original.info.title}${failed.length ? `, failed: ${failed.join(', ')}` : ''}`);
+    const ids = await Promise.all(copies.map(async c => (await this.shared.targetId(c.page)).slice(0, 8) + (c.current ? ' (current)' : '')));
+    return `### Tabs of the original chat\nThis chat is a fork of "${original.info.title}". Its tabs were copied into your ` +
+      `group: ${ids.join(', ') || 'none'}${failed.length ? `; could not copy ${failed.join(', ')}` : ''}. The original tabs stay ` +
+      'with that chat. The copies are fresh loads of the same pages (history kept): what a page held only in memory is ' +
+      'gone, and pages that act when loaded (payments, one-time links, form results) may repeat that or show an error. ' +
+      'Take a snapshot before acting.';
+  }
+
+  // Without the companion extension there is no "Duplicate": open the same URL.
+  private async _copyByUrl(targetId: string): Promise<Page> {
+    const page = await this.shared.pageByTargetId(targetId);
+    if (!page)
+      throw new Error('tab not found');
+    return await this.shared.newBackgroundPage(page.url());
+  }
+
+  private _desktopChatFile(desktopChat: string) {
+    let file = this._desktopChats.get(desktopChat);
+    if (!file)
+      this._desktopChats.set(desktopChat, file = new DesktopChatFile(desktopChat));
+    return file;
+  }
+
   // A page asks for a passkey (see passkeys.ts): 'cancel' when nobody can see
   // the browser to answer the prompt, else 'proceed'.
   private async _onPasskeyRequest(page: Page, frameUrl: string, raw: any): Promise<'cancel' | 'proceed'> {
@@ -501,10 +553,7 @@ export class Gateway implements SessionHost {
   private _chatTitle(root: AgentSession): string | undefined {
     const { desktopChat, claudeSessionId, configDir } = root.info;
     if (desktopChat) {
-      let file = this._desktopChats.get(desktopChat);
-      if (!file)
-        this._desktopChats.set(desktopChat, file = new DesktopChatFile(desktopChat));
-      const title = file.read()?.title;
+      const title = this._desktopChatFile(desktopChat).read()?.title;
       if (title)
         return title;
     }
