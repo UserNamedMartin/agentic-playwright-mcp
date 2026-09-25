@@ -56,10 +56,21 @@ Read README.md first for what the project does. This file is about changing it.
 - Keep personal data out of the repo: no user names, paths, profile names or
   ports of a particular machine.
 
+## Fixing bugs
+
+Every bug fix comes with a test that fails without the fix and passes with it,
+kept in `test/` (extend an existing self-contained script, such as
+`matrix.mjs` for anything one session's tools do to another, or add one).
+Only typos, docs, and behavior that can only be checked in a headed profile by
+someone at the screen are exempt; for those, say in the commit how it was
+checked by hand. Anything upstream assumes about owning the whole browser
+context (routes, tracing, video, cookies, storage, network state, process-wide
+listeners) needs a two-session check in `matrix.mjs`.
+
 ## Checking changes
 
 `npm run build`, then `node test/reconnect.mjs`, `node test/permissions.mjs`,
-`node test/passkeys.mjs`, `node test/forks.mjs` and `node test/hangs.mjs`
+`node test/passkeys.mjs`, `node test/forks.mjs`, `node test/hangs.mjs` and `node test/matrix.mjs`
 (self-contained, headless; headless Chrome grants some permissions by itself,
 so check permission changes in a headed profile too)
 and a throwaway headless profile with the other scripts in `test/` (see

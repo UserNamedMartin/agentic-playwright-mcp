@@ -135,10 +135,13 @@ requests" in your tool results; answer with `browser_permission` ("allow" or
 
 ## Shared between all chats of this setup
 
-Cookies, local storage and logins are shared, and so is anything that acts on
-the whole browser context. Unless the user asks for it, do not clear cookies or
-storage, do not load a storage state, and do not use `browser_route` or network
-offline mode: they affect every other agent too.
+Cookies, local storage and logins are shared. The cookie and storage-state
+tools only act on the sites open in your own tabs (cookie list and delete take
+a `domain` for another site), so they cannot wipe or export other chats'
+logins. Still, unless the user asks for it, do not clear cookies or storage or
+load a storage state. Anything else that acts on the whole browser context
+(`browser_route`, network offline mode, tracing, the recorder) affects every
+other agent too: do not use it unless asked.
 
 ## Phones and screen sizes
 

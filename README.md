@@ -222,7 +222,10 @@ the gateway created). Change the location or the retention with `filesDir` and
 ## Things to know
 
 - Sessions share one browser context, so anything context-wide is shared:
-  cookies, `browser_route`, offline mode, storage state.
+  cookies, `browser_route`, offline mode. The cookie and storage-state tools
+  are scoped to the sites of the session's own tabs (`src/scoped.ts`), so one
+  chat cannot wipe or export another's logins; `test/matrix.mjs` checks every
+  tool across two sessions.
 - Remote debugging gives local processes full control of the profile. The ports
   listen on localhost only; use a profile dedicated to agents, never your
   everyday browser profile.

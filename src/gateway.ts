@@ -19,6 +19,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { CallToolRequestSchema, ListResourcesRequestSchema, ListToolsRequestSchema, ReadResourceRequestSchema, isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { SharedBrowser } from './browser.js';
 import { TabGroups } from './groups.js';
+import { scopeTools } from './scoped.js';
 import { AgentSession, defaultCallTimeoutSeconds, errorResult, type SessionHost, type SessionInfo } from './session.js';
 import { pwTools, z, verifyInternals } from './internals.js';
 import { extraTools } from './tools.js';
@@ -104,7 +105,7 @@ export class Gateway implements SessionHost {
       cdpEndpoint: this.options.cdpEndpoint,
       caps: this.options.caps ?? ['devtools', 'network', 'storage', 'testing'],
     });
-    this._tools = [...pwTools.filteredTools(this._config), ...extraTools(this)];
+    this._tools = scopeTools([...pwTools.filteredTools(this._config), ...extraTools(this)]);
     this._server = http.createServer((req, res) => void this._handle(req, res).catch(e => {
       console.error(e);
       if (!res.headersSent)

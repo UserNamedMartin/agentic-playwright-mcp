@@ -129,7 +129,9 @@ export class AgentSession {
     // file names land there too, never in the agent's project. Unrestricted
     // access lets the agent still upload project files by absolute path.
     const config = { ...this._config, outputDir: filesDir, allowUnrestrictedFileAccess: true };
-    const backend = new pwTools.BrowserBackend(config, this._shared.context, this._tools, {});
+    // browser_close ends in backend.dispose(), which calls this; the session's
+    // tabs are closed after the call (see _callTool), not here.
+    const backend = new pwTools.BrowserBackend(config, this._shared.context, this._tools, async () => {});
     await backend.initialize({ cwd: filesDir, clientName: this.info.title });
     verifyContext(backend._context);
     this._patchContext(backend._context);
@@ -302,10 +304,13 @@ export class AgentSession {
       result.content.push({ type: 'text', text: passkeys });
     // Remembered for a dropped connection, when the pages are already gone.
     this.currentTarget = this.currentTargetId();
-    // browser_close disposes the backend; the next call gets a fresh one.
-    if (this.backend._disposed)
+    // browser_close disposes the backend and means "close my tabs": the
+    // stock Context only forgets them. The next call gets a fresh backend.
+    if (this.backend._disposed) {
       this.backend = undefined;
-    else if (name === 'browser_tabs' && !result.isError)
+      for (const page of [...this.owned])
+        await page.close().catch(() => {});
+    } else if (name === 'browser_tabs' && !result.isError)
       result.content.push({ type: 'text', text: await this._tabIds() });
     return result;
   }
