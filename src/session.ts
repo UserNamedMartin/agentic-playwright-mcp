@@ -13,6 +13,24 @@ import { pwTools, verifyContext } from './internals.js';
 import { describePasskeyRequests, type PasskeyRequest } from './passkeys.js';
 import type { PermissionRequest } from './permissions.js';
 
+// A tool call is given up after this long unless the agent passes "timeout"
+// (seconds); browser_wait_for gets its own wait time on top.
+export const defaultCallTimeoutSeconds = 120;
+// A call that waited at least this long behind the previous one says so.
+const queueNoteMs = 2000;
+
+export function callTimeoutSeconds(name: string, args: any, timeout: unknown) {
+  const asked = Number(timeout);
+  if (Number.isFinite(asked) && asked > 0)
+    return asked;
+  const waitFor = name === 'browser_wait_for' ? Number(args?.time) || 0 : 0;
+  return defaultCallTimeoutSeconds + waitFor;
+}
+
+export function errorResult(text: string) {
+  return { content: [{ type: 'text' as const, text: `### Error\n${text}` }], isError: true };
+}
+
 export type SessionInfo = {
   id: string;
   // Tab group title; kept in sync with the chat's title (see Gateway._refreshTitle).
@@ -183,14 +201,62 @@ export class AgentSession {
   }
 
   // Calls of one session run one at a time: the stock Context has a single
-  // "current tab".
-  async callTool(name: string, args: any, signal?: AbortSignal) {
-    const run = this._queue.then(() => this._callTool(name, args, signal));
-    this._queue = run.catch(() => {});
+  // "current tab". A call that never settles (an evaluate awaiting a promise
+  // the page never resolves) must not block the session for good, so the
+  // queue moves on when the agent cancels the call or its timeout runs out;
+  // the abandoned call may still finish in the page later.
+  async callTool(name: string, rawArgs: any, signal?: AbortSignal) {
+    const { timeout, ...args } = rawArgs ?? {};
+    const seconds = callTimeoutSeconds(name, args, timeout);
+    const queued = Date.now();
+    const previous = this._running;
+    const run = this._queue.then(async () => {
+      signal?.throwIfAborted();
+      const waited = Date.now() - queued;
+      this._running = { name, since: Date.now() };
+      const result = await this._callWithTimeout(name, args, seconds, signal);
+      if (waited >= queueNoteMs && previous)
+        result.content?.push({ type: 'text', text: `### Queue\nThis call waited ${Math.round(waited / 1000)} s for your ` +
+          `previous call (${previous.name}) to finish: calls of one chat run one at a time.` });
+      return result;
+    });
+    this._queue = run.catch(() => {}).finally(() => this._running = undefined);
     return await run;
   }
 
+  private async _callWithTimeout(name: string, args: any, seconds: number, signal?: AbortSignal) {
+    let timer: NodeJS.Timeout | undefined;
+    let onAbort: (() => void) | undefined;
+    const call = this._callTool(name, args, signal);
+    call.catch(() => {});
+    const timedOut = new Promise<any>(resolve => {
+      timer = setTimeout(() => {
+        console.error(`${name} from ${this.info.title} gave up after ${seconds} s`);
+        resolve(errorResult(`${name} did not finish within ${seconds} s and was given up, so your next calls are not ` +
+          'blocked by it. It may still be running in the page (for example an evaluate waiting on a promise that ' +
+          'never resolves): check the page before repeating it. If a call really needs longer, pass "timeout" in seconds.'));
+      }, seconds * 1000);
+    });
+    const aborted = new Promise<never>((_, reject) => {
+      onAbort = () => {
+        console.error(`${name} from ${this.info.title} was cancelled by the agent`);
+        reject(signal!.reason ?? new Error('cancelled'));
+      };
+      if (signal?.aborted)
+        onAbort();
+      else
+        signal?.addEventListener('abort', onAbort, { once: true });
+    });
+    try {
+      return await Promise.race([call, timedOut, aborted]);
+    } finally {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort!);
+    }
+  }
+
   private _queue: Promise<unknown> = Promise.resolve();
+  private _running: { name: string; since: number } | undefined;
 
   private async _callTool(name: string, rawArgs: any, signal?: AbortSignal) {
     this.lastActivity = Date.now();

@@ -19,7 +19,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { CallToolRequestSchema, ListResourcesRequestSchema, ListToolsRequestSchema, ReadResourceRequestSchema, isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { SharedBrowser } from './browser.js';
 import { TabGroups } from './groups.js';
-import { AgentSession, type SessionHost, type SessionInfo } from './session.js';
+import { AgentSession, defaultCallTimeoutSeconds, errorResult, type SessionHost, type SessionInfo } from './session.js';
 import { pwTools, z, verifyInternals } from './internals.js';
 import { extraTools } from './tools.js';
 import { renderDashboard } from './dashboard.js';
@@ -585,6 +585,8 @@ export class Gateway implements SessionHost {
         ...inputSchema.properties,
         tab: { type: 'string', description: 'Id of one of your tabs (from browser_tabs) to act on instead of the current tab.' },
         agent: { type: 'string', description: `Only if you called ${subagentTool.name}: the id it gave you.` },
+        timeout: { type: 'number', description: `Seconds after which this call is given up so it cannot block your next calls ` +
+          `(default ${defaultCallTimeoutSeconds}; browser_wait_for adds its own wait). Raise it only for calls that really take longer.` },
       };
       return {
         name: tool.schema.name,
@@ -929,9 +931,6 @@ function isSafeToRepeat(tools: any[], name: string, args: any) {
   return (type === 'readOnly' || type === 'assertion') && !/_(recording|tracing|video)|video_/.test(name);
 }
 
-function errorResult(text: string) {
-  return { content: [{ type: 'text' as const, text: `### Error\n${text}` }], isError: true };
-}
 
 export function sessionInfoFromHeaders(headers: http.IncomingHttpHeaders, clientName?: string): SessionInfo {
   const header = (name: string) => {

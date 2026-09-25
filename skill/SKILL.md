@@ -33,6 +33,17 @@ work, with a few differences described here.
 - Only use the browser when the task needs it. When the user checks a UI
   themselves, do not open pages or take screenshots to "verify" unless asked.
 
+## Calls run one at a time
+
+Your browser calls run one after another, never in parallel: a call waits
+until your previous one has finished, and its result says so when it waited.
+So never start a call that may not end on its own, such as an evaluate that
+awaits a promise the page may never resolve or a long polling loop; poll in
+short calls instead. Every call is given up after 120 seconds (plus the wait of
+`browser_wait_for`) and a cancelled call is dropped at once, so a stuck call
+no longer blocks the next ones, but it may still be running in the page. Pass
+`"timeout"` (seconds) only for a call that really needs longer.
+
 ## Tabs do not live forever
 
 Your tabs and group are closed when this chat's process ends (app quit, chat

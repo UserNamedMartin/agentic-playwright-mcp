@@ -59,7 +59,7 @@ Read README.md first for what the project does. This file is about changing it.
 ## Checking changes
 
 `npm run build`, then `node test/reconnect.mjs`, `node test/permissions.mjs`,
-`node test/passkeys.mjs` and `node test/forks.mjs`
+`node test/passkeys.mjs`, `node test/forks.mjs` and `node test/hangs.mjs`
 (self-contained, headless; headless Chrome grants some permissions by itself,
 so check permission changes in a headed profile too)
 and a throwaway headless profile with the other scripts in `test/` (see
