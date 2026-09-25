@@ -165,6 +165,10 @@ try {
   works('browser_highlight', await A.call('browser_highlight', { element: 'Go', target: '#b' }));
   works('browser_hide_highlight', await A.call('browser_hide_highlight', {}));
   works('browser_take_screenshot', await A.call('browser_take_screenshot', { scale: 'css' }));
+  const pdf = await A.call('browser_pdf_save', {});
+  works('browser_pdf_save', pdf);
+  const pdfPath = pdf.text.match(/(\/\S+\.pdf)/)?.[1];
+  expect('browser_pdf_save', 'saves a PDF file', pdfPath && fs.existsSync(pdfPath) && fs.readFileSync(pdfPath).subarray(0, 4).toString() === '%PDF', pdf.text, 'BROKEN');
   for (const [tool, args] of [
     ['browser_click', { element: 'Go', target: '#b' }],
     ['browser_hover', { element: 'Go', target: '#b' }],

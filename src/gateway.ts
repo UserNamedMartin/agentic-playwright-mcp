@@ -115,7 +115,9 @@ export class Gateway implements SessionHost {
       config: this.options.configFile,
     });
     // vision: coordinate mouse tools, for canvases, maps and slider captchas.
-    this._config.capabilities ??= ['devtools', 'network', 'storage', 'testing', 'vision'];
+    // pdf: works in the headed browser too (Page.printToPDF). Not "config":
+    // browser_get_config would print the config's secrets to the agent.
+    this._config.capabilities ??= ['devtools', 'network', 'storage', 'testing', 'vision', 'pdf'];
     this._tools = scopeTools([...pwTools.filteredTools(this._config), ...extraTools(this)]);
     this._server = http.createServer((req, res) => void this._handle(req, res).catch(e => {
       console.error(e);
