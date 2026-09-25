@@ -9,6 +9,7 @@ import type { SharedBrowser } from './browser.js';
 import type { TabGroups } from './groups.js';
 import { touchFolder } from './files.js';
 import { pwTools, verifyContext } from './internals.js';
+import type { PermissionRequest } from './permissions.js';
 
 export type SessionInfo = {
   id: string;
@@ -35,6 +36,8 @@ export type SessionHost = {
   filesFolder(session: AgentSession): string;
   onSessionStarted(session: AgentSession): void;
   onTabsChanged(): void;
+  // Permission requests of the session's pages the agent should hear about.
+  permissionNotes(session: AgentSession): string | undefined;
 };
 
 export class AgentSession {
@@ -48,6 +51,7 @@ export class AgentSession {
   backend: any;
   lastActivity = Date.now();
   subagentCount = 0;
+  permissionRequests: PermissionRequest[] = [];
   // A session exists from the moment its chat connects; it counts as started
   // (log line, files folder, tab group) only once it uses the browser.
   started = false;
@@ -186,6 +190,9 @@ export class AgentSession {
         `traces, relative file names) go to ${this.filesDir}; paths in results are relative to it. The folder is deleted after ` +
         `${this._retentionDays} days without use: copy anything worth keeping into the project.` });
     }
+    const permissions = this._host.permissionNotes(this);
+    if (permissions)
+      result.content.push({ type: 'text', text: permissions });
     // Remembered for a dropped connection, when the pages are already gone.
     this.currentTarget = this.currentTargetId();
     // browser_close disposes the backend; the next call gets a fresh one.

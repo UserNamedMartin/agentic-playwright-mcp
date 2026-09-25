@@ -29,6 +29,7 @@ import { cleanFolders, sessionFolder, subagentFolder } from './files.js';
 import { baseIcon, renderDockIcon } from './docktile.js';
 import { appMimeType, openTabWindowTool, tabLinkHtml, tabLinkResource, tabLinkResourceUri, tabLinkTool } from './apps.js';
 import { DesktopChatFile } from './titles.js';
+import { describeRequests, holdMs, permissionBinding, permissionScript, permissionTypes, type PermissionRequest } from './permissions.js';
 
 export type GatewayOptions = {
   profile: string;
@@ -52,6 +53,10 @@ export type GatewayOptions = {
 };
 
 type Transport = { transport: StreamableHTTPServerTransport; sessionKey: string };
+
+// A browser_permission answer, re-applied after reconnecting: the browser
+// forgets permissions set over a DevTools connection when it closes.
+type PermissionDecision = { type: string; setting: 'granted' | 'denied'; origin: string; embeddedOrigin: string };
 
 type SavedSession = {
   info: SessionInfo;
@@ -82,6 +87,7 @@ export class Gateway implements SessionHost {
   private _connection = 0;
   private _desktopChats = new Map<string, DesktopChatFile>();
   private _saveTimer: NodeJS.Timeout | undefined;
+  private _permissions: PermissionDecision[] = [];
 
   constructor(options: GatewayOptions) {
     this.options = options;
@@ -105,6 +111,7 @@ export class Gateway implements SessionHost {
     }));
     await new Promise<void>(resolve => this._server!.listen(this.options.port, this.options.host ?? '127.0.0.1', resolve));
     const saved = this._loadState();
+    this._permissions = this._loadPermissions();
     this._ready = this._attach(saved);
     await this._ready;
     this._sweeper = setInterval(() => void this._sweep(), 15_000);
@@ -145,6 +152,11 @@ export class Gateway implements SessionHost {
       await owner?.openInBackground(url);
     });
     await shared.context.addInitScript({ content: popupInterceptScript });
+    await shared.context.exposeBinding(permissionBinding, async ({ page, frame }: { page: Page; frame: any }, request: any) =>
+      await this._onPermissionRequest(page, frame.url(), request));
+    await shared.context.addInitScript({ content: permissionScript });
+    for (const decision of this._permissions)
+      await shared.setPermission(decision).catch(() => {});
     await this._setUpTabs(saved);
     this._dockAppliedAt = 0;
     await this._applyDockTile();
@@ -305,11 +317,120 @@ export class Gateway implements SessionHost {
     }));
     try {
       fs.mkdirSync(path.dirname(file), { recursive: true });
-      fs.writeFileSync(`${file}.tmp`, JSON.stringify({ version: 1, sessions }, null, 2));
+      fs.writeFileSync(`${file}.tmp`, JSON.stringify({ version: 1, sessions, permissions: this._permissions }, null, 2));
       fs.renameSync(`${file}.tmp`, file);
     } catch (e) {
       console.error(`could not save sessions: ${(e as Error).message}`);
     }
+  }
+
+  private _loadPermissions(): PermissionDecision[] {
+    if (!this.options.stateFile)
+      return [];
+    try {
+      const state = JSON.parse(fs.readFileSync(this.options.stateFile, 'utf8'));
+      return Array.isArray(state?.permissions) ? state.permissions : [];
+    } catch {
+      return [];
+    }
+  }
+
+  // A page asks for a permission (see permissions.ts). Resolving the returned
+  // promise lets the page go on to ask the browser.
+  private async _onPermissionRequest(page: Page, frameUrl: string, raw: any) {
+    const owner = [...this.sessions.values()].find(session => session.owned.has(page));
+    const permissions = Array.isArray(raw?.permissions) ? raw.permissions.filter((p: unknown) => typeof p === 'string' && p in permissionTypes) : [];
+    if (!owner || !permissions.length)
+      return;
+    const origin = safeOrigin(page.url());
+    const frameOrigin = safeOrigin(frameUrl) || origin;
+    const decided = (name: string) => this._permissions.find(d => d.type === permissionTypes[name][0] && d.origin === origin && d.embeddedOrigin === frameOrigin)?.setting;
+    // Decided before: the browser answers by itself.
+    if (permissions.every((name: string) => decided(name) === 'granted'))
+      return;
+    const refusedBefore = permissions.some((name: string) => decided(name) === 'denied');
+    const hold = !!raw.hold && !refusedBefore;
+    const request: PermissionRequest = {
+      page,
+      tab: (await this.shared.targetId(page).catch(() => '')).slice(0, 8),
+      origin,
+      frameOrigin,
+      permissions,
+      api: String(raw.api ?? ''),
+      waiting: hold,
+      status: hold ? 'pending' : 'refused',
+      announced: false,
+      at: Date.now(),
+    };
+    owner.permissionRequests.push(request);
+    console.error(`permission request in ${owner.info.title}: ${request.frameOrigin} asks for ${permissions.join(', ')}${hold ? '' : ' (refused, reported)'}`);
+    if (!request.waiting)
+      return;
+    await new Promise<void>(resolve => {
+      request.resolve = resolve;
+      setTimeout(() => {
+        if (request.status === 'pending') {
+          request.status = 'timed out';
+          request.announced = false;
+          resolve();
+        }
+      }, holdMs).unref();
+    });
+  }
+
+  // SessionHost: what the agent should hear about in its next tool result.
+  permissionNotes(session: AgentSession): string | undefined {
+    const open = session.permissionRequests.filter(r => r.status === 'pending' || !r.announced);
+    const text = describeRequests(open);
+    for (const r of open)
+      r.announced = true;
+    // Refused requests stay answerable for a while after the agent was told.
+    session.permissionRequests = session.permissionRequests.filter(r => r.status === 'pending' || Date.now() - r.at < 10 * 60 * 1000);
+    return text;
+  }
+
+  // browser_permission: sets the permissions for a site and answers the
+  // session's matching requests.
+  async answerPermissions(session: AgentSession, decision: 'allow' | 'deny', names: string[] | undefined, origin: string | undefined, currentPage: Page | undefined) {
+    const unknown = (names ?? []).filter(name => !(name in permissionTypes));
+    if (unknown.length)
+      throw new Error(`Unknown permission ${unknown.join(', ')}. Known: ${Object.keys(permissionTypes).join(', ')}`);
+    const matching = session.permissionRequests.filter(r => r.status === 'pending' || r.status === 'refused' || r.status === 'timed out')
+        .filter(r => (!names || r.permissions.some(p => names.includes(p))) && (!origin || r.origin === origin || r.frameOrigin === origin));
+    const targets = matching.map(r => ({ origin: r.origin, frameOrigin: r.frameOrigin, permissions: names ? r.permissions.filter(p => names.includes(p)) : r.permissions }));
+    if (!targets.length) {
+      const pageOrigin = origin ?? safeOrigin(currentPage?.url() ?? '');
+      if (!names?.length || !pageOrigin)
+        throw new Error('No permission request to answer. To set a permission ahead of time, pass permissions (and origin, or open the site first).');
+      targets.push({ origin: pageOrigin, frameOrigin: pageOrigin, permissions: names });
+    }
+    const setting = decision === 'allow' ? 'granted' : 'denied';
+    const done = new Set<string>();
+    for (const target of targets) {
+      for (const name of target.permissions) {
+        for (const type of permissionTypes[name]) {
+          const entry: PermissionDecision = { type, setting, origin: target.origin, embeddedOrigin: target.frameOrigin };
+          await this.shared.setPermission(entry).catch(e => console.error(`permission ${type}: ${(e as Error).message}`));
+          this._permissions = this._permissions.filter(d => !(d.type === type && d.origin === entry.origin && d.embeddedOrigin === entry.embeddedOrigin));
+          this._permissions.push(entry);
+        }
+        done.add(`${name} for ${target.frameOrigin}`);
+      }
+    }
+    for (const request of matching) {
+      const wasPending = request.status === 'pending';
+      request.status = decision === 'allow' ? 'allowed' : 'denied';
+      request.announced = true;
+      if (wasPending)
+        request.resolve?.();
+    }
+    session.permissionRequests = session.permissionRequests.filter(r => !matching.includes(r));
+    this._saveState();
+    console.error(`permissions ${decision === 'allow' ? 'allowed' : 'denied'} by ${session.info.title}: ${[...done].join('; ')}`);
+    const waited = matching.filter(r => r.waiting).length;
+    return `${decision === 'allow' ? 'Allowed' : 'Denied'}: ${[...done].join('; ')}.` +
+      (waited ? ' Waiting requests got their answer.' : '') +
+      (decision === 'allow' && matching.some(r => !r.waiting || r.status !== 'allowed') ? ' Repeat the action that asked for it if the page did not get it.' : '');
   }
 
   private _loadState(): SavedSession[] | undefined {
@@ -755,6 +876,15 @@ export function sessionInfoFromHeaders(headers: http.IncomingHttpHeaders, client
     title,
     fallbackTitle: title,
   };
+}
+
+function safeOrigin(url: string) {
+  try {
+    const origin = new URL(url).origin;
+    return origin === 'null' ? '' : origin;
+  } catch {
+    return '';
+  }
 }
 
 function isAlive(pid: number) {

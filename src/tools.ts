@@ -3,6 +3,7 @@
 import type { CDPSession, Page } from 'playwright-core';
 import type { Gateway } from './gateway.js';
 import { playwright, z } from './internals.js';
+import { permissionTypes } from './permissions.js';
 
 // Emulation overrides only last while the CDP session that set them stays
 // attached, so keep one per page.
@@ -91,5 +92,29 @@ export function extraTools(gateway: Gateway) {
     },
   };
 
-  return [showTab, emulate];
+  const permission = {
+    capability: 'core',
+    schema: {
+      name: 'browser_permission',
+      title: 'Answer a permission request',
+      description: 'Allow or deny what a site asks for (camera, microphone, location, notifications, ...). The browser ' +
+        'never shows permission prompts: requests are listed under "Permission requests" in tool results, and this ' +
+        'answers them. Without permissions it answers every open request of your tabs; with permissions (and ' +
+        'optionally origin) it can also set them ahead of time for the current site. Allow only what the task needs.',
+      inputSchema: z.object({
+        decision: z.enum(['allow', 'deny']),
+        permissions: z.array(z.string()).optional().describe(`Which ones: ${Object.keys(permissionTypes).join(', ')}. Default: all open requests.`),
+        origin: z.string().optional().describe('Site origin, e.g. https://meet.google.com. Default: the requesting site, or the current tab\'s site.'),
+      }),
+      type: 'action',
+    },
+    handle: async (context: any, params: { decision: 'allow' | 'deny'; permissions?: string[]; origin?: string }, response: any) => {
+      const session = [...gateway.sessions.values()].find(s => s.backend?._context === context);
+      if (!session)
+        throw new Error('No browser session for this call.');
+      response.addTextResult(await gateway.answerPermissions(session, params.decision, params.permissions, params.origin, context.currentTab()?.page));
+    },
+  };
+
+  return [showTab, emulate, permission];
 }

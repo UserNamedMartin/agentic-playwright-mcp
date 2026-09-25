@@ -32,6 +32,9 @@ export function browserArgs(profile: Profile) {
     '--disable-background-timer-throttling',
     '--disable-renderer-backgrounding',
     '--disable-backgrounding-occluded-windows',
+    // Nobody sees permission prompts in a hidden window: refuse instead of
+    // prompting, and let agents decide (see permissions.ts).
+    '--deny-permission-prompts',
     // No window at startup: the gateway creates the first one already
     // minimized and unfocused (see Gateway._setUpHomeTab).
     ...(profile.headless ? ['--headless=new'] : ['--no-startup-window']),

@@ -282,6 +282,10 @@ export class SharedBrowser {
     });
   }
 
+  async setPermission({ type, setting, origin, embeddedOrigin }: { type: string; setting: 'granted' | 'denied'; origin: string; embeddedOrigin: string }) {
+    await this._cdp.send('Browser.setPermission', { permission: { name: type }, setting, origin, embeddedOrigin } as any);
+  }
+
   async setDockTile(image: string) {
     await this._cdp.send('Browser.setDockTile' as any, { image });
   }
