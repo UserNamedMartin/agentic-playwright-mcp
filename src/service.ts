@@ -1,5 +1,5 @@
 // Runs `agentic-playwright-mcp start <profile>` at login and restarts it if it
-// exits (the gateway exits when its browser goes away). macOS launchd only.
+// exits (the gateway exits when it cannot reconnect to its browser). macOS launchd only.
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
