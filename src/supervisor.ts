@@ -10,7 +10,7 @@ import { homeDir, profileBadge, type Profile } from './profiles.js';
 
 const execFileAsync = promisify(execFile);
 
-type Options = { caps?: string[]; keepTabsOnExit?: boolean };
+type Options = { caps?: string[]; config?: string; keepTabsOnExit?: boolean };
 
 export async function runProfile(profile: Profile, options: Options) {
   let gateway: Gateway | undefined;
@@ -26,6 +26,7 @@ export async function runProfile(profile: Profile, options: Options) {
       cdpEndpoint: cdpEndpoint(profile),
       port: profile.port,
       caps: options.caps ?? profile.caps,
+      configFile: options.config ?? profile.config,
       keepTabsOnExit: options.keepTabsOnExit,
       filesDir: profile.filesDir ?? path.join(homeDir, 'profiles', profile.name, 'files'),
       filesRetentionDays: profile.filesRetentionDays,

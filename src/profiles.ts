@@ -14,6 +14,9 @@ export type Profile = {
   executablePath: string;
   headless?: boolean;
   caps?: string[];
+  // A Playwright MCP config file (JSON) with further options: timeouts,
+  // secrets, initScript, allowed/blocked origins, testIdAttribute, ...
+  config?: string;
   // Run only while a matching process is running (regexes over the full
   // command line). Empty or missing: always run.
   activateWith?: { match: string; exclude?: string }[];
@@ -82,7 +85,7 @@ export function getProfile(name: string): Profile {
   return profile;
 }
 
-export function addProfile(name: string, options: { browser?: string; port?: number; cdpPort?: number; headless?: boolean; badge?: string; badgeColor?: string }): Profile {
+export function addProfile(name: string, options: { browser?: string; port?: number; cdpPort?: number; headless?: boolean; badge?: string; badgeColor?: string; config?: string }): Profile {
   if (!/^[a-z0-9][a-z0-9_-]*$/i.test(name))
     throw new Error('Profile names may contain letters, digits, "-" and "_".');
   const profiles = loadProfiles();
@@ -98,6 +101,7 @@ export function addProfile(name: string, options: { browser?: string; port?: num
     headless: options.headless,
     ...(options.badge ? { badge: options.badge } : {}),
     ...(options.badgeColor ? { badgeColor: options.badgeColor } : {}),
+    ...(options.config ? { config: options.config } : {}),
   };
   saveProfiles([...profiles, profile]);
   return profile;

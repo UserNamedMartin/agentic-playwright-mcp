@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import path from 'node:path';
 import { parseArgs } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { identityHeaders } from './identity.js';
@@ -17,7 +18,7 @@ Quick start:
                                and print the MCP entry for your client
 
 Profiles (one persistent browser + gateway each):
-  profile add <name> [--browser chrome|brave|chromium|edge|<path>] [--port N] [--cdp-port N] [--headless]
+  profile add <name> [--browser chrome|brave|chromium|edge|<path>] [--port N] [--cdp-port N] [--headless] [--config <file>]
               [--badge <up to 3 chars>] [--badge-color <css color>]
   badge <profile> <label> [--badge-color <css color>]
                                label shown on the browser's Dock icon (macOS)
@@ -25,7 +26,8 @@ Profiles (one persistent browser + gateway each):
   profile remove <name>
 
 Running:
-  start <profile>              run the browser (minimized) and the gateway in the foreground
+  start <profile> [--config <file>]
+                               run the browser (minimized) and the gateway in the foreground
                                (only while a matching app runs, if activate-with rules are set)
   activate-with <profile> <regex> [--exclude <regex>]
                                run the profile only while a process command line matches
@@ -56,6 +58,7 @@ async function main() {
       'cdp-port': { type: 'string' },
       'headless': { type: 'boolean' },
       'caps': { type: 'string' },
+      'config': { type: 'string' },
       'keep-tabs': { type: 'boolean' },
       'exclude': { type: 'string' },
       'always': { type: 'boolean' },
@@ -81,6 +84,7 @@ async function main() {
           headless: values.headless,
           badge: values.badge,
           badgeColor: values['badge-color'],
+          config: values.config ? path.resolve(values.config) : undefined,
         });
         console.log(`Created profile "${profile.name}": gateway port ${profile.port}, browser ${profile.executablePath}`);
         console.log(`Next: agentic-playwright-mcp start ${profile.name}   (or: service install ${profile.name})`);
@@ -100,7 +104,7 @@ async function main() {
     }
     case 'start': {
       const profile = getProfile(requireArg(sub, 'profile'));
-      await runProfile(profile, { caps: values.caps?.split(','), keepTabsOnExit: values['keep-tabs'] });
+      await runProfile(profile, { caps: values.caps?.split(','), config: values.config ? path.resolve(values.config) : undefined, keepTabsOnExit: values['keep-tabs'] });
       return;
     }
     case 'activate-with': {

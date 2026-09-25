@@ -263,10 +263,10 @@ the gateway created). Change the location or the retention with `filesDir` and
 
 ```
 setup <profile> [--browser chrome|brave|chromium|edge|<path>] [--headless]
-profile add <name> [--browser …] [--port N] [--cdp-port N] [--headless] [--badge X] [--badge-color C]
+profile add <name> [--browser …] [--port N] [--cdp-port N] [--headless] [--config <file>] [--badge X] [--badge-color C]
 badge <profile> <label> [--badge-color <css color>]
 profile list | profile remove <name>
-start <profile>                  browser and gateway in the foreground
+start <profile> [--config <file>] browser and gateway in the foreground
 service install|uninstall <profile>
 activate-with <profile> <regex> [--exclude <regex>] | --always
 open <profile>                   show the browser window
@@ -281,6 +281,15 @@ Data lives in `~/.agentic-playwright-mcp` (override with
 `AGENTIC_PLAYWRIGHT_HOME`): `profiles.json`, and per profile the browser data,
 `gateway.log` and `sessions.json` (which chat owns which tab, so a restarted
 gateway can hand the tabs back).
+
+Playwright MCP's own options come from a Playwright MCP config file (the
+profile's `config`, or `--config`) and from `PLAYWRIGHT_MCP_*` variables, as
+upstream: timeouts, secrets, snapshot and output settings, `capabilities`,
+`browser.initScript`, `network.allowedOrigins` / `blockedOrigins`,
+`testIdAttribute`. They apply to every session of the profile. Options for
+launching the browser or creating its context (headless, viewport, user agent,
+proxy, storage state, isolated, ...) do not apply: the gateway connects to the
+profile's running browser.
 
 Stopping the service (`launchctl kickstart -k`, reinstalling it) leaves the
 browser running, so agents keep their tabs across a gateway restart;

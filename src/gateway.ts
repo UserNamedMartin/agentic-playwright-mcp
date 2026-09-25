@@ -19,6 +19,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { CallToolRequestSchema, ListResourcesRequestSchema, ListToolsRequestSchema, ReadResourceRequestSchema, isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { SharedBrowser } from './browser.js';
 import { TabGroups } from './groups.js';
+import { applyBrowserConfig } from './config.js';
 import { scopeTools } from './scoped.js';
 import { AgentSession, defaultCallTimeoutSeconds, errorResult, type SessionHost, type SessionInfo } from './session.js';
 import { pwTools, z, verifyInternals } from './internals.js';
@@ -52,6 +53,8 @@ export type GatewayOptions = {
   dockIconCache?: string;
   // Sessions with open tabs, so a restarted gateway gives them back.
   stateFile?: string;
+  // A Playwright MCP config file (JSON), for the options upstream reads there.
+  configFile?: string;
 };
 
 type Transport = { transport: StreamableHTTPServerTransport; sessionKey: string };
@@ -104,11 +107,15 @@ export class Gateway implements SessionHost {
 
   async start() {
     verifyInternals();
+    // Also reads a Playwright MCP config file (the profile's "config") and
+    // PLAYWRIGHT_MCP_* variables, as upstream does.
     this._config = await pwTools.resolveCLIConfigForMCP({
       cdpEndpoint: this.options.cdpEndpoint,
-      // vision: coordinate mouse tools, for canvases, maps and slider captchas.
-      caps: this.options.caps ?? ['devtools', 'network', 'storage', 'testing', 'vision'],
+      caps: this.options.caps,
+      config: this.options.configFile,
     });
+    // vision: coordinate mouse tools, for canvases, maps and slider captchas.
+    this._config.capabilities ??= ['devtools', 'network', 'storage', 'testing', 'vision'];
     this._tools = scopeTools([...pwTools.filteredTools(this._config), ...extraTools(this)]);
     this._server = http.createServer((req, res) => void this._handle(req, res).catch(e => {
       console.error(e);
@@ -165,6 +172,7 @@ export class Gateway implements SessionHost {
     await shared.context.exposeBinding(passkeyBinding, async ({ page, frame }: { page: Page; frame: any }, request: any) =>
       await this._onPasskeyRequest(page, frame.url(), request));
     await shared.context.addInitScript({ content: passkeyScript });
+    await applyBrowserConfig(shared.context, this._config, this.baseUrl);
     for (const decision of this._permissions)
       await shared.setPermission(decision).catch(() => {});
     await this._setUpTabs(saved);
