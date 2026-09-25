@@ -31,6 +31,8 @@ export function verifyContext(context: any) {
     if (typeof context[name] !== 'function')
       throw new Error(`playwright-core internals changed: Context.${name} is missing`);
   }
+  if (typeof context._onUnhandledRejection !== 'function')
+    throw new Error('playwright-core internals changed: Context._onUnhandledRejection is missing');
   if (!Array.isArray(context._tabs))
     throw new Error('playwright-core internals changed: Context._tabs is missing');
 }

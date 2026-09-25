@@ -230,18 +230,26 @@ export class AgentSession {
   private async _callWithTimeout(name: string, args: any, seconds: number, signal?: AbortSignal) {
     let timer: NodeJS.Timeout | undefined;
     let onAbort: (() => void) | undefined;
-    const call = this._callTool(name, args, signal);
+    // An abandoned call that finishes later must not take the notes meant for
+    // the agent's next result.
+    const state = { abandoned: false };
+    const call = this._callTool(name, args, signal, state);
     call.catch(() => {});
     const timedOut = new Promise<any>(resolve => {
       timer = setTimeout(() => {
+        state.abandoned = true;
+        const url = this.currentPage()?.url();
         console.error(`${name} from ${this.info.title} gave up after ${seconds} s`);
         resolve(errorResult(`${name} did not finish within ${seconds} s and was given up, so your next calls are not ` +
           'blocked by it. It may still be running in the page (for example an evaluate waiting on a promise that ' +
-          'never resolves): check the page before repeating it. If a call really needs longer, pass "timeout" in seconds.'));
+          `never resolves): check the page before repeating it.${url ? ` Your current tab is ${url}; if that page ` +
+          'itself is stuck (a busy script), close it with browser_tabs action "close".' : ''} If a call really needs ` +
+          'longer, pass "timeout" in seconds.'));
       }, seconds * 1000);
     });
     const aborted = new Promise<never>((_, reject) => {
       onAbort = () => {
+        state.abandoned = true;
         console.error(`${name} from ${this.info.title} was cancelled by the agent`);
         reject(signal!.reason ?? new Error('cancelled'));
       };
@@ -285,7 +293,7 @@ export class AgentSession {
   private _queue: Promise<unknown> = Promise.resolve();
   private _running: { name: string; since: number } | undefined;
 
-  private async _callTool(name: string, rawArgs: any, signal?: AbortSignal) {
+  private async _callTool(name: string, rawArgs: any, signal?: AbortSignal, state = { abandoned: false }) {
     this.lastActivity = Date.now();
     if (!this.backend)
       await this.start();
@@ -303,6 +311,11 @@ export class AgentSession {
       this._touchedAt = Date.now();
     }
     const result = await this.backend.callTool(name, args, signal);
+    if (state.abandoned) {
+      if (this.backend?._disposed)
+        this.backend = undefined;
+      return result;
+    }
     // Tell the agent once where its files go; paths in later results are
     // relative to this folder.
     // Saved files are named by absolute path: given "./shot.png", agents went
@@ -476,10 +489,20 @@ export class AgentSession {
       return [...video.fileNames];
     };
 
+    // Each stock Context listens for unhandled rejections process-wide and
+    // hands every one to its agent: with many contexts in one process, one
+    // chat's failed download showed up as an error in every other chat's next
+    // result, and once no context was left (a dropped connection) the next one
+    // killed the gateway. The gateway logs them instead (see gateway.ts).
+    process.off('unhandledRejection', context._onUnhandledRejection);
+
     // New tabs of the session get its routes and network state too.
     const onPageCreated = context._onPageCreated.bind(context);
     context._onPageCreated = function(page: Page) {
       onPageCreated(page);
+      const tab = this._tabs.find((tab: any) => tab.page === page);
+      if (tab)
+        patchTabHeader(tab);
       for (const route of this._routes)
         void page.route(route.pattern, route.handler).catch(() => {});
       if (session.offline)
@@ -495,6 +518,30 @@ export class AgentSession {
       return tab;
     };
   }
+}
+
+// Every result lists the session's tabs with their titles; a page whose
+// renderer is busy (an endless loop) never answers page.title(), which made
+// every later call of the session hang too. Give up on the title after a while.
+const headerTimeoutMs = 2000;
+
+function patchTabHeader(tab: any) {
+  const original = tab.headerSnapshot.bind(tab);
+  tab.headerSnapshot = async () => {
+    let timer: NodeJS.Timeout | undefined;
+    const slow = new Promise<undefined>(resolve => timer = setTimeout(() => resolve(undefined), headerTimeoutMs));
+    const header = await Promise.race([original(), slow]);
+    clearTimeout(timer);
+    return header ?? {
+      title: '(not responding: the page is busy; close this tab if it stays stuck)',
+      url: tab.page.url(),
+      current: tab.isCurrentTab(),
+      crashed: false,
+      mainDocumentStatus: tab._mainDocumentStatus,
+      console: { total: 0, errors: 0, warnings: 0 },
+      changed: true,
+    };
+  };
 }
 
 // Relative file paths in a result ("./shot.png", "shots/a.png", "../x.pdf")
