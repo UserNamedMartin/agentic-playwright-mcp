@@ -197,6 +197,18 @@ try {
   check('tracing starts after a failed start', /Trace recording started/.test(retry), retry.slice(0, 120));
   await T('browser_stop_tracing');
 
+  // A browser that never answers a trace call does not hold tracing (or the
+  // session) forever.
+  await T('browser_start_tracing');
+  const stopChunk = tracing.stopChunk.bind(tracing);
+  tracing.stopChunk = () => { tracing.stopChunk = stopChunk; return new Promise(() => {}); };
+  const stuckStart = Date.now();
+  const stuck = await T('browser_stop_tracing');
+  check('a trace call the browser never answers is given up', /did not answer/.test(stuck) && Date.now() - stuckStart < 40000, `${Date.now() - stuckStart} ms ${stuck.slice(0, 100)}`);
+  const afterStuck = await U('browser_start_tracing');
+  check('tracing works for others after that', /Trace recording started/.test(afterStuck), afterStuck.slice(0, 100));
+  await U('browser_stop_tracing');
+
   // Stopping must not slow down with the resources other chats loaded while
   // tracing (it was quadratic: 37 s at 500).
   await T('browser_start_tracing');

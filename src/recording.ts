@@ -13,6 +13,20 @@ import path from 'node:path';
 import type { BrowserContext, Page } from 'playwright-core';
 import { yauzl, yazl } from './internals.js';
 
+// Recorder and tracing calls to the browser run in queues every session
+// shares: a browser that stops answering one must not hold them all (and
+// every session's end) forever.
+const browserCallTimeoutMs = 20_000;
+
+function bounded<T>(promise: Promise<T>, what: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  promise.catch(() => {});
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) => timer = setTimeout(() => reject(new Error(`${what}: the browser did not answer within ${browserCallTimeoutMs / 1000} s`)), browserCallTimeoutMs)),
+  ]).finally(() => clearTimeout(timer));
+}
+
 // The session a Playwright call is made for (set around each tool call), so
 // trace entries of calls can be told apart by session.
 export const callingSession = new AsyncLocalStorage<any>();
@@ -73,7 +87,7 @@ export async function startRecording(session: any, context: any, upstreamStart: 
       const enable = raw._enableRecorder.bind(raw);
       raw._enableRecorder = (params: any) => enable(params, recorder.sink);
       try {
-        await upstreamStart();
+        await bounded(upstreamStart(), 'Starting the recorder');
       } finally {
         raw._enableRecorder = enable;
         context._recordedActions = undefined;
@@ -97,7 +111,7 @@ export async function stopRecording(session: any, context: any): Promise<string[
     if (recorder.sessions.size || !recorder.enabled)
       return;
     recorder.enabled = false;
-    await raw._disableRecorder().catch(() => {});
+    await bounded(raw._disableRecorder(), 'Stopping the recorder').catch(() => {});
   });
   return actions.filter((code: string) => code.trim()).map(dedent);
 }
@@ -166,10 +180,10 @@ function serialized<T>(tracer: Tracer, op: () => Promise<T>): Promise<T> {
 
 async function cutChunk(raw: BrowserContext, tracer: Tracer, restart: boolean) {
   const file = path.join(tracer.dir, `chunk-${tracer.chunks.length}.zip`);
-  await raw.tracing.stopChunk({ path: file });
+  await bounded(raw.tracing.stopChunk({ path: file }), 'Saving the trace');
   tracer.chunks.push(file);
   if (restart)
-    await raw.tracing.startChunk();
+    await bounded(raw.tracing.startChunk(), 'Continuing the trace');
 }
 
 export async function startTracing(session: any, context: any) {
@@ -188,12 +202,12 @@ export async function startTracing(session: any, context: any) {
       t.chunks = [];
       t.unhook = hookCalls(raw, t);
       try {
-        await raw.tracing.start({ screenshots: true, snapshots: true });
-        await raw.tracing.startChunk();
+        await bounded(raw.tracing.start({ screenshots: true, snapshots: true }), 'Starting the trace');
+        await bounded(raw.tracing.startChunk(), 'Starting the trace');
       } catch (e) {
         // Nothing may stay half on: the next start would find "already
         // started", a second hook, another temp dir.
-        await raw.tracing.stop().catch(() => {});
+        await bounded(raw.tracing.stop(), 'Stopping the trace').catch(() => {});
         t.unhook();
         t.unhook = () => {};
         fs.rmSync(t.dir, { recursive: true, force: true });
@@ -247,7 +261,7 @@ export async function stopTracing(session: any, context: any, discard = false): 
           tracer.callOwners.delete(id);
       }
       if (last) {
-        await raw.tracing.stop().catch(() => {});
+        await bounded(raw.tracing.stop(), 'Stopping the trace').catch(() => {});
         tracer.unhook();
         tracer.unhook = () => {};
         fs.rmSync(tracer.dir, { recursive: true, force: true });
