@@ -16,6 +16,7 @@ import { callingSession, isRecording, isTracing, startRecording, stopRecording, 
 import { releaseContextWide } from './scoped.js';
 import { applyEmulation, type Emulation } from './tools.js';
 import { internalUrlResolved } from './urls.js';
+import { loadProfiles } from './profiles.js';
 import { describePasskeyRequests, type PasskeyRequest } from './passkeys.js';
 import type { PermissionRequest } from './permissions.js';
 
@@ -88,6 +89,19 @@ export type SavedNetworkState = {
   tracing?: boolean;
   recording?: boolean;
 };
+
+let knownPorts: { at: number; ports: string[] } | undefined;
+
+function profilePorts() {
+  if (!knownPorts || Date.now() - knownPorts.at > 10_000) {
+    let ports: string[] = [];
+    try {
+      ports = loadProfiles().flatMap(p => [String(p.port), String(p.cdpPort)]);
+    } catch {}
+    knownPorts = { at: Date.now(), ports };
+  }
+  return knownPorts.ports;
+}
 
 // The handler browser_route builds from its parameters (as upstream), for
 // routes restored after a gateway restart.
@@ -218,9 +232,10 @@ export class AgentSession {
     return this._host.baseUrl;
   }
 
-  // Ports of addresses agents may not open (see urls.ts).
+  // Ports of addresses agents may not open (see urls.ts): this gateway's and
+  // its browser's, and those of every other profile (they may run too).
   get internalPorts() {
-    return [new URL(this._host.baseUrl).port, new URL(this._host.cdpEndpoint).port];
+    return [new URL(this._host.baseUrl).port, new URL(this._host.cdpEndpoint).port, ...profilePorts()];
   }
 
   // Tabs copied for a forked chat: adopted in order, the last one flagged

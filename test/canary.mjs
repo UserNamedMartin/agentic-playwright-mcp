@@ -66,6 +66,9 @@ const urlB = `http://localhost:${port}/?who=B&token=${SECRET}`;
 
 const run = (...args) => spawn(process.execPath, [cli, ...args], { env, stdio: ['ignore', 'ignore', 'ignore'] });
 await new Promise(r => run('profile', 'add', 'test', '--headless', '--port', String(gatewayPort), '--cdp-port', String(cdpPort), '--browser', executable).on('exit', r));
+// Another profile (not started): its ports are just as off limits.
+const [otherGatewayPort, otherCdpPort] = [19463, 19464];
+await new Promise(r => run('profile', 'add', 'other', '--headless', '--port', String(otherGatewayPort), '--cdp-port', String(otherCdpPort), '--browser', executable).on('exit', r));
 const gateway = run('start', 'test');
 for (let i = 0; i < 150; i++) {
   if (await fetch(`http://127.0.0.1:${gatewayPort}/`).then(r => r.ok, () => false))
@@ -179,6 +182,10 @@ try {
   for (const target of internal) {
     const nav = await A.call('browser_navigate', { url: target });
     check(`browser_navigate refuses ${target.slice(0, 40)}`, nav.isError && /not available to agents/.test(nav.text), nav.text.slice(0, 160));
+  }
+  for (const target of [`http://127.0.0.1:${otherGatewayPort}/focus?home=1`, `http://127.0.0.1:${otherCdpPort}/json/list`]) {
+    const nav = await A.call('browser_navigate', { url: target });
+    check(`another profile's ports are refused too (${target.slice(17, 40)})`, nav.isError && /not available to agents/.test(nav.text), nav.text.slice(0, 160));
   }
   const newTab = await A.call('browser_tabs', { action: 'new', url: `http://127.0.0.1:${cdpPort}/json/list` });
   check('browser_tabs new refuses the DevTools port', newTab.isError && /not available to agents/.test(newTab.text), newTab.text.slice(0, 160));
