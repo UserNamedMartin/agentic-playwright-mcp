@@ -127,7 +127,7 @@ requests" in your tool results; answer with `browser_permission` ("allow" or
 - When the user should look at or act in a page (a captcha, a consent screen, a
   result to review, something to double-check), call `browser_tab_link` and
   give them its link as a markdown link, e.g.
-  `[Open the results](http://127.0.0.1:8931/focus?target=…)`. Clicking it
+  `[Open the results](http://127.0.0.1:8931/focus?target=…&t=…)` (pass the link on exactly as given: it is signed). Clicking it
   brings the browser window to the front on that tab; nothing opens until they
   click.
 - `browser_show_tab` opens the window immediately, without asking. Use it only

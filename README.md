@@ -150,7 +150,9 @@ the last one is gone.
 
 ## Tab links
 
-`browser_tab_link` returns `http://127.0.0.1:<port>/focus?target=<tab id>`.
+`browser_tab_link` returns `http://127.0.0.1:<port>/focus?target=<tab id>&t=<signature>`
+(links are signed with a secret in `profiles/<name>/link-secret`; unsigned
+requests to `/focus`, e.g. from a web page, are refused).
 Chat apps open http links with your default browser, so by default a click
 briefly shows a helper page there, which hands over to the agent window and
 closes itself.
@@ -216,8 +218,9 @@ the gateway created). Change the location or the retention with `filesDir` and
 - Page scripts added to every tab report permission and passkey requests to
   the gateway before the browser sees them.
 - Chat titles and forks come from the Claude desktop app's chat files.
-- A pinned status page at the gateway's address keeps the window alive and
-  lists the sessions.
+- A pinned status tab keeps the window alive and lists the sessions (the
+  gateway writes it over DevTools; the gateway's address itself only shows a
+  note).
 
 ## Things to know
 

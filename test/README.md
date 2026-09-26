@@ -2,8 +2,9 @@
 
 Two kinds of scripts:
 
-- self-contained pass/fail tests (`reconnect`, `permissions`, `passkeys`,
-  `forks`, `headed`): each starts its own browser, gateway and scratch
+- self-contained pass/fail tests (`canary`, `matrix`, `robustness`,
+  `reconnect-stall`, `leaks`, `config`, `hangs`, `reconnect`, `permissions`,
+  `passkeys`, `forks`, `headed`): each starts its own browser, gateway and scratch
   `AGENTIC_PLAYWRIGHT_HOME`, prints one line per check and exits non-zero on
   failure. All but `headed` are headless; `headed` shows a window (macOS).
 - scripts used while developing the gateway: they talk to a running gateway
