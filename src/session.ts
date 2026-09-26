@@ -69,6 +69,8 @@ export type SessionHost = {
   copyForkedTabs(session: AgentSession): Promise<string | undefined>;
   // The gateway's own address (its status page is not for agents).
   readonly baseUrl: string;
+  // The browser's DevTools endpoint.
+  readonly cdpEndpoint: string;
   // The tabs of the session's subagents, listed in its browser_tabs results.
   subagentTabs(session: AgentSession): string | undefined;
 };
@@ -207,6 +209,11 @@ export class AgentSession {
 
   get gatewayUrl() {
     return this._host.baseUrl;
+  }
+
+  // Ports of addresses agents may not open (see urls.ts).
+  get internalPorts() {
+    return [new URL(this._host.baseUrl).port, new URL(this._host.cdpEndpoint).port];
   }
 
   // Tabs copied for a forked chat: adopted in order, the last one flagged

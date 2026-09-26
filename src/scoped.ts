@@ -9,6 +9,7 @@ import type { BrowserContext, Cookie } from 'playwright-core';
 import { z } from './internals.js';
 import { isolatedView } from './isolation.js';
 import { startTracing, stopRecording, stopTracing } from './recording.js';
+import { refuseInternalUrl } from './urls.js';
 
 // Sites (http and https URLs) of the session's open tabs.
 export function ownUrls(context: any): string[] {
@@ -102,7 +103,24 @@ export async function releaseContextWide(session: any, context: any) {
   await stopTracing(session, context, true).catch(() => {});
 }
 
+const guardedUrl = (context: any, url: unknown) => {
+  if (typeof url === 'string')
+    refuseInternalUrl(url, context._agentSession.internalPorts);
+};
+
 const replacements: Record<string, { description?: string; inputSchema?: any; handle: (context: any, params: any, response: any, original: any) => Promise<void> }> = {
+  browser_navigate: {
+    handle: async (context, params, response, original) => {
+      guardedUrl(context, params.url);
+      await original(context, params, response);
+    },
+  },
+  browser_tabs: {
+    handle: async (context, params, response, original) => {
+      guardedUrl(context, params.url);
+      await original(context, params, response);
+    },
+  },
   browser_network_state_set: {
     description: 'Take your tabs offline or back online. Other chats share this browser and are not affected.',
     handle: async (context, params, response) => {

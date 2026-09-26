@@ -240,7 +240,12 @@ the gateway created). Change the location or the retention with `filesDir` and
   - the status page is for the user: it lists chats only with a key that the
     browser's pinned home tab carries (kept in `sessions.json`); any other
     request to the gateway's address, from an agent's tab or code, gets a
-    short note.
+    short note;
+  - agents cannot open the browser's own pages (chrome://history, tab
+    search, inspect, version, ...), the DevTools port (its /json endpoints
+    list and close every tab) or the gateway's pages, through the tools or
+    through `page`, requests, routes or a CDP session (`src/urls.ts`). A
+    local process can still reach the DevTools port directly: see below.
   `test/matrix.mjs` checks every tool across two sessions, and
   `test/canary.mjs` searches everything one chat gets for another's secret.
 - Remote debugging gives local processes full control of the profile. The ports

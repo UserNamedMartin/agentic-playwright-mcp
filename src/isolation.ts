@@ -15,6 +15,7 @@
 import fs from 'node:fs';
 import type { BrowserContext, Cookie, Page } from 'playwright-core';
 import { applyStorageState, ownCookies, ownUrls, scopedStorageState } from './scoped.js';
+import { refuseInternalUrl } from './urls.js';
 
 // Members of BrowserContext that act on every page of it, with what to use
 // instead. They throw in the view.
@@ -84,6 +85,18 @@ const emitterMethods = ['on', 'once', 'addListener', 'prependListener', 'prepend
 
 export function isolatedView(context: any) {
   const session = context._agentSession;
+  const guard = (url: any) => {
+    const text = typeof url === 'string' ? url : url?.url?.();
+    if (typeof text === 'string')
+      refuseInternalUrl(text, session.internalPorts);
+  };
+  // Members of other types that take a URL to go to or fetch.
+  // (Async like the Playwright methods they stand for: a refusal is a rejection.)
+  const urlMembers = (target: any, names: string[], urlOf: (args: any[]) => any) => Object.fromEntries(names.map(name => [name,
+    async (...args: any[]) => {
+      guard(urlOf(args));
+      return wrap(await target[name](...unwrapArgs(args)));
+    }]));
   const toTarget = new WeakMap<object, any>();
   const wrapped = new WeakMap<object, any>();
   let rawContext: BrowserContext;
@@ -220,8 +233,12 @@ export function isolatedView(context: any) {
       // A page of another chat is never handed out.
       case 'Page': return session.owned.has(value) || session.owned.has(session.openers.get(value)) ? pageView(value) : null;
       case 'APIRequestContext': return requestView(value);
-      case 'Frame': case 'Locator': case 'FrameLocator': case 'ElementHandle': case 'JSHandle':
-      case 'Request': case 'Response': case 'Route': case 'Dialog': case 'ConsoleMessage': case 'Download':
+      case 'Frame':
+        return wrapObject(value, urlMembers(value, ['goto'], args => args[0]));
+      case 'Route':
+        return wrapObject(value, urlMembers(value, ['fetch', 'continue', 'fallback'], args => args[0]?.url));
+      case 'Locator': case 'FrameLocator': case 'ElementHandle': case 'JSHandle':
+      case 'Request': case 'Response': case 'Dialog': case 'ConsoleMessage': case 'Download':
       case 'FileChooser': case 'Worker': case 'WebSocket': case 'WebError': case 'Keyboard': case 'Mouse':
       case 'Touchscreen': case 'Video': case 'Accessibility': case 'Coverage': case 'Screencast':
         return wrapObject(value, {});
@@ -299,6 +316,7 @@ export function isolatedView(context: any) {
     const events = emitter(listen, () => pageView(page));
     return wrapObject(page, {
       ...events,
+      ...urlMembers(page, ['goto'], args => args[0]),
       context: () => contextView(),
       request: requestView(page.request),
       clock: new Proxy({}, { get: () => () => refuse('clock') }),
@@ -320,6 +338,7 @@ export function isolatedView(context: any) {
     if (wrapped.has(request))
       return wrapped.get(request);
     return wrapObject(request, {
+      ...urlMembers(request, ['fetch', 'get', 'post', 'put', 'patch', 'delete', 'head'], args => args[0]),
       // One request context serves every chat: disposing it would break
       // page.request for all of them.
       dispose: async () => {},
@@ -381,6 +400,8 @@ export function isolatedView(context: any) {
               return async (method: string, params?: any) => {
                 if (browserWideCommands.test(method))
                   throw new Error(`${method} is not available here: it reaches the whole browser, which other chats share.`);
+                if (method === 'Page.navigate')
+                  guard(params?.url);
                 return await real.send(method as any, params);
               };
             }

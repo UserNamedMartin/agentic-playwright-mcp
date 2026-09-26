@@ -154,6 +154,37 @@ try {
   const statusKey = JSON.parse(fs.readFileSync(path.join(home, 'profiles', 'test', 'sessions.json'), 'utf8')).statusKey;
   const withKey = await (await fetch(`http://127.0.0.1:${gatewayPort}/?key=${statusKey}`)).text();
   check('the status page with its key still lists the chats', withKey.includes('chat-B'), withKey.slice(0, 200));
+  // The browser's own pages, its DevTools port and the gateway's pages (tab
+  // links raise the window) are not for agents, by any path.
+  const bTab = (await targets()).find(t => t.url.includes('who=B'));
+  const internal = ['chrome://history', 'chrome://tab-search.top-chrome/', 'chrome://inspect/#pages', 'chrome://version', 'about:history',
+    'view-source:chrome://version', `http://127.0.0.1:${cdpPort}/json/list`, `http://localhost.:${cdpPort}/json/close/${bTab?.id}`,
+    `http://127.0.0.1:${gatewayPort}/focus?go=1`];
+  for (const target of internal) {
+    const nav = await A.call('browser_navigate', { url: target });
+    check(`browser_navigate refuses ${target.slice(0, 40)}`, nav.isError && /not available to agents/.test(nav.text), nav.text.slice(0, 160));
+  }
+  const newTab = await A.call('browser_tabs', { action: 'new', url: 'chrome://history' });
+  check('browser_tabs new refuses chrome://history', newTab.isError && /not available to agents/.test(newTab.text), newTab.text.slice(0, 160));
+  await A.call('browser_navigate', { url: urlA });
+  const codePaths = await A.code(`async page => {
+    const out = [];
+    const tryIt = async (name, fn) => out.push(await fn().then(() => name + ' WENT', e => /not available to agents/.test(e.message) ? name + ' refused' : name + ' other: ' + e.message.slice(0, 60)));
+    await tryIt('goto', () => page.goto('chrome://history'));
+    await tryIt('frame.goto', () => page.mainFrame().goto('http://127.0.0.1:${cdpPort}/json/list'));
+    await tryIt('request', () => page.request.get('http://[::1]:${cdpPort}/json/list'));
+    await tryIt('context.request', () => page.context().request.get('http://127.0.0.1:${cdpPort}/json/close/${bTab?.id}'));
+    const cdp = await page.context().newCDPSession(page);
+    await tryIt('cdp', () => cdp.send('Page.navigate', { url: 'chrome://history' }));
+    await page.route('**/via-internal*', async route => { await tryIt('route.fetch', () => route.fetch({ url: 'http://127.0.0.1:${cdpPort}/json/list' })); await route.fulfill({ body: 'x' }); });
+    await page.evaluate(() => fetch('/via-internal')).catch(() => {});
+    await page.unrouteAll();
+    return out.join(' | ');
+  }`);
+  const codeResult = codePaths.split('### Ran')[0];
+  check('run_code: internal addresses refused by every path', !/WENT|other:/.test(codeResult) && (codeResult.match(/refused/g) ?? []).length === 6, codeResult);
+  check('B\'s tab is still there', (await targets()).some(t => t.id === bTab?.id), 'B\'s tab was closed');
+  await A.call('browser_navigate', { url: urlA });
   check('annotate is not offered', !(await A.client.listTools()).tools.some(t => t.name === 'browser_annotate'));
   const bTarget = (await targets()).find(t => t.url.includes('who=B'));
   const raise = await A.call('browser_open_tab_window', { targetId: bTarget?.id ?? 'none' });

@@ -112,6 +112,10 @@ export class Gateway implements SessionHost {
   // redirect or request gets nothing. Kept across restarts (sessions.json).
   private _statusKey = crypto.randomUUID();
 
+  get cdpEndpoint() {
+    return this.options.cdpEndpoint;
+  }
+
   get statusUrl() {
     return `${this.baseUrl}/?key=${this._statusKey}`;
   }
