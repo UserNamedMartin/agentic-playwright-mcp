@@ -81,11 +81,16 @@ export class SharedBrowser {
   // popups at the same moment) nobody is told (undefined): no chat's routes
   // then apply, rather than the wrong chat's.
   async popupOpener(): Promise<string | undefined> {
+    // Tabs the gateway opens itself are no popups, whatever opener Chrome
+    // reports for them (a headed Chrome gives them the active tab): wait for
+    // those being made to be known.
+    if (this._inFlight.size)
+      await Promise.all([...this._inFlight].map(creation => creation.catch(() => {})));
     for (let waited = 0; waited <= 500; waited += 25) {
       const now = Date.now();
       const openers = new Set<string>();
       for (const [id, popup] of this._popups) {
-        if (now - popup.at > 10_000)
+        if (now - popup.at > 10_000 || this._created.has(id))
           this._popups.delete(id);
         else if ((!popup.url || popup.url === 'about:blank') && now - popup.at < 3000)
           openers.add(popup.openerId);
