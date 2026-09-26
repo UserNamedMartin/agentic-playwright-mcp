@@ -364,7 +364,7 @@ export class AgentSession {
       // opener (as Chrome reports it) tells whose it is.
       if (!request.isNavigationRequest())
         return false;
-      const opener = await this._shared.popupOpener(request.url());
+      const opener = await this._shared.popupOpener();
       return !!opener && this.targets.has(opener);
     }
   }

@@ -309,6 +309,23 @@ try {
   await A.call('browser_tabs', { action: 'select', index: 0 });
   await A.call('browser_network_state_set', { state: 'online' });
 
+  // Two chats open the same popup URL, each with its own route for it: each
+  // popup's first load is answered by its own chat's route, never the other's.
+  await B.call('browser_route', { pattern: '**/probe?same=*', body: 'B-ROUTED' });
+  await B.call('browser_evaluate', { function: `() => { window.open("http://127.0.0.1:${port}/probe?same=1"); return 1; }` });
+  await sleep(1500);
+  await A.call('browser_route', { pattern: '**/probe?same=*', body: 'A-ROUTED' });
+  await A.call('browser_evaluate', { function: `() => { window.open("http://127.0.0.1:${port}/probe?same=1"); return 1; }` });
+  await sleep(1500);
+  await A.call('browser_tabs', { action: 'select', index: 1 });
+  const samePopup = await A.call('browser_evaluate', { function: '() => document.body.innerText' });
+  check('a popup is never answered by another chat\'s route', !samePopup.text.includes('B-ROUTED'), samePopup.text);
+  check('... and gets its own chat\'s', samePopup.text.includes('A-ROUTED'), samePopup.text);
+  await A.call('browser_tabs', { action: 'close' });
+  await A.call('browser_tabs', { action: 'select', index: 0 });
+  await A.call('browser_unroute', {});
+  await B.call('browser_unroute', {});
+
   // Recording and tracing next to each other: each gets only its own.
   const [recA, recB] = await Promise.all([A.call('browser_start_recording'), B.call('browser_start_recording')]);
   check('two chats can record at once', !recA.isError && !recB.isError, recA.text + ' / ' + recB.text);
