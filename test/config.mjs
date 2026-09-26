@@ -96,8 +96,9 @@ try {
   await withGateway('env', [19443, 19444], { env: { PLAYWRIGHT_MCP_ALLOWED_ORIGINS: `http://127.0.0.1:${port}` } }, async (call, _client, gatewayUrl) => {
     const allowed = await call('browser_navigate', { url: `http://127.0.0.1:${port}/` });
     check('allowed origin loads', !allowed.isError && allowed.text.includes('page'), allowed.text);
-    const status = await call('browser_navigate', { url: `${gatewayUrl}/` });
-    check('the gateway\'s status page is not for agents (blocked, not allowed by the list)', status.isError && /ERR_BLOCKED_BY_CLIENT/.test(status.text), status.text);
+    await call('browser_navigate', { url: `${gatewayUrl}/` });
+    const status = await call('browser_evaluate', { function: '() => document.body.innerText' });
+    check('the gateway\'s status page shows agents nothing', !/agent session/.test(status.text), status.text);
     const other = await call('browser_navigate', { url: `http://localhost:${port}/` });
     check('other origins are blocked', other.isError || /ERR_BLOCKED_BY_CLIENT/.test(other.text), other.text);
   });

@@ -251,27 +251,10 @@ export function isolatedView(context: any) {
     });
   }
 
-  // page.request / context.request run in the gateway process, not in a tab,
-  // so the browser's own block on the status page does not reach them.
-  const gatewayPort = new URL(session.gatewayUrl).port;
-  const isGateway = (url: any) => {
-    try {
-      const parsed = new URL(typeof url === 'string' ? url : url?.url?.() ?? String(url));
-      return parsed.port === gatewayPort && ['127.0.0.1', 'localhost', '[::1]', '0.0.0.0'].includes(parsed.hostname);
-    } catch {
-      return false;
-    }
-  };
   function requestView(request: any) {
     if (wrapped.has(request))
       return wrapped.get(request);
-    const guarded = Object.fromEntries(['fetch', 'get', 'post', 'put', 'patch', 'delete', 'head'].map(method => [method, async (url: any, options?: any) => {
-      if (isGateway(url))
-        throw new Error('The browser gateway\'s own pages are not available to agents.');
-      return wrap(await request[method](unwrap(url), options));
-    }]));
     return wrapObject(request, {
-      ...guarded,
       storageState: async (options: { path?: string } = {}) => {
         const state = await scopedStorageState(context);
         if (options.path)

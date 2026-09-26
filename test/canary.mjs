@@ -132,14 +132,23 @@ try {
   await A.call('browser_tabs', { action: 'select', index: 0 });
   check('no stray tabs so far', (await strays(beforeAll)).length === 0, JSON.stringify(await strays(beforeAll)));
 
-  // The status page is the user's.
-  for (const host of ['127.0.0.1', 'localhost']) {
-    const status = await A.call('browser_navigate', { url: `http://${host}:${gatewayPort}/` });
-    check(`status page blocked for agents (${host})`, status.isError && /BLOCKED/.test(status.text), status.text);
+  // The status page (every chat's tabs) is the user's: without its key, no
+  // host name, request or route gets anything.
+  for (const host of ['127.0.0.1', 'localhost', 'localhost.', '[::ffff:127.0.0.1]']) {
+    await A.call('browser_navigate', { url: `http://${host}:${gatewayPort}/` });
+    const text = (await A.call('browser_evaluate', { function: '() => document.body.innerText' })).text;
+    check(`status page shows agents nothing (${host})`, !text.includes('chat-B') && !text.includes('who=B'), text.slice(0, 200));
   }
   await A.call('browser_navigate', { url: urlA });
-  const viaRequest = await A.code(`async page => { try { await page.request.get('http://127.0.0.1:${gatewayPort}/'); return 'got it'; } catch (e) { return 'refused'; } }`);
-  check('status page blocked for page.request', /refused/.test(viaRequest), viaRequest);
+  const viaRequest = await A.code(`async page => (await (await page.request.get('http://localhost.:${gatewayPort}/')).text())`);
+  check('status page shows page.request nothing', !viaRequest.includes('chat-B'), viaRequest.slice(0, 200));
+  const viaRoute = await A.code(`async page => { await page.route('**/via-route*', async route => route.fulfill({ response: await route.fetch({ url: 'http://127.0.0.1:${gatewayPort}/' }) })); await page.goto('${urlA}&via-route=1'.replace('?who', '/via-route?who')); return page.content(); }`);
+  check('status page shows route.fetch nothing', !viaRoute.includes('chat-B'), viaRoute.slice(0, 200));
+  await A.code('async page => { await page.unrouteAll(); return 1; }');
+  await A.call('browser_navigate', { url: urlA });
+  const statusKey = JSON.parse(fs.readFileSync(path.join(home, 'profiles', 'test', 'sessions.json'), 'utf8')).statusKey;
+  const withKey = await (await fetch(`http://127.0.0.1:${gatewayPort}/?key=${statusKey}`)).text();
+  check('the status page with its key still lists the chats', withKey.includes('chat-B'), withKey.slice(0, 200));
   check('annotate is not offered', !(await A.client.listTools()).tools.some(t => t.name === 'browser_annotate'));
   const bTarget = (await targets()).find(t => t.url.includes('who=B'));
   const raise = await A.call('browser_open_tab_window', { targetId: bTarget?.id ?? 'none' });
