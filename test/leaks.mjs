@@ -89,6 +89,14 @@ for (let i = 0; i < 50; i++) {
     break;
   await sleep(200);
 }
+// Trace dirs left by gone gateways: removed at start; one that cannot be
+// removed must not keep the gateway from starting.
+const staleDir = path.join(process.env.TMPDIR, 'agentic-trace-999999-old');
+const stuckDir = path.join(process.env.TMPDIR, 'agentic-trace-999998-stuck');
+fs.mkdirSync(staleDir);
+fs.mkdirSync(path.join(stuckDir, 'sub'), { recursive: true });
+fs.writeFileSync(path.join(stuckDir, 'sub', 'f'), 'x');
+fs.chmodSync(path.join(stuckDir, 'sub'), 0o500);
 const gateway = new Gateway({
   profile: 'test', cdpEndpoint: `http://127.0.0.1:${cdpPort}`, port: gatewayPort,
   filesDir: path.join(home, 'files'), stateFile: path.join(home, 'sessions.json'),
@@ -96,7 +104,12 @@ const gateway = new Gateway({
 const originalError = console.error;
 console.error = () => {};
 try {
-  await gateway.start();
+  let started = true;
+  await gateway.start().catch(() => started = false);
+  check('an undeletable old trace dir does not stop the gateway', started);
+  check('old trace dirs of gone gateways are removed', !fs.existsSync(staleDir));
+  fs.chmodSync(path.join(stuckDir, 'sub'), 0o700);
+  fs.rmSync(stuckDir, { recursive: true, force: true });
   const sleeper = spawn('sleep', ['600'], { stdio: 'ignore' });
   const transport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${gatewayPort}/mcp`), {
     requestInit: { headers: { 'x-agent-session-id': 'chat-A', 'x-agent-title': 'chat-A', 'x-agent-pid': String(sleeper.pid), 'x-agent-desktop-chat': 'local_chat_a' } },

@@ -146,16 +146,36 @@ export function isTracing(session: any) {
 
 // Temp dirs of traces left by gateway processes that are gone (a restart or
 // a crash mid-trace). Dirs of a running gateway (another profile) stay.
+// Nothing here may keep the gateway from starting (launchd would restart it
+// into the same failure): each dir is removed on its own, and a failure is
+// only logged. Dirs from before pids were in the name go after a day.
 export function removeStaleTraceDirs() {
-  for (const name of fs.readdirSync(os.tmpdir())) {
-    const pid = Number(name.match(/^agentic-trace-(\d+)-/)?.[1]);
-    if (!pid || pid === process.pid)
-      continue;
+  let names: string[] = [];
+  try {
+    names = fs.readdirSync(os.tmpdir()).filter(name => name.startsWith('agentic-trace-'));
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    const dir = path.join(os.tmpdir(), name);
     try {
-      process.kill(pid, 0);
-    } catch {
-      fs.rmSync(path.join(os.tmpdir(), name), { recursive: true, force: true });
+      const pid = Number(name.match(/^agentic-trace-(\d+)-/)?.[1]);
+      if (pid ? pid === process.pid || processAlive(pid) : Date.now() - fs.statSync(dir).mtimeMs < 24 * 3600_000)
+        continue;
+      fs.rmSync(dir, { recursive: true, force: true });
+    } catch (e) {
+      console.error(`could not remove the old trace dir ${dir}: ${(e as Error).message}`);
     }
+  }
+}
+
+// EPERM: the process exists, it is another user's.
+function processAlive(pid: number) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === 'EPERM';
   }
 }
 
