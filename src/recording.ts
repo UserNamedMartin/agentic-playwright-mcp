@@ -287,8 +287,15 @@ async function filterChunks(files: string[], pages: Set<string>, calls: Set<stri
         network.push(line);
     }
   }
-  const kept = trace.join('\n') + '\n' + network.join('\n');
-  const wanted = (name: string) => (name.startsWith('resources/') || name.startsWith('screencast/')) && kept.includes(path.basename(name));
+  // Every name the kept entries mention, split out once: looking each
+  // resource up in the whole text was quadratic in the resources of every
+  // chat traced meanwhile.
+  const mentioned = new Set<string>();
+  for (const line of [...trace, ...network]) {
+    for (const token of line.split(/[^A-Za-z0-9@._-]+/))
+      mentioned.add(token);
+  }
+  const wanted = (name: string) => (name.startsWith('resources/') || name.startsWith('screencast/')) && mentioned.has(path.basename(name));
   const resources = new Map<string, Buffer>();
   for (const file of files) {
     for (const [name, data] of await readZip(file, name => wanted(name) && !resources.has(name)))

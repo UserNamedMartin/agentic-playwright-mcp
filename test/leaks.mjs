@@ -159,6 +159,16 @@ try {
   const network = zip ? execFileSync('unzip', ['-p', zip, 'trace.network'], { encoding: 'utf8' }) : '';
   const count = name => network.split('\n').filter(l => l.includes(`/${name}"`) || l.includes(`/${name}`)).length;
   check('each request is in the trace once', count('n1') === 1 && count('n2') === 1, `n1 ${count('n1')}×, n2 ${count('n2')}×`);
+  // Stopping must not slow down with the resources other chats loaded while
+  // tracing (it was quadratic: 37 s at 500).
+  await T('browser_start_tracing');
+  await U('browser_evaluate', { function: '() => Promise.all(Array.from({ length: 2000 }, (_, i) => fetch("/res-" + i).then(r => r.text()))).then(a => a.length)' });
+  for (let i = 0; i < 20; i++)
+    await T('browser_evaluate', { function: `() => { document.body.innerHTML = "<p>${i}</p>".repeat(100000); return 1; }` });
+  const startedStop = Date.now();
+  const stoppedBusy = await T('browser_stop_tracing');
+  const took = Date.now() - startedStop;
+  check('stopping a trace is fast next to a busy chat', /\.zip/.test(stoppedBusy) && took < 5000, `${took} ms`);
   site.close();
   check('its desktop title file is forgotten', !gateway._desktopChats.has('local_chat_a'), [...gateway._desktopChats.keys()].join(', '));
 } catch (e) {
