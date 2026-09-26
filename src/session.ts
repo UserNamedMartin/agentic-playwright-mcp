@@ -649,6 +649,8 @@ export class AgentSession {
     const context = this.backend._context;
     await context.ensureBrowserContext();
     const page = await this._shared.newBackgroundPage();
+    if (!await this._ownNewPage(page))
+      return;
     this._adopt(context, page);
     await this._groups?.addPage(this, page).catch(() => {});
     // Told as a popup once it is on its way to the URL, as a real popup is.
@@ -674,6 +676,8 @@ export class AgentSession {
     const context = this.backend._context;
     await context.ensureBrowserContext();
     const page = await this._shared.newBackgroundPage();
+    if (!await this._ownNewPage(page))
+      throw new Error('This browser session has ended.');
     this._adopt(context, page);
     await this._groups?.addPage(this, page).catch(() => {});
     return page;
@@ -683,7 +687,19 @@ export class AgentSession {
     return this.backend?._context?.currentTab()?.page;
   }
 
+  // Set once the session has ended: a tab still being opened for it is then
+  // closed as soon as it exists, instead of staying behind unowned.
+  private _disposed = false;
+
+  async _ownNewPage(page: Page) {
+    if (!this._disposed)
+      return true;
+    await page.close().catch(() => {});
+    return false;
+  }
+
   async dispose({ closeTabs }: { closeTabs: boolean }) {
+    this._disposed = true;
     const backend = this.backend;
     this.backend = undefined;
     const pages = [...this.owned, ...this._restored?.pages ?? []];
@@ -744,6 +760,8 @@ export class AgentSession {
     context.newTab = async function() {
       await this.ensureBrowserContext();
       const page = await shared.newBackgroundPage();
+      if (!await session._ownNewPage(page))
+        throw new Error('This browser session has ended.');
       session._adopt(this, page);
       await session._groups?.addPage(session, page).catch(() => {});
       this._currentTab = this._tabs.find((tab: any) => tab.page === page);

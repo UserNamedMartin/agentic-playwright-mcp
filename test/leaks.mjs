@@ -174,6 +174,18 @@ try {
   await sleep(1500);
   check('snippet listeners go when the connection drops', snippetListenerCount(sessionT) === 0, `${snippetListenerCount(sessionT)} listeners kept`);
 
+  // A tab still being opened when its chat ends is closed, not left unowned.
+  const S = await client2('chat-S');
+  await S('browser_navigate', { url: `${siteUrl}/s` });
+  const pagesNow = async () => (await (await fetch(`http://127.0.0.1:${cdpPort}/json`)).json()).filter(t => t.type === 'page').length;
+  const beforeEnd = await pagesNow();
+  const sessionS = gateway.sessions.get('chat-S');
+  const opening = sessionS.openTab().catch(() => {});
+  await gateway._closeSession(sessionS);
+  await opening;
+  await sleep(800);
+  check('a tab opened as its chat ends is not left behind', await pagesNow() <= beforeEnd - 1, `${beforeEnd} -> ${await pagesNow()} pages`);
+
   // A trace whose start fails leaves nothing half on.
   const tracing = gateway.shared.context.tracing;
   const startChunk = tracing.startChunk.bind(tracing);
