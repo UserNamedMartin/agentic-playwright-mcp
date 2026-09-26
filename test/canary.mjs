@@ -183,6 +183,28 @@ try {
   }`);
   check('run_code: pages, frames, locators, handles lead only to A\'s tabs', paths.includes('who=A') && !paths.includes('who=B'), paths);
 
+  // run_code: context-wide APIs.
+  await B.call('browser_evaluate', { function: `() => { document.cookie = "b_keep=${SECRET}; path=/"; return 1; }` });
+  const bCreateBefore = (await B.call('browser_evaluate', { function: '() => String(navigator.credentials.create)' })).text.split('### Ran')[0];
+  const wide = await A.code(`async page => {
+    const out = [];
+    const cdp = await page.context().newCDPSession(page);
+    for (const [method, params] of [['Target.getTargets', {}], ['Network.getAllCookies', {}], ['Storage.getCookies', {}], ['Browser.getVersion', {}]])
+      out.push(await cdp.send(method, params).then(r => method + ' GOT ' + JSON.stringify(r).slice(0, 300), e => method + ' refused'));
+    out.push(await cdp.send('Runtime.evaluate', { expression: '1+1' }).then(r => 'own runtime ' + r.result.value, e => 'own runtime refused'));
+    out.push(await Promise.resolve().then(() => page.context().credentials.install({})).then(() => 'credentials installed', e => 'credentials refused'));
+    await page.request.dispose();
+    await page.context().clearCookies({ domain: /./ });
+    return out.join(' | ');
+  }`);
+  check('run_code: CDP session only reaches its own tab', /Target.getTargets refused/.test(wide) && /getAllCookies refused/.test(wide) && /Storage.getCookies refused/.test(wide) && /own runtime 2/.test(wide), wide);
+  await B.call('browser_navigate', { url: `${urlB}&after-credentials=1` });
+  const bCreate = (await B.call('browser_evaluate', { function: '() => String(navigator.credentials.create)' })).text.split('### Ran')[0];
+  check('run_code: context.credentials cannot replace B\'s passkey API', /credentials refused/.test(wide) && bCreate === bCreateBefore, `${wide} / B before: ${bCreateBefore.slice(0, 80)} after: ${bCreate.slice(0, 80)}`);
+  const bRequest = await B.code(`async page => (await page.request.get('${urlB.replace('?who', 'api?who')}')).status()`);
+  check('run_code: A\'s page.request.dispose() leaves B\'s working', /200/.test(bRequest), bRequest);
+  check('run_code: clearCookies with a domain pattern leaves B\'s cookies', (await B.call('browser_evaluate', { function: '() => document.cookie' })).text.includes('b_keep'), 'B lost its cookie');
+
   // run_code: objects handed to callbacks and option predicates.
   const handedIn = await A.code(`async page => {
     const seen = [];

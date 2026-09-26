@@ -33,7 +33,14 @@ const refused: Record<string, string> = {
   clock: 'no clock emulation (it would change every chat\'s pages)',
   tracing: 'the browser_start_tracing / browser_stop_tracing tools',
   debugger: 'no debugger access',
+  credentials: 'no virtual passkeys (they would replace every chat\'s passkey prompts)',
 };
+// Refused members that are objects rather than methods.
+const refusedObjects = new Set(['clock', 'tracing', 'debugger', 'credentials']);
+
+// DevTools commands of a CDP session on one of the session's pages that reach
+// the whole browser (other tabs, every site's cookies and storage).
+const browserWideCommands = /^(Target|Browser|Storage|SystemInfo|Extensions|Tethering|Tracing)\.|^Network\.(getAllCookies|clearBrowserCookies|clearBrowserCache)$|^Security\.setIgnoreCertificateErrors$/;
 
 function refuse(name: string): never {
   throw new Error(`context.${name} is not available here: other chats share this browser and it would reach their ` +
@@ -308,6 +315,9 @@ export function isolatedView(context: any) {
     if (wrapped.has(request))
       return wrapped.get(request);
     return wrapObject(request, {
+      // One request context serves every chat: disposing it would break
+      // page.request for all of them.
+      dispose: async () => {},
       storageState: async (options: { path?: string } = {}) => {
         const state = await scopedStorageState(context);
         if (options.path)
@@ -359,15 +369,30 @@ export function isolatedView(context: any) {
         const page = unwrap(target);
         if (!await session.ownsPage(typeof page?.page === 'function' ? page.page() : page))
           throw new Error('newCDPSession: not one of your pages.');
-        return await rawContext.newCDPSession(page);
+        const cdp = await rawContext.newCDPSession(page);
+        return new Proxy(cdp, {
+          get(real, key) {
+            if (key === 'send') {
+              return async (method: string, params?: any) => {
+                if (browserWideCommands.test(method))
+                  throw new Error(`${method} is not available here: it reaches the whole browser, which other chats share.`);
+                return await real.send(method as any, params);
+              };
+            }
+            const value = Reflect.get(real, key, real);
+            return typeof value === 'function' ? value.bind(real) : value;
+          },
+        });
       },
       cookies: async (urls?: string | string[]) => urls?.length ? await rawContext.cookies(urls) : await ownCookies(context),
+      // A domain named as a string is the agent's explicit choice; a pattern
+      // (like /./) only reaches the sites of its own tabs.
       clearCookies: async (options: { name?: string | RegExp; domain?: string | RegExp; path?: string | RegExp } = {}) => {
-        if (options.domain)
+        if (typeof options.domain === 'string')
           return await rawContext.clearCookies(options);
         const matches = (value: string, filter?: string | RegExp) => filter === undefined || (typeof filter === 'string' ? value === filter : filter.test(value));
         for (const c of (await ownCookies(context)) as Cookie[]) {
-          if (matches(c.name, options.name) && matches(c.path, options.path))
+          if (matches(c.name, options.name) && matches(c.path, options.path) && matches(c.domain, options.domain))
             await rawContext.clearCookies({ name: c.name, domain: c.domain, path: c.path });
         }
       },
@@ -396,7 +421,7 @@ export function isolatedView(context: any) {
       },
     };
     for (const name of Object.keys(refused)) {
-      overrides[name] = ['clock', 'tracing', 'debugger'].includes(name)
+      overrides[name] = refusedObjects.has(name)
         ? new Proxy({}, { get: () => () => refuse(name) })
         : () => refuse(name);
     }
