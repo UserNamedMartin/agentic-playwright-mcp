@@ -403,7 +403,8 @@ export function isolatedView(context: any) {
         return state;
       },
       setStorageState: async (state: any) => { await applyStorageState(context, typeof state === 'string' ? JSON.parse(fs.readFileSync(state, 'utf8')) : state); },
-      route: async (url: any, handler: Function) => await session.addRoute({ pattern: url, handler: wrapCallback(handler) }),
+      // Routes from code cannot be saved across a gateway restart.
+      route: async (url: any, handler: Function) => await session.addRoute({ pattern: url, handler: wrapCallback(handler), fromCode: true }),
       unroute: async (url: any) => { await session.removeRoutes(url); },
       unrouteAll: async () => { await session.removeRoutes(); },
       setOffline: async (offline: boolean) => await session.setOffline(offline),

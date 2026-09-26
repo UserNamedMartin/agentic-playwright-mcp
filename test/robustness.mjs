@@ -194,6 +194,23 @@ try {
   check('browser_route routes survive a gateway restart', mockedAgain.text.includes('MOCKED'), mockedAgain.text);
   const widthAgain = await A2('browser_evaluate', { function: '() => innerWidth' });
   check('device emulation survives a gateway restart', /500/.test(widthAgain.text), widthAgain.text);
+
+  // A second restart keeps them too, without a note about code routes.
+  await sleep(1500);
+  const exited2 = new Promise(r => gateway.on('exit', r));
+  gateway.kill('SIGTERM');
+  await exited2;
+  gateway = run('start', 'test');
+  gateway.stderr.on('data', d => gatewayLog += d);
+  for (let i = 0; i < 150; i++) {
+    if (await fetch(`http://127.0.0.1:${gatewayPort}/`).then(r => r.status < 500, () => false))
+      break;
+    await sleep(200);
+  }
+  const A3 = await chat('chat-A');
+  const secondRestart = await A3('browser_evaluate', { function: '() => fetch("/mocked").then(r => r.text())' }, 30);
+  check('browser_route routes survive a second restart', secondRestart.text.includes('MOCKED'), secondRestart.text);
+  check('no false note about code routes', !/### Routes/.test(secondRestart.text), secondRestart.text);
 } catch (e) {
   failures++;
   console.log(`FAIL ${e.stack}`);

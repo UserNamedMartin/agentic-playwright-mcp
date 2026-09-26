@@ -471,9 +471,9 @@ export class AgentSession {
   savedState(): SavedNetworkState {
     return {
       offline: this.offline,
-      routes: this.routes.filter(route => 'removeHeaders' in route).map(({ handler, ...params }) => params),
+      routes: this.routes.filter(route => !route.fromCode).map(({ handler, ...params }) => params),
       emulation: [...this.emulation].filter(([id]) => this.targets.has(id)),
-      lostRoutes: this.routes.some(route => !('removeHeaders' in route)),
+      lostRoutes: this.routes.some(route => route.fromCode),
     };
   }
 
