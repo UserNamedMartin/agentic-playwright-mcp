@@ -48,3 +48,27 @@ export function refuseInternalUrl(url: string, ports: string[]) {
   if (reason)
     throw new Error(`${url} is not available to agents: ${reason}.`);
 }
+
+// The same, for a name that resolves to this machine (localtest.me, *.nip.io):
+// looked up only when the port is one of ours.
+export async function internalUrlResolved(url: string, ports: string[]): Promise<string | undefined> {
+  const direct = internalUrl(url, ports);
+  if (direct)
+    return direct;
+  let parsed: URL;
+  try {
+    parsed = new URL(url.replace(/^view-source:/i, ''));
+  } catch {
+    return undefined;
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:')
+    return undefined;
+  const port = parsed.port || (parsed.protocol === 'https:' ? '443' : '80');
+  if (!ports.includes(port))
+    return undefined;
+  const { lookup } = await import('node:dns/promises');
+  const addresses = await lookup(parsed.hostname, { all: true }).catch(() => []);
+  return addresses.some(({ address }) => isLoopback(address.includes(':') ? `[${address}]` : address))
+    ? 'the browser\'s DevTools port and the gateway\'s own pages act on every chat\'s tabs'
+    : undefined;
+}

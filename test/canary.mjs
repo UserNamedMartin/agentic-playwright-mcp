@@ -40,6 +40,10 @@ const page = who => `<!doctype html><title>${who} page</title><p>hello ${who}</p
 <a id=dl href="/dl" download>dl</a>`;
 const site = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://x');
+  if (url.pathname === '/redir-cdp') {
+    res.writeHead(302, { location: `http://127.0.0.1:${cdpPort}/json/list` });
+    return res.end();
+  }
   if (url.pathname === '/dl') {
     res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-disposition': 'attachment; filename=b.bin' });
     return res.end('data');
@@ -192,6 +196,26 @@ try {
   const codeResult = codePaths.split('### Ran')[0];
   check('run_code: internal addresses refused by every path', !/WENT|other:/.test(codeResult) && (codeResult.match(/refused/g) ?? []).length === 6, codeResult);
   check('B\'s tab is still there', (await targets()).some(t => t.id === bTab?.id), 'B\'s tab was closed');
+  // Getting there anyway (a redirect, the page's script, an iframe, the popup
+  // binding): the tab is taken away at once.
+  await A.call('browser_navigate', { url: `http://127.0.0.1:${port}/redir-cdp` });
+  await sleep(500);
+  const afterRedirect = await A.call('browser_evaluate', { function: '() => location.href' });
+  check('a redirect to the DevTools port is left at once', /about:blank/.test(afterRedirect.text), afterRedirect.text.slice(0, 160));
+  await A.call('browser_navigate', { url: urlA });
+  await A.call('browser_evaluate', { function: `() => { location.href = 'http://127.0.0.1:${cdpPort}/json/list'; return 1; }` });
+  await sleep(1000);
+  const afterScript = await A.call('browser_snapshot');
+  check('a page script sending the tab there is undone', !afterScript.text.includes('webSocketDebuggerUrl'), afterScript.text.slice(0, 160));
+  await A.call('browser_navigate', { url: urlA });
+  await A.call('browser_evaluate', { function: `() => { const f = document.createElement('iframe'); f.src = 'http://127.0.0.1:${cdpPort}/json/list'; document.body.append(f); return 1; }` });
+  await sleep(1000);
+  const afterFrame = await A.call('browser_snapshot');
+  check('an iframe on the DevTools port is undone', !afterFrame.text.includes('webSocketDebuggerUrl'), afterFrame.text.slice(0, 160));
+  await A.call('browser_evaluate', { function: `() => { window.__agenticOpenInBackground('http://127.0.0.1:${cdpPort}/json/list'); return 1; }` });
+  await sleep(1000);
+  check('the popup binding does not open the DevTools port', !(await targets()).some(t => t.url.includes(`:${cdpPort}/json`)), 'a tab is at the DevTools port');
+  await A.call('browser_navigate', { url: urlA });
   await A.call('browser_navigate', { url: urlA });
   check('annotate is not offered', !(await A.client.listTools()).tools.some(t => t.name === 'browser_annotate'));
   const bTarget = (await targets()).find(t => t.url.includes('who=B'));

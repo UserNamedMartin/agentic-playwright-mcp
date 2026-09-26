@@ -15,6 +15,7 @@ import { removeSnippetListeners } from './isolation.js';
 import { callingSession, isRecording, isTracing, startRecording, stopRecording, stopTracing } from './recording.js';
 import { releaseContextWide } from './scoped.js';
 import { applyEmulation, type Emulation } from './tools.js';
+import { internalUrlResolved } from './urls.js';
 import { describePasskeyRequests, type PasskeyRequest } from './passkeys.js';
 import type { PermissionRequest } from './permissions.js';
 
@@ -644,6 +645,9 @@ export class AgentSession {
   // It opens blank and navigates once it is ours, so the session's routes
   // and offline mode already apply to its first load.
   async openInBackground(url: string, opener?: Page) {
+    // Called by page script: only web addresses, and none of ours.
+    if (!/^https?:/i.test(url) || await internalUrlResolved(url, this.internalPorts).catch(() => 'unknown'))
+      return;
     if (!this.backend)
       await this.start();
     const context = this.backend._context;
@@ -657,6 +661,19 @@ export class AgentSession {
     await page.goto(url, { referer: opener?.url(), waitUntil: 'commit' }).catch(() => {});
     if (opener)
       this._popupOpened(opener, page);
+  }
+
+  // A frame of this session that ended up on the DevTools port or the
+  // gateway (a redirect, a page's script or link, the popup binding) is sent
+  // away at once; the tools already refuse to go there.
+  async _leaveInternal(frame: any) {
+    const url: string = frame.url();
+    const reason = await internalUrlResolved(url, this.internalPorts).catch(() => undefined);
+    if (!reason)
+      return;
+    console.error(`${this.info.title}: left ${url} (${reason})`);
+    this._notes.push(`### Navigation blocked\nA tab of yours was sent to ${url}; it was taken back to about:blank: ${reason}.`);
+    await frame.goto('about:blank').catch(() => {});
   }
 
   // A background tab no session owns, closed when fn is done.
@@ -830,6 +847,7 @@ export class AgentSession {
     const onPageCreated = context._onPageCreated.bind(context);
     context._onPageCreated = function(page: Page) {
       onPageCreated(page);
+      page.on('framenavigated', frame => void session._leaveInternal(frame));
       const tab = this._tabs.find((tab: any) => tab.page === page);
       if (tab)
         patchTabHeader(tab);
