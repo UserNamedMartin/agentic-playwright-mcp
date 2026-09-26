@@ -209,25 +209,31 @@ export async function stopTracing(session: any, context: any, discard = false): 
 }
 
 // One trace (context header, then every kept entry of every chunk), the
-// network log and the resources those entries reference.
+// network log and the resources those entries reference. Each chunk's trace
+// is parsed once; Playwright's network log grows from chunk to chunk, so it
+// is taken from the last chunk only, from the session's own start on; only
+// resources a kept entry refers to are read from the zips.
 async function filterChunks(files: string[], pages: Set<string>, calls: Set<string>): Promise<Buffer> {
   const trace: string[] = [];
-  const network: string[] = [];
-  const resources = new Map<string, Buffer>();
   let header: string | undefined;
+  let sessionStart = -Infinity;
   for (const file of files) {
-    const entries = await readZip(file);
-    const lines = (name: string) => (entries.get(name)?.toString('utf8') ?? '').split('\n').filter(Boolean);
-    const events = lines('trace.trace').map(line => JSON.parse(line));
+    const text = (await readZip(file, name => name === 'trace.trace')).get('trace.trace')?.toString('utf8') ?? '';
+    const lines = text.split('\n').filter(Boolean);
+    const events = lines.map(line => JSON.parse(line));
     for (const e of events) {
       if (e.type === 'frame-snapshot' && pages.has(e.snapshot?.pageId) && e.snapshot?.callId)
         calls.add(e.snapshot.callId);
     }
     for (const [i, e] of events.entries()) {
-      const raw = lines('trace.trace')[i];
       let keep = false;
       switch (e.type) {
-        case 'context-options': header ??= raw; continue;
+        case 'context-options':
+          if (header === undefined) {
+            header = lines[i];
+            sessionStart = e.monotonicTime ?? -Infinity;
+          }
+          continue;
         case 'before': case 'after': case 'log': case 'input': keep = calls.has(e.callId); break;
         case 'frame-snapshot': keep = pages.has(e.snapshot?.pageId); break;
         case 'screencast-frame': case 'console': keep = pages.has(e.pageId); break;
@@ -235,26 +241,31 @@ async function filterChunks(files: string[], pages: Set<string>, calls: Set<stri
         default: keep = false;
       }
       if (keep)
-        trace.push(raw);
+        trace.push(lines[i]);
     }
-    for (const raw of lines('trace.network')) {
-      const e = JSON.parse(raw);
-      if (pages.has(e.snapshot?.pageref))
-        network.push(raw);
-    }
-    for (const [name, data] of entries) {
-      if (name.startsWith('resources/') || name.startsWith('screencast/'))
-        resources.set(name, data);
+  }
+  const network: string[] = [];
+  const last = files[files.length - 1];
+  if (last) {
+    const text = (await readZip(last, name => name === 'trace.network')).get('trace.network')?.toString('utf8') ?? '';
+    for (const line of text.split('\n').filter(Boolean)) {
+      const e = JSON.parse(line);
+      if (pages.has(e.snapshot?.pageref) && (e.snapshot?._monotonicTime ?? Infinity) >= sessionStart)
+        network.push(line);
     }
   }
   const kept = trace.join('\n') + '\n' + network.join('\n');
+  const wanted = (name: string) => (name.startsWith('resources/') || name.startsWith('screencast/')) && kept.includes(path.basename(name));
+  const resources = new Map<string, Buffer>();
+  for (const file of files) {
+    for (const [name, data] of await readZip(file, name => wanted(name) && !resources.has(name)))
+      resources.set(name, data);
+  }
   const zip = new yazl.ZipFile();
   zip.addBuffer(Buffer.from([header, ...trace].filter(Boolean).join('\n') + '\n'), 'trace.trace');
   zip.addBuffer(Buffer.from(network.join('\n') + (network.length ? '\n' : '')), 'trace.network');
-  for (const [name, data] of resources) {
-    if (kept.includes(path.basename(name)))
-      zip.addBuffer(data, name);
-  }
+  for (const [name, data] of resources)
+    zip.addBuffer(data, name);
   zip.end();
   const chunks: Buffer[] = [];
   for await (const chunk of zip.outputStream)
@@ -262,13 +273,16 @@ async function filterChunks(files: string[], pages: Set<string>, calls: Set<stri
   return Buffer.concat(chunks);
 }
 
-function readZip(file: string): Promise<Map<string, Buffer>> {
+// The entries of a zip that `want` asks for; the others are not read.
+function readZip(file: string, want: (name: string) => boolean): Promise<Map<string, Buffer>> {
   return new Promise((resolve, reject) => {
     yauzl.open(file, { lazyEntries: true }, (error: Error, zip: any) => {
       if (error)
         return reject(error);
       const entries = new Map<string, Buffer>();
       zip.on('entry', (entry: any) => {
+        if (!want(entry.fileName))
+          return zip.readEntry();
         zip.openReadStream(entry, (err: Error, stream: any) => {
           if (err)
             return reject(err);

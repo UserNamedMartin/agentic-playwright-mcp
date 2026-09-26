@@ -122,6 +122,44 @@ try {
   await sleep(200);
   await gateway._sweep();
   check('the chat is closed once its process is gone', !gateway.sessions.has('chat-A'));
+
+  // A long trace, cut into chunks by another chat starting and stopping its
+  // own: stopping must not block the process (it ran out of memory at 3000
+  // console lines), and each request is in the trace once.
+  const http = await import('node:http');
+  const site = http.createServer((req, res) => { res.writeHead(200, { 'content-type': 'text/html' }); res.end(`<title>${req.url}</title>`); }).listen(0, '127.0.0.1');
+  await new Promise(r => site.on('listening', r));
+  const siteUrl = `http://127.0.0.1:${site.address().port}`;
+  const client2 = async id => {
+    const c = new Client({ name: id, version: '1' });
+    await c.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${gatewayPort}/mcp`), {
+      requestInit: { headers: { 'x-agent-session-id': id, 'x-agent-title': id, 'x-agent-pid': String(process.pid) } },
+    }));
+    return async (name, args = {}) => (await c.callTool({ name, arguments: args }, undefined, { timeout: 120000 })).content.map(x => x.text ?? '').join('\n');
+  };
+  const T = await client2('chat-T');
+  const U = await client2('chat-U');
+  await T('browser_navigate', { url: `${siteUrl}/t` });
+  await U('browser_navigate', { url: `${siteUrl}/u` });
+  await T('browser_start_tracing');
+  await U('browser_start_tracing');
+  await T('browser_evaluate', { function: '() => fetch("/n1").then(r => r.status)' });
+  await U('browser_stop_tracing');
+  await T('browser_evaluate', { function: '() => fetch("/n2").then(r => r.status)' });
+  await T('browser_evaluate', { function: '() => { for (let i = 0; i < 3000; i++) console.log("line " + i + " " + "x".repeat(200)); return 1; }' });
+  let tick = Date.now();
+  let stall = 0;
+  const ticker = setInterval(() => { stall = Math.max(stall, Date.now() - tick); tick = Date.now(); }, 5);
+  const stopped = await T('browser_stop_tracing');
+  stall = Math.max(stall, Date.now() - tick);
+  clearInterval(ticker);
+  const zip = stopped.match(/(\/\S+\.zip)/)?.[1];
+  check('stopping a long trace does not block the process', !!zip && stall < 500, `event loop stalled ${stall} ms`);
+  const { execFileSync } = await import('node:child_process');
+  const network = zip ? execFileSync('unzip', ['-p', zip, 'trace.network'], { encoding: 'utf8' }) : '';
+  const count = name => network.split('\n').filter(l => l.includes(`/${name}"`) || l.includes(`/${name}`)).length;
+  check('each request is in the trace once', count('n1') === 1 && count('n2') === 1, `n1 ${count('n1')}×, n2 ${count('n2')}×`);
+  site.close();
   check('its desktop title file is forgotten', !gateway._desktopChats.has('local_chat_a'), [...gateway._desktopChats.keys()].join(', '));
 } catch (e) {
   failures++;
