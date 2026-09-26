@@ -153,11 +153,15 @@ try {
   await A('browser_emulate_device', { width: 500, height: 700 });
   await A('browser_start_video', {});
   await A('browser_start_tracing');
+  await A('browser_start_recording');
   sockets.forEach(s => s.destroy());
   await sleep(6000);
   const mocked = await A('browser_evaluate', { function: '() => fetch("/mocked").then(r => r.text())' }, 20);
   check('routes survive a dropped connection', mocked.text.includes('MOCKED'), mocked.text);
-  check('the agent is told video and tracing stopped', /### Video/.test(mocked.text) && /### Tracing/.test(mocked.text), mocked.text);
+  check('the agent is told video, tracing and recording stopped', /### Video/.test(mocked.text) && /### Tracing/.test(mocked.text) && /### Recording/.test(mocked.text), mocked.text);
+  const rerecord = await A('browser_start_recording');
+  check('recording starts again after the drop', !rerecord.isError, rerecord.text);
+  await A('browser_stop_recording');
   const width = await A('browser_evaluate', { function: '() => innerWidth' });
   check('device emulation survives a dropped connection', /500/.test(width.text), width.text);
   await sleep(1000);

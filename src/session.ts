@@ -11,7 +11,7 @@ import type { TabGroups } from './groups.js';
 import { touchFolder } from './files.js';
 import { pwTools, verifyContext } from './internals.js';
 import { removeSnippetListeners } from './isolation.js';
-import { callingSession, isTracing, startRecording, stopRecording, stopTracing } from './recording.js';
+import { callingSession, isRecording, isTracing, startRecording, stopRecording, stopTracing } from './recording.js';
 import { releaseContextWide } from './scoped.js';
 import { applyEmulation, type Emulation } from './tools.js';
 import { describePasskeyRequests, type PasskeyRequest } from './passkeys.js';
@@ -229,6 +229,10 @@ export class AgentSession {
     // What lived in the old connection is gone; the agent is told.
     if (backend?._context?._video)
       this._notes.push('### Video\nThe video recording stopped: the browser connection dropped and was restored. Start it again if you still need it.');
+    if (isRecording(this, this._shared.context)) {
+      void stopRecording(this, this._shared.context).catch(() => {});
+      this._notes.push('### Recording\nThe action recording stopped: the browser connection dropped and was restored. Start it again if you still need it.');
+    }
     if (isTracing(this)) {
       void stopTracing(this, this._shared.context, true).catch(() => {});
       this._notes.push('### Tracing\nTracing stopped: the browser connection dropped and was restored. Start it again if you still need it.');

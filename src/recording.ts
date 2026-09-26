@@ -108,6 +108,10 @@ function dedent(code: string) {
   return lines.map(l => l.slice(indent)).join('\n');
 }
 
+export function isRecording(session: any, raw: any) {
+  return !!recorders.get(raw)?.sessions.has(session);
+}
+
 // --- Tracing
 
 type Tracer = {
