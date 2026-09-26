@@ -59,11 +59,15 @@ const check = (name, ok, detail = '') => {
   const ticker = setInterval(() => { worst = Math.max(worst, Date.now() - last); last = Date.now(); }, 5);
   await sleep(50);
   const index = new TranscriptIndex(configDir, 'sid');
+  const readStart = Date.now();
   const found = await index.lookup('toolu_5999');
+  const readTook = Date.now() - readStart;
   worst = Math.max(worst, Date.now() - last);
   clearInterval(ticker);
   check('finds a call in a long transcript', found?.kind === 'main', JSON.stringify(found));
-  check(`reading ${Math.round(size / 1e6)} MB does not block the process`, worst < 50, `event loop stalled ${worst} ms`);
+  // Blocking reads stall the event loop for about the whole read; reading
+  // in chunks keeps every stall a small part of it (machine speed aside).
+  check(`reading ${Math.round(size / 1e6)} MB does not block the process`, worst < Math.max(25, readTook / 3), `event loop stalled ${worst} ms of a ${readTook} ms read`);
   check('finds a subagent\'s call', (await index.lookup('toolu_sub'))?.kind === 'subagent');
   check('reads the chat\'s custom title', index.customTitle() === 'Long chat', index.customTitle());
   check('remembers a bounded number of calls', index._callers.size <= 5000, `${index._callers.size} calls kept`);
