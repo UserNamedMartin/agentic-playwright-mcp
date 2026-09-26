@@ -15,7 +15,7 @@
 import fs from 'node:fs';
 import type { BrowserContext, Cookie, Page } from 'playwright-core';
 import { applyStorageState, ownCookies, ownUrls, scopedStorageState } from './scoped.js';
-import { refuseInternalUrl } from './urls.js';
+import { internalUrlResolved, refuseInternalUrl } from './urls.js';
 
 // Members of BrowserContext that act on every page of it, with what to use
 // instead. They throw in the view.
@@ -102,6 +102,37 @@ export function isolatedView(context: any) {
       guard(urlOf(args));
       return wrap(await target[name](...unwrapArgs(args)));
     }]));
+  // Requests made from the gateway process (page.request, route.fetch)
+  // follow redirects themselves: follow them here instead, checking every
+  // hop, so no redirect lands on the DevTools port or the gateway.
+  const guardResolved = async (url: string) => {
+    const reason = await internalUrlResolved(url, session.internalPorts);
+    if (reason)
+      throw new Error(`${url} is not available to agents: ${reason}.`);
+  };
+  const redirects = new Set([301, 302, 303, 307, 308]);
+  const guardedFetch = async (url: string, method: string, options: any, first: (options: any) => Promise<any>) => {
+    await guardResolved(url);
+    const limit = options?.maxRedirects ?? 20;
+    let response = await first({ ...options, maxRedirects: 0 });
+    let current = url;
+    let next = { ...options };
+    for (let hops = 0; limit > 0 && redirects.has(response.status()); hops++) {
+      const location = response.headers()['location'];
+      if (!location)
+        break;
+      if (hops >= limit)
+        throw new Error('Max redirect count exceeded');
+      current = new URL(location, current).toString();
+      await guardResolved(current);
+      if (response.status() === 303 || ([301, 302].includes(response.status()) && method === 'POST')) {
+        method = 'GET';
+        next = { ...next, data: undefined, form: undefined, multipart: undefined };
+      }
+      response = await rawContext.request.fetch(current, { ...next, method, maxRedirects: 0 });
+    }
+    return response;
+  };
   const toTarget = new WeakMap<object, any>();
   const wrapped = new WeakMap<object, any>();
   let rawContext: BrowserContext;
@@ -241,7 +272,11 @@ export function isolatedView(context: any) {
       case 'Frame':
         return wrapObject(value, urlMembers(value, ['goto'], args => args[0]));
       case 'Route':
-        return wrapObject(value, urlMembers(value, ['fetch', 'continue', 'fallback'], args => args[0]?.url));
+        return wrapObject(value, {
+          ...urlMembers(value, ['continue', 'fallback'], args => args[0]?.url),
+          fetch: async (options: any = {}) => wrap(await guardedFetch(options.url ?? value.request().url(),
+              (options.method ?? value.request().method()).toUpperCase(), options, o => value.fetch({ ...unwrapArg(options, false), ...o }))),
+        });
       case 'Locator': case 'FrameLocator': case 'ElementHandle': case 'JSHandle':
       case 'Request': case 'Response': case 'Dialog': case 'ConsoleMessage': case 'Download':
       case 'FileChooser': case 'Worker': case 'WebSocket': case 'WebError': case 'Keyboard': case 'Mouse':
@@ -346,7 +381,14 @@ export function isolatedView(context: any) {
     if (wrapped.has(request))
       return wrapped.get(request);
     return wrapObject(request, {
-      ...urlMembers(request, ['fetch', 'get', 'post', 'put', 'patch', 'delete', 'head'], args => args[0]),
+      fetch: async (target: any, options: any = {}) => {
+        const real = unwrap(target);
+        const url = typeof real === 'string' ? real : real.url();
+        const method = (options.method ?? (typeof real === 'string' ? 'GET' : real.method())).toUpperCase();
+        return wrap(await guardedFetch(url, method, options, o => request.fetch(real, { ...options, ...o })));
+      },
+      ...Object.fromEntries(['get', 'post', 'put', 'patch', 'delete', 'head'].map(name => [name,
+        async (url: string, options: any = {}) => wrap(await guardedFetch(url, name.toUpperCase(), options, o => request[name](url, { ...options, ...o })))])),
       // One request context serves every chat: disposing it would break
       // page.request for all of them.
       dispose: async () => {},

@@ -40,6 +40,10 @@ const page = who => `<!doctype html><title>${who} page</title><p>hello ${who}</p
 <a id=dl href="/dl" download>dl</a>`;
 const site = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://x');
+  if (url.pathname === '/redir-ok') {
+    res.writeHead(302, { location: '/probe?redirected=1' });
+    return res.end();
+  }
   if (url.pathname === '/redir-cdp') {
     res.writeHead(302, { location: `http://127.0.0.1:${cdpPort}/json/list` });
     return res.end();
@@ -217,6 +221,20 @@ try {
   check('the popup binding does not open the DevTools port', !(await targets()).some(t => t.url.includes(`:${cdpPort}/json`)), 'a tab is at the DevTools port');
   await A.call('browser_navigate', { url: urlA });
   await A.call('browser_navigate', { url: urlA });
+  const viaRedirects = await A.code(`async page => {
+    const out = [];
+    const tryIt = async (name, fn) => out.push(await fn().then(r => name + ' GOT ' + r, e => /not available to agents/.test(e.message) ? name + ' refused' : name + ' other: ' + e.message.slice(0, 60)));
+    await tryIt('request', async () => (await page.request.get('http://127.0.0.1:${port}/redir-cdp')).status());
+    await tryIt('context.request', async () => (await page.context().request.fetch('http://127.0.0.1:${port}/redir-cdp', { maxRedirects: 5 })).status());
+    await page.route('**/via-redir*', async route => { await tryIt('route.fetch', async () => (await route.fetch({ url: 'http://127.0.0.1:${port}/redir-cdp' })).status()); await route.fulfill({ body: 'x' }); });
+    await page.evaluate(() => fetch('/via-redir')).catch(() => {});
+    await page.unrouteAll();
+    const ok = await page.request.get('http://127.0.0.1:${port}/redir-ok');
+    out.push('normal redirect ' + ok.status() + ' ' + ok.url());
+    return out.join(' | ');
+  }`).then(t => t.split('### Ran')[0]);
+  check('run_code: requests do not follow redirects to the DevTools port', (viaRedirects.match(/refused/g) ?? []).length === 3 && !/GOT|other:/.test(viaRedirects), viaRedirects);
+  check('run_code: normal redirects still work', /normal redirect 200 .*redirected=1/.test(viaRedirects), viaRedirects);
   check('annotate is not offered', !(await A.client.listTools()).tools.some(t => t.name === 'browser_annotate'));
   const bTarget = (await targets()).find(t => t.url.includes('who=B'));
   const raise = await A.call('browser_open_tab_window', { targetId: bTarget?.id ?? 'none' });
