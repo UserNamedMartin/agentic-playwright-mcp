@@ -73,6 +73,13 @@ checked by hand. Anything upstream assumes about owning the whole browser
 context (routes, tracing, video, cookies, storage, network state, process-wide
 listeners) needs a two-session check in `matrix.mjs`.
 
+## Commits
+
+One logical change per commit: a fix and its test, or one topic. Commit
+each as soon as it is green, before starting the next, even when fixes touch
+the same files; every commit builds and passes its tests. Never batch a
+review round's fixes into one commit.
+
 ## Calling it done
 
 Green tests only cover what their author thought of. Before a change that
