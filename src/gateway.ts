@@ -150,6 +150,7 @@ export class Gateway implements SessionHost {
     this._permissions = this._loadPermissions();
     this._ready = this._attachBounded(saved);
     await this._ready;
+    this._attached = true;
     this._sweeper = setInterval(() => void this._sweep(), 15_000);
     this._sweeper.unref();
     const restored = [...this.sessions.values()].filter(s => s.owned.size);
@@ -375,9 +376,14 @@ export class Gateway implements SessionHost {
     this._saveTimer.unref();
   }
 
+  // Set once the gateway has taken over the browser's tabs. Before that the
+  // sessions are not loaded yet: saving would wipe the saved ones, and the
+  // next start would close every chat's tabs as orphans.
+  private _attached = false;
+
   private _saveState() {
     const file = this.options.stateFile;
-    if (!file)
+    if (!file || !this._attached)
       return;
     const sessions: SavedSession[] = [...this.sessions.values()].filter(s => s.targets.size).map(s => ({
       info: s.info,

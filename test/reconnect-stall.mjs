@@ -146,8 +146,34 @@ try {
   console.log(`FAIL ${e.stack}`);
 } finally {
   // SIGTERM leaves the browser running (SIGINT would close it).
+  const exited = new Promise(r => gateway.on('exit', r));
   gateway.kill('SIGTERM');
-  await sleep(1500);
+  await exited;
+  // A start that fails (stalled setup) must not wipe the saved sessions: the
+  // next start would close chat-A's tab as an orphan.
+  try {
+    swallow = { method: 'Target.setDiscoverTargets', remaining: 1 };
+    const failing = run('start', 'test');
+    await new Promise(r => failing.on('exit', r));
+    const again = run('start', 'test');
+    for (let i = 0; i < 150; i++) {
+      if (await fetch(`http://127.0.0.1:${gatewayPort}/`).then(r => r.status < 500, () => false))
+        break;
+      await sleep(200);
+    }
+    const back = new Client({ name: 'stall-test-2', version: '1' });
+    await back.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${gatewayPort}/mcp`), {
+      requestInit: { headers: { 'x-agent-session-id': 'chat-A', 'x-agent-title': 'chat-A', 'x-agent-pid': String(process.pid) } },
+    }));
+    const tabs = (await back.callTool({ name: 'browser_tabs', arguments: { action: 'list' } })).content.map(c => c.text).join('\n');
+    check('a failed start keeps the saved sessions (chat-A has its tab back)', /\(http:\/\/127\.0\.0\.1:\d+\/a\)/.test(tabs), tabs.slice(0, 200));
+    const done = new Promise(r => again.on('exit', r));
+    again.kill('SIGTERM');
+    await done;
+  } catch (e) {
+    failures++;
+    console.log(`FAIL ${e.stack}`);
+  }
   // A gateway started on demand (activate-with) whose start stalls must be
   // replaced by the next check, not left answering every call with an error.
   try {
