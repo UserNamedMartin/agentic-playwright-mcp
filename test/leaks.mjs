@@ -203,6 +203,19 @@ try {
   await sleep(800);
   check('a tab opened as its chat ends is not left behind', await pagesNow() <= beforeEnd - 1, `${beforeEnd} -> ${await pagesNow()} pages`);
 
+  // A call still queued when its chat ends does not start the chat again.
+  const Q = await client2('chat-Q');
+  await Q('browser_navigate', { url: `${siteUrl}/q` });
+  const sessionQ = gateway.sessions.get('chat-Q');
+  const pagesBeforeQ = await pagesNow();
+  const running = Q('browser_evaluate', { function: '() => new Promise(r => setTimeout(() => r(1), 1500))' }).catch(e => e.message);
+  await sleep(200);
+  const queued = Q('browser_tabs', { action: 'new' }).catch(e => e.message);
+  await gateway._closeSession(sessionQ);
+  await Promise.all([running, queued]);
+  await sleep(800);
+  check('a call queued when its chat ends leaves no tab and no backend', !sessionQ.backend && await pagesNow() <= pagesBeforeQ - 1, `backend ${!!sessionQ.backend}, ${pagesBeforeQ} -> ${await pagesNow()} pages`);
+
   // A trace whose start fails leaves nothing half on.
   const tracing = gateway.shared.context.tracing;
   const startChunk = tracing.startChunk.bind(tracing);
