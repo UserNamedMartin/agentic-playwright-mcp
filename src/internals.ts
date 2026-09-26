@@ -6,7 +6,7 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 
 export const pwTools = require('playwright-core/lib/coreBundle').tools;
-export const { z, ws } = require('playwright-core/lib/utilsBundle');
+export const { z, ws, yauzl, yazl } = require('playwright-core/lib/utilsBundle');
 export const playwright = require('playwright-core');
 
 // Methods of the MCP `Context` class that session.ts overrides or calls.

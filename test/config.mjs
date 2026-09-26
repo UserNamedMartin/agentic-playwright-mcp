@@ -97,7 +97,7 @@ try {
     const allowed = await call('browser_navigate', { url: `http://127.0.0.1:${port}/` });
     check('allowed origin loads', !allowed.isError && allowed.text.includes('page'), allowed.text);
     const status = await call('browser_navigate', { url: `${gatewayUrl}/` });
-    check('the gateway\'s own status page still loads', !status.isError && !/ERR_BLOCKED_BY_CLIENT/.test(status.text), status.text);
+    check('the gateway\'s status page is not for agents (blocked, not allowed by the list)', status.isError && /ERR_BLOCKED_BY_CLIENT/.test(status.text), status.text);
     const other = await call('browser_navigate', { url: `http://localhost:${port}/` });
     check('other origins are blocked', other.isError || /ERR_BLOCKED_BY_CLIENT/.test(other.text), other.text);
   });

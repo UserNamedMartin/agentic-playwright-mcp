@@ -128,13 +128,67 @@ try {
   check('a later attempt reconnects and the call is answered', !answer.isError && answer.text.includes('/a'), `${answer.ms} ms ${answer.text}`);
   check('it was given up and retried in the log', /gave up on a stalled attempt/.test(gatewayLog), gatewayLog.split('\n').filter(l => /reconnect|attempt/i.test(l)).join(' | '));
   check('gateway still running', gateway.exitCode === null, `exit code ${gateway.exitCode}`);
+
+  // A stall after the connection is made: the given-up attempt's connections
+  // (its DevTools connection and second, idle one) must be closed too.
+  swallow = { method: 'Page.addScriptToEvaluateOnNewDocument', remaining: 1 };
+  swallowed.length = 0;
+  for (const s of sockets)
+    s.close();
+  await sleep(1000);
+  const again = await call('browser_evaluate', { function: '() => location.pathname' }, 75);
+  check('a stall after connecting is given up too', swallowed.length === 1 && !again.isError, `${again.ms} ms ${again.text}`);
+  await sleep(3000);
+  const connections = sockets.size / 2;
+  check('no connections left over from the given-up attempt', connections <= 2, `${connections} DevTools connections open`);
 } catch (e) {
   failures++;
   console.log(`FAIL ${e.stack}`);
 } finally {
-  gateway.kill('SIGINT');
+  // SIGTERM leaves the browser running (SIGINT would close it).
+  gateway.kill('SIGTERM');
   await sleep(1500);
+  // A gateway started on demand (activate-with) whose start stalls must be
+  // replaced by the next check, not left answering every call with an error.
+  try {
+    swallow = { method: 'Target.setDiscoverTargets', remaining: 1 };
+    const ondemandEnv = { ...env, AGENTIC_PLAYWRIGHT_HOME: path.join(home, 'ondemand') };
+    const runOn = (...args) => spawn(process.execPath, [cli, ...args], { env: ondemandEnv, stdio: ['ignore', 'ignore', 'pipe'] });
+    await new Promise(r => runOn('profile', 'add', 'od', '--headless', '--port', String(gatewayPort + 10), '--cdp-port', String(proxyPort)).on('exit', r));
+    await new Promise(r => runOn('activate-with', 'od', 'reconnect-stall\\.mjs').on('exit', r));
+    const ondemand = runOn('start', 'od');
+    let odLog = '';
+    ondemand.stderr.on('data', d => odLog += d);
+    const odTransport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${gatewayPort + 10}/mcp`), {
+      requestInit: { headers: { 'x-agent-session-id': 'od', 'x-agent-title': 'od', 'x-agent-pid': String(process.pid) } },
+    });
+    let answered = false;
+    const started = Date.now();
+    while (!answered && Date.now() - started < 60000) {
+      await sleep(2000);
+      try {
+        const odClient = new Client({ name: 'od', version: '1' });
+        await odClient.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${gatewayPort + 10}/mcp`), {
+          requestInit: { headers: { 'x-agent-session-id': 'od', 'x-agent-title': 'od', 'x-agent-pid': String(process.pid) } },
+        }));
+        const r = await odClient.callTool({ name: 'browser_evaluate', arguments: { function: '() => 1 + 1' } }, undefined, { timeout: 10000 });
+        answered = !r.isError && r.content.some(c => /### Result\n2/.test(c.text ?? ''));
+        await odClient.close().catch(() => {});
+      } catch {}
+    }
+    check('an on-demand gateway whose start stalled is replaced', answered, odLog.split('\n').slice(-12).join(' | '));
+    void odTransport;
+    ondemand.kill('SIGINT');
+    await sleep(1500);
+  } catch (e) {
+    failures++;
+    console.log(`FAIL ${e.stack}`);
+  }
   browser.kill('SIGKILL');
+  // Anything else started with this test's scratch home (a browser the
+  // on-demand gateway may have launched itself).
+  spawn('pkill', ['-9', '-f', home], { stdio: 'ignore' });
+  await sleep(500);
   proxy.close();
   site.close();
   console.log(failures ? `${failures} check(s) failed` : 'all checks passed');

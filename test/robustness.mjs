@@ -70,7 +70,7 @@ for (let i = 0; i < 50; i++) {
 
 const run = (...args) => spawn(process.execPath, [cli, ...args], { env, stdio: ['ignore', 'ignore', 'pipe'] });
 await new Promise(r => run('profile', 'add', 'test', '--headless', '--port', String(gatewayPort), '--cdp-port', String(proxyPort)).on('exit', r));
-const gateway = run('start', 'test');
+let gateway = run('start', 'test');
 let gatewayLog = '';
 gateway.stderr.on('data', d => gatewayLog += d);
 for (let i = 0; i < 150; i++) {
@@ -145,6 +145,47 @@ try {
   const back = await A('browser_evaluate', { function: '() => location.pathname' }, 20);
   check('A works again after the reconnect', !back.isError && back.text.includes('/a2'), back.text);
   check('unhandled rejection logged, not fatal', !/triggerUncaughtException/.test(gatewayLog));
+
+  // What a session set up survives a dropped connection; what cannot is told.
+  await A('browser_route', { pattern: '**/mocked*', body: 'MOCKED' });
+  await A('browser_emulate_device', { width: 500, height: 700 });
+  await A('browser_start_video', {});
+  await A('browser_start_tracing');
+  sockets.forEach(s => s.destroy());
+  await sleep(6000);
+  const mocked = await A('browser_evaluate', { function: '() => fetch("/mocked").then(r => r.text())' }, 20);
+  check('routes survive a dropped connection', mocked.text.includes('MOCKED'), mocked.text);
+  check('the agent is told video and tracing stopped', /### Video/.test(mocked.text) && /### Tracing/.test(mocked.text), mocked.text);
+  const width = await A('browser_evaluate', { function: '() => innerWidth' });
+  check('device emulation survives a dropped connection', /500/.test(width.text), width.text);
+  await A('browser_network_state_set', { state: 'offline' });
+  sockets.forEach(s => s.destroy());
+  await sleep(6000);
+  const offline = await A('browser_evaluate', { function: '() => fetch("/x").then(() => "online", () => "offline")' }, 20);
+  check('offline mode survives a dropped connection', /"offline"/.test(offline.text), offline.text);
+
+  // ... and a gateway restart; routes made from code cannot be saved: told.
+  await A('browser_run_code_unsafe', { code: 'async page => { await page.context().route("**/fromcode*", r => r.fulfill({ body: "CODE" })); return 1; }' });
+  await sleep(1500);
+  const exited = new Promise(r => gateway.on('exit', r));
+  gateway.kill('SIGTERM');
+  await exited;
+  gateway = run('start', 'test');
+  gateway.stderr.on('data', d => gatewayLog += d);
+  for (let i = 0; i < 150; i++) {
+    if (await fetch(`http://127.0.0.1:${gatewayPort}/`).then(r => r.ok, () => false))
+      break;
+    await sleep(200);
+  }
+  const A2 = await chat('chat-A');
+  const restarted = await A2('browser_evaluate', { function: '() => fetch("/x").then(() => "online", () => "offline")' }, 30);
+  check('offline mode survives a gateway restart', /"offline"/.test(restarted.text), restarted.text);
+  check('the agent is told routes from code are gone', /### Routes/.test(restarted.text), restarted.text);
+  await A2('browser_network_state_set', { state: 'online' });
+  const mockedAgain = await A2('browser_evaluate', { function: '() => fetch("/mocked").then(r => r.text())' });
+  check('browser_route routes survive a gateway restart', mockedAgain.text.includes('MOCKED'), mockedAgain.text);
+  const widthAgain = await A2('browser_evaluate', { function: '() => innerWidth' });
+  check('device emulation survives a gateway restart', /500/.test(widthAgain.text), widthAgain.text);
 } catch (e) {
   failures++;
   console.log(`FAIL ${e.stack}`);

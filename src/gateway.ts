@@ -21,7 +21,7 @@ import { SharedBrowser } from './browser.js';
 import { TabGroups } from './groups.js';
 import { applyBrowserConfig } from './config.js';
 import { scopeTools } from './scoped.js';
-import { AgentSession, defaultCallTimeoutSeconds, errorResult, type SessionHost, type SessionInfo } from './session.js';
+import { type SavedNetworkState, AgentSession, defaultCallTimeoutSeconds, errorResult, type SessionHost, type SessionInfo } from './session.js';
 import { pwTools, z, verifyInternals } from './internals.js';
 import { extraTools } from './tools.js';
 import { renderDashboard } from './dashboard.js';
@@ -70,6 +70,7 @@ type SavedSession = {
   startedAt: number;
   targets: string[];
   current?: string;
+  network?: SavedNetworkState;
 };
 
 export class Gateway implements SessionHost {
@@ -107,6 +108,12 @@ export class Gateway implements SessionHost {
 
   async start() {
     verifyInternals();
+    // Playwright leaves some promises unhandled (a download whose page went
+    // away when the browser connection dropped). Upstream every agent's
+    // context catches them; the gateway serves many agents and only logs
+    // them rather than let one kill the process for everyone.
+    if (!process.listeners('unhandledRejection').includes(logUnhandledRejection))
+      process.on('unhandledRejection', logUnhandledRejection);
     // Also reads a Playwright MCP config file (the profile's "config") and
     // PLAYWRIGHT_MCP_* variables, as upstream does.
     this._config = await pwTools.resolveCLIConfigForMCP({
@@ -118,7 +125,11 @@ export class Gateway implements SessionHost {
     // pdf: works in the headed browser too (Page.printToPDF). Not "config":
     // browser_get_config would print the config's secrets to the agent.
     this._config.capabilities ??= ['devtools', 'network', 'storage', 'testing', 'vision', 'pdf'];
-    this._tools = scopeTools([...pwTools.filteredTools(this._config), ...extraTools(this)]);
+    // browser_annotate opens the Playwright Dashboard, a separate visible
+    // browser waiting for the user, which does not see this gateway's
+    // connection and outlives it.
+    this._tools = scopeTools([...pwTools.filteredTools(this._config), ...extraTools(this)])
+        .filter(tool => tool.schema.name !== 'browser_annotate');
     this._server = http.createServer((req, res) => void this._handle(req, res).catch(e => {
       console.error(e);
       if (!res.headersSent)
@@ -165,7 +176,7 @@ export class Gateway implements SessionHost {
     this.groups = await groups.init() ? groups : undefined;
     await shared.context.exposeBinding(openInBackgroundBinding, async ({ page }: { page: Page }, url: string) => {
       const owner = [...this.sessions.values()].find(session => session.owned.has(page));
-      await owner?.openInBackground(url);
+      await owner?.openInBackground(url, page);
     });
     await shared.context.addInitScript({ content: popupInterceptScript });
     await shared.context.exposeBinding(permissionBinding, async ({ page, frame }: { page: Page; frame: any }, request: any) =>
@@ -175,6 +186,16 @@ export class Gateway implements SessionHost {
       await this._onPasskeyRequest(page, frame.url(), request));
     await shared.context.addInitScript({ content: passkeyScript });
     await applyBrowserConfig(shared.context, this._config, this.baseUrl);
+    // The status page lists every chat and its tabs, for the user: agents'
+    // tabs cannot open it (under any of the gateway's local names).
+    const port = new URL(this.baseUrl).port;
+    for (const host of ['127.0.0.1', 'localhost', '[::1]', '0.0.0.0']) {
+      await shared.context.route(`http://${host}:${port}/**`, async (route, request) => {
+        if (await this._ownedByAgent(request))
+          return await route.abort('blockedbyclient');
+        await route.fallback();
+      });
+    }
     for (const decision of this._permissions)
       await shared.setPermission(decision).catch(() => {});
     await this._setUpTabs(saved);
@@ -200,6 +221,9 @@ export class Gateway implements SessionHost {
         this._abandoned.add(connection);
         console.error(`gave up on a stalled attempt to set up the browser connection: ${(e as Error).message}`);
         await connection.close().catch(() => {});
+        // Its SharedBrowser, if it got that far: canary socket, focus guard.
+        if (this.shared?.browser === connection)
+          this.shared.dispose();
       }
       throw e;
     } finally {
@@ -276,11 +300,13 @@ export class Gateway implements SessionHost {
       entry.targets.forEach(id => session.targets.add(id));
       session.currentTarget = entry.current;
       session.lastActivity = entry.lastActivity;
+      session.restoreSavedState(entry.network);
     }
     const kept = new Set<string>();
     for (const session of this.sessions.values()) {
       session.restore(byTarget);
       session.targets.forEach(id => kept.add(id));
+      await session.reapplyNetworkState();
     }
     const homeId = [...byTarget].find(([, page]) => page.url().startsWith(this.baseUrl))?.[0]
       ?? [...byTarget.keys()].find(id => !kept.has(id));
@@ -360,6 +386,7 @@ export class Gateway implements SessionHost {
       startedAt: s.startedAt,
       targets: [...s.targets],
       current: s.currentTargetId(),
+      network: s.savedState(),
     }));
     try {
       fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -760,7 +787,7 @@ export class Gateway implements SessionHost {
         return await this._tabLink(target, args.index);
       if (request.params.name === openTabWindowTool.name) {
         console.error(`tab link button clicked in ${session.info.title}`);
-        return await this._openTabWindow(String(args.targetId ?? ''));
+        return await this._openTabWindow(target, String(args.targetId ?? ''));
       }
       return await this._callWithRetry(target, request.params.name, args, extra.signal);
     }
@@ -776,6 +803,7 @@ export class Gateway implements SessionHost {
       const generation = this._connection;
       let result: any;
       try {
+        await untilAborted(this._ready, signal);
         result = await session.callTool(name, args, signal);
       } catch (e) {
         if (generation === this._connection)
@@ -830,8 +858,35 @@ export class Gateway implements SessionHost {
     };
   }
 
-  private async _openTabWindow(targetId: string) {
-    if (!targetId || !await this.shared.pageByTargetId(targetId))
+  private async _ownedByAgent(request: any) {
+    for (const session of this.sessions.values()) {
+      if (await session.ownsRequest(request))
+        return true;
+    }
+    return false;
+  }
+
+  // SessionHost: a chat's browser_tabs also lists its subagents' tabs.
+  subagentTabs(session: AgentSession): string | undefined {
+    if (session.info.id.includes('#'))
+      return undefined;
+    const lines: string[] = [];
+    for (const child of this.sessions.values()) {
+      if (!child.info.id.startsWith(`${session.info.id}#`) || !child.owned.size)
+        continue;
+      lines.push(`- ${child.info.label ?? child.info.id.split('#')[1]}:`);
+      for (const page of child.owned)
+        lines.push(`  - ${page.url()}`);
+    }
+    return lines.length ? `### Your subagents' tabs\n${lines.join('\n')}` : undefined;
+  }
+
+  // Only tabs of the calling chat (or its subagents) can be brought forward.
+  private async _openTabWindow(session: AgentSession, targetId: string) {
+    const root = session.info.id.split('#')[0];
+    const ours = [...this.sessions.values()].some(s => s.info.id.split('#')[0] === root &&
+        [...s.targets].some(id => id === targetId));
+    if (!targetId || !ours || !await this.shared.pageByTargetId(targetId))
       return errorResult('That tab is closed.');
     await this.shared.focusTab(targetId);
     return { content: [{ type: 'text' as const, text: 'Opened.' }] };
@@ -1020,6 +1075,10 @@ function safeOrigin(url: string) {
   } catch {
     return '';
   }
+}
+
+function logUnhandledRejection(reason: unknown) {
+  console.error('unhandled rejection (ignored):', reason);
 }
 
 // Longest time one attempt to set up the browser connection may take.

@@ -73,10 +73,21 @@ checked by hand. Anything upstream assumes about owning the whole browser
 context (routes, tracing, video, cookies, storage, network state, process-wide
 listeners) needs a two-session check in `matrix.mjs`.
 
+## Calling it done
+
+Green tests only cover what their author thought of. Before a change that
+touches isolation, sessions or the shared browser is called done, an agent
+that did not write it reviews it with the aim of breaking it (see how the
+earlier review rounds were briefed: what changed, what is accepted, confirm
+findings with scratch repros on a throwaway headless gateway). What it finds
+gets a failing test and a fix; report what was checked, not "all covered".
+New leak paths go into `canary.mjs`, which searches everything one chat gets
+for another chat's secret.
+
 ## Checking changes
 
 `npm run build`, then `node test/reconnect.mjs`, `node test/permissions.mjs`,
-`node test/passkeys.mjs`, `node test/forks.mjs`, `node test/hangs.mjs`, `node test/matrix.mjs`, `node test/robustness.mjs`, `node test/reconnect-stall.mjs`, `node test/leaks.mjs` and `node test/config.mjs`
+`node test/passkeys.mjs`, `node test/forks.mjs`, `node test/hangs.mjs`, `node test/matrix.mjs`, `node test/robustness.mjs`, `node test/reconnect-stall.mjs`, `node test/leaks.mjs`, `node test/config.mjs` and `node test/canary.mjs`
 (self-contained, headless; headless Chrome grants some permissions by itself,
 so check permission changes in a headed profile too)
 and a throwaway headless profile with the other scripts in `test/` (see

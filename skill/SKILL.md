@@ -139,10 +139,16 @@ Cookies, local storage and logins are shared. The cookie and storage-state
 tools only act on the sites open in your own tabs (cookie list and delete take
 a `domain` for another site), so they cannot wipe or export other chats'
 logins. Still, unless the user asks for it, do not clear cookies or storage or
-load a storage state. `browser_route`, offline mode and video only act on your
-own tabs. Tracing and the action recorder cover the whole browser, so only one
-chat at a time can use them (you are told which chat has them); they stop when
-that chat ends.
+load a storage state. Everything else works as if you had the browser to
+yourself: routes, offline mode, video, device emulation, tracing and the
+action recorder only see and affect your own tabs (other chats can use them at
+the same time), and `browser_run_code_unsafe`'s `page` only leads to your own
+tabs. Tabs your pages open (links with target=_blank, window.open) are yours,
+open in the background, and arrive as `page.waitForEvent('popup')` in code.
+Your `browser_tabs` list also shows your subagents' tabs. The gateway's status
+page (its own address) is not for agents and does not load in your tabs.
+Routes, offline mode and device emulation survive a dropped browser connection
+and a gateway restart; you are told when a video or trace was cut off.
 
 ## Phones and screen sizes
 

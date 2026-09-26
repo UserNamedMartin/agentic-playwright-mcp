@@ -74,6 +74,9 @@ try {
   const longer = await call('browser_evaluate', { function: '() => new Promise(r => setTimeout(() => r("slow done"), 3000))', timeout: 10 });
   check('a raised timeout lets a slow call finish', /slow done/.test(longer));
 
+  const huge = await call('browser_evaluate', { function: '() => 1 + 1', timeout: 1e10 });
+  check('a huge timeout is not an overflow (given up at once)', /### Result\n2/.test(huge), huge);
+
   const slow = call('browser_evaluate', { function: '() => new Promise(r => setTimeout(() => r("slow"), 3000))' });
   await sleep(200);
   const waiting = await call('browser_evaluate', { function: '() => 1 + 1' });

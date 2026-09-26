@@ -53,9 +53,50 @@ export class SharedBrowser {
       shared._created.delete(targetId);
       onTargetDestroyed?.(targetId);
     });
+    // Popups, with the tab that opened them, as Chrome reports them.
+    const notePopup = ({ targetInfo }: any) => {
+      if (targetInfo.type === 'page' && targetInfo.openerId) {
+        const known = shared._popups.get(targetInfo.targetId);
+        shared._popups.set(targetInfo.targetId, { url: targetInfo.url, openerId: targetInfo.openerId, at: known?.at ?? Date.now() });
+      }
+    };
+    cdp.on('Target.targetCreated', notePopup);
+    cdp.on('Target.targetInfoChanged', notePopup);
     await cdp.send('Target.setDiscoverTargets', { discover: true });
     await shared._openCanary(cdpEndpoint).catch(() => {});
     return shared;
+  }
+
+  // Recently opened popups by target id.
+  _popups = new Map<string, { url: string; openerId: string; at: number }>();
+
+  // The tab that opened the popup whose first request is for `url`: that
+  // request comes before Playwright knows the popup's page, and holding it
+  // until then would keep the page from ever being made. Chrome reports the
+  // popup (and its opener) at once but its URL only once it has loaded, so
+  // popups that have not navigated yet are the candidates; when they come
+  // from different tabs at the same moment, nobody is told (undefined).
+  async popupOpener(url: string): Promise<string | undefined> {
+    for (let waited = 0; waited <= 500; waited += 25) {
+      const now = Date.now();
+      const exact = new Set<string>();
+      const fresh = new Set<string>();
+      for (const [id, popup] of this._popups) {
+        if (now - popup.at > 10_000)
+          this._popups.delete(id);
+        else if (popup.url === url)
+          exact.add(popup.openerId);
+        else if ((!popup.url || popup.url === 'about:blank') && now - popup.at < 3000)
+          fresh.add(popup.openerId);
+      }
+      const openers = exact.size ? exact : fresh;
+      if (openers.size === 1)
+        return [...openers][0];
+      if (openers.size > 1)
+        return undefined;
+      await new Promise(r => setTimeout(r, 25));
+    }
+    return undefined;
   }
 
   // A second, idle DevTools connection. When the main one drops, its state

@@ -9,6 +9,29 @@ import { permissionTypes } from './permissions.js';
 // attached, so keep one per page.
 const emulationSessions = new WeakMap<Page, CDPSession>();
 
+export type Emulation = { width: number; height: number; mobile: boolean; deviceScaleFactor: number; touch: boolean; userAgent?: string };
+
+// Applies (or with undefined, clears) a tab's device emulation.
+export async function applyEmulation(page: Page, settings: Emulation | undefined) {
+  let cdp = emulationSessions.get(page);
+  if (!cdp) {
+    cdp = await page.context().newCDPSession(page);
+    emulationSessions.set(page, cdp);
+  }
+  if (!settings) {
+    await cdp.send('Emulation.clearDeviceMetricsOverride');
+    await cdp.send('Emulation.setTouchEmulationEnabled', { enabled: false });
+    await cdp.send('Emulation.setUserAgentOverride', { userAgent: '' });
+    return;
+  }
+  await cdp.send('Emulation.setDeviceMetricsOverride', {
+    width: settings.width, height: settings.height, mobile: settings.mobile, deviceScaleFactor: settings.deviceScaleFactor,
+  });
+  await cdp.send('Emulation.setTouchEmulationEnabled', { enabled: settings.touch, maxTouchPoints: settings.touch ? 5 : 1 });
+  if (settings.userAgent)
+    await cdp.send('Emulation.setUserAgentOverride', { userAgent: settings.userAgent });
+}
+
 export function extraTools(gateway: Gateway) {
   const showTab = {
     capability: 'core-tabs',
@@ -55,15 +78,11 @@ export function extraTools(gateway: Gateway) {
     handle: async (context: any, params: any, response: any) => {
       const tab = await context.ensureTab();
       const page: Page = tab.page;
-      let cdp = emulationSessions.get(page);
-      if (!cdp) {
-        cdp = await page.context().newCDPSession(page);
-        emulationSessions.set(page, cdp);
-      }
+      const session = context._agentSession;
+      const targetId = await gateway.shared.targetId(page);
       if (params.reset) {
-        await cdp.send('Emulation.clearDeviceMetricsOverride');
-        await cdp.send('Emulation.setTouchEmulationEnabled', { enabled: false });
-        await cdp.send('Emulation.setUserAgentOverride', { userAgent: '' });
+        await applyEmulation(page, undefined);
+        session.emulation.delete(targetId);
         response.addTextResult('Device emulation reset.');
         return;
       }
@@ -78,17 +97,17 @@ export function extraTools(gateway: Gateway) {
       if (!width || !height)
         throw new Error('Pass a device name or width and height.');
       const mobile = params.mobile ?? device.isMobile ?? false;
-      const touch = params.touch ?? device.hasTouch ?? mobile;
-      await cdp.send('Emulation.setDeviceMetricsOverride', {
+      const settings: Emulation = {
         width, height, mobile,
         deviceScaleFactor: params.deviceScaleFactor ?? device.deviceScaleFactor ?? 1,
-      });
-      await cdp.send('Emulation.setTouchEmulationEnabled', { enabled: touch, maxTouchPoints: touch ? 5 : 1 });
-      const userAgent = params.userAgent ?? device.userAgent;
-      if (userAgent)
-        await cdp.send('Emulation.setUserAgentOverride', { userAgent });
+        touch: params.touch ?? device.hasTouch ?? mobile,
+        userAgent: params.userAgent ?? device.userAgent,
+      };
+      await applyEmulation(page, settings);
+      // Kept by the session, to apply again after a reconnect or restart.
+      session.emulation.set(targetId, settings);
       response.addTextResult(`Emulating ${params.device ?? `${width}x${height}`} in this tab` +
-        `${userAgent ? ' (user agent changed; reload the page for sites that detect it on the server)' : ''}.`);
+        `${settings.userAgent ? ' (user agent changed; reload the page for sites that detect it on the server)' : ''}.`);
     },
   };
 

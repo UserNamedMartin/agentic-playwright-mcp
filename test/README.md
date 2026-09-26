@@ -25,6 +25,7 @@ node dist/cli.js start test
 | `passkeys.mjs [browser]` | self-contained, pass/fail: passkey requests in a browser nobody can see are cancelled at once and reported; passkey autofill is left alone |
 | `hangs.mjs [browser]` | self-contained, pass/fail: a cancelled call and a call past its timeout free the session queue at once; a raised `timeout` is honored; a call that waited behind another says so |
 | `matrix.mjs [browser]` | self-contained, pass/fail: every tool across two sessions — works at all, does not reach the other session, leaves nothing behind when its chat ends |
+| `canary.mjs [browser]` | self-contained, pass/fail: chat B's pages carry a secret; chat A tries every known way to see or touch B (tools, run_code membrane, events, status page, recorder, tracing) and every text and file A gets is searched for it; no call leaves a tab that is not A's; A's own popups, new pages and first-load routes work |
 | `robustness.mjs [browser]` | self-contained, pass/fail: one session's failed download, stuck page or given-up call does not reach the others; the gateway survives the browser connection dropping during a download |
 | `reconnect-stall.mjs [browser]` | self-contained, pass/fail: a reconnect attempt whose setup the browser never answers is given up and retried; waiting calls get answered (about a minute) |
 | `leaks.mjs [browser]` | self-contained, pass/fail (gateway in-process): a 120 MB transcript is read without blocking the process, remembered tool calls are bounded, closed tabs and closed chats' title files are forgotten |

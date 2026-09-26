@@ -8,6 +8,7 @@ import fs from 'node:fs';
 import type { BrowserContext, Cookie } from 'playwright-core';
 import { z } from './internals.js';
 import { isolatedView } from './isolation.js';
+import { startTracing, stopRecording, stopTracing } from './recording.js';
 
 // Sites (http and https URLs) of the session's open tabs.
 export function ownUrls(context: any): string[] {
@@ -25,8 +26,12 @@ export async function ownCookies(context: any): Promise<Cookie[]> {
 const describe = (c: Cookie) => `${c.name}=${c.value} (domain: ${c.domain}, path: ${c.path})`;
 const scopeNote = 'Only cookies of the sites open in your tabs; pass "domain" for another site.';
 
+// A cookie of `domain` or one of its subdomains ("example.com" matches
+// "www.example.com", not "notexample.com").
 function domainMatches(cookie: Cookie, domain: string) {
-  return cookie.domain.includes(domain);
+  const wanted = domain.replace(/^\./, '').toLowerCase();
+  const actual = cookie.domain.replace(/^\./, '').toLowerCase();
+  return actual === wanted || actual.endsWith(`.${wanted}`);
 }
 
 async function removeCookies(browserContext: BrowserContext, cookies: Cookie[]) {
@@ -34,19 +39,32 @@ async function removeCookies(browserContext: BrowserContext, cookies: Cookie[]) 
     await browserContext.clearCookies({ name: c.name, domain: c.domain, path: c.path });
 }
 
-// Cookies and local storage of the sites open in the session's tabs.
+// Cookies and local storage of the sites open in the session's tabs. Read
+// from those tabs: browserContext.storageState() would visit every origin the
+// browser has seen, in a new foreground tab.
 export async function scopedStorageState(context: any) {
-  const browserContext: BrowserContext = await context.ensureBrowserContext();
-  const state = await browserContext.storageState();
-  const own = new Set((await ownCookies(context)).map(c => `${c.name}\n${c.domain}\n${c.path}`));
-  const origins = new Set(ownUrls(context).map(u => new URL(u).origin));
-  return {
-    cookies: state.cookies.filter(c => own.has(`${c.name}\n${c.domain}\n${c.path}`)),
-    origins: state.origins.filter(o => origins.has(o.origin)),
-  };
+  const cookies = await ownCookies(context);
+  const origins: { origin: string; localStorage: { name: string; value: string }[] }[] = [];
+  const seen = new Set<string>();
+  for (const tab of context.tabs()) {
+    const url: string = tab.page.url();
+    if (!/^https?:/.test(url))
+      continue;
+    const origin = new URL(url).origin;
+    if (seen.has(origin))
+      continue;
+    seen.add(origin);
+    const read = tab.page.evaluate(() => Object.entries(localStorage).map(([name, value]) => ({ name, value: String(value) })));
+    const localStorage = await Promise.race([read, new Promise<undefined>(r => setTimeout(() => r(undefined), 2000))]).catch(() => undefined);
+    if (localStorage?.length)
+      origins.push({ origin, localStorage });
+  }
+  return { cookies, origins };
 }
 
-// Replaces the cookies and local storage of the sites in `state` only.
+// Replaces the cookies and local storage of the sites in `state` only. Local
+// storage of an origin none of the session's tabs shows is written from a
+// scratch background tab that never reaches the network.
 export async function applyStorageState(context: any, state: any) {
   const browserContext: BrowserContext = await context.ensureBrowserContext();
   const cookies: Cookie[] = state.cookies ?? [];
@@ -55,73 +73,33 @@ export async function applyStorageState(context: any, state: any) {
   if (cookies.length)
     await browserContext.addCookies(cookies);
   const origins: { origin: string; localStorage: { name: string; value: string }[] }[] = state.origins ?? [];
-  if (origins.length) {
-    // Written over CDP from one of the session's own tabs, so no page has
-    // to be opened on each origin (upstream opens one, in the foreground).
-    const tab = await context.ensureTab();
-    const cdp = await browserContext.newCDPSession(tab.page);
-    try {
-      for (const { origin, localStorage } of origins) {
-        const storageId = { securityOrigin: origin, isLocalStorage: true };
-        await cdp.send('DOMStorage.clear', { storageId });
-        for (const { name, value } of localStorage)
-          await cdp.send('DOMStorage.setDOMStorageItem', { storageId, key: name, value });
-      }
-    } finally {
-      await cdp.detach().catch(() => {});
+  const write = (items: { name: string; value: string }[]) => {
+    localStorage.clear();
+    for (const { name, value } of items)
+      localStorage.setItem(name, value);
+  };
+  for (const { origin, localStorage: items } of origins) {
+    const tab = context.tabs().find((t: any) => { try { return new URL(t.page.url()).origin === origin; } catch { return false; } });
+    if (tab) {
+      await tab.page.evaluate(write, items);
+      continue;
     }
+    await context._agentSession.withScratchPage(async (page: any) => {
+      await page.route(`${origin}/**`, (route: any) => route.fulfill({ contentType: 'text/html', body: '<html></html>' }));
+      await page.goto(`${origin}/`);
+      await page.evaluate(write, items);
+    });
   }
   return { cookies: cookies.length, origins: origins.length };
 }
 
-// Tracing and the recorder can only work on the whole browser context, so one
-// session at a time may use them; they stop when that session ends.
-type ContextWide = 'tracing' | 'recording';
-const owners = new WeakMap<object, Partial<Record<ContextWide, any>>>();
-const ownersOf = (browserContext: object) => {
-  let entry = owners.get(browserContext);
-  if (!entry)
-    owners.set(browserContext, entry = {});
-  return entry;
-};
-
-function exclusiveStart(kind: ContextWide, what: string) {
-  return async (context: any, params: any, response: any, original: any) => {
-    const entry = ownersOf(await context.ensureBrowserContext());
-    const owner = entry[kind];
-    if (owner && owner !== context._agentSession)
-      throw new Error(`Another chat (${owner.info.title}) is using ${what} right now; it covers the whole shared browser, so only one chat at a time can. Try again later.`);
-    await original(context, params, response);
-    entry[kind] = context._agentSession;
-  };
-}
-
-function exclusiveStop(kind: ContextWide, what: string) {
-  return async (context: any, params: any, response: any, original: any) => {
-    const entry = ownersOf(await context.ensureBrowserContext());
-    const owner = entry[kind];
-    if (owner && owner !== context._agentSession)
-      throw new Error(`${what} was started by another chat (${owner.info.title}); only that chat can stop it.`);
-    if (!owner && kind === 'tracing')
-      throw new Error('Tracing is not started');
-    await original(context, params, response);
-    delete entry[kind];
-  };
-}
-
-// Called when a session ends: stops whatever context-wide thing it left on.
-export async function releaseContextWide(session: any, browserContext: any) {
-  const entry = owners.get(browserContext);
-  if (!entry)
+// Called when a session ends or closes its browser: it stops recording and
+// tracing (see recording.ts).
+export async function releaseContextWide(session: any, context: any) {
+  if (!context)
     return;
-  if (entry.tracing === session) {
-    delete entry.tracing;
-    await browserContext.tracing.stop().catch(() => {});
-  }
-  if (entry.recording === session) {
-    delete entry.recording;
-    await browserContext._disableRecorder?.().catch(() => {});
-  }
+  await stopRecording(session, context).catch(() => {});
+  await stopTracing(session, context, true).catch(() => {});
 }
 
 const replacements: Record<string, { description?: string; inputSchema?: any; handle: (context: any, params: any, response: any, original: any) => Promise<void> }> = {
@@ -133,10 +111,31 @@ const replacements: Record<string, { description?: string; inputSchema?: any; ha
       response.addCode(`await page.context().setOffline(${params.state === 'offline'});`);
     },
   },
-  browser_start_tracing: { handle: exclusiveStart('tracing', 'tracing') },
-  browser_stop_tracing: { handle: exclusiveStop('tracing', 'Tracing') },
-  browser_start_recording: { handle: exclusiveStart('recording', 'the action recorder') },
-  browser_stop_recording: { handle: exclusiveStop('recording', 'The action recorder') },
+  browser_start_tracing: {
+    description: 'Start trace recording of your tabs (actions, snapshots, screenshots, console, network).',
+    handle: async (context, params, response) => {
+      await startTracing(context._agentSession, context);
+      response.addTextResult('Trace recording started. Only your own tabs are recorded; call browser_stop_tracing to get the trace.');
+    },
+  },
+  browser_stop_tracing: {
+    description: 'Stop trace recording and save the trace of your tabs.',
+    handle: async (context, params, response) => {
+      const zip = await stopTracing(context._agentSession, context);
+      const file = await response.resolveClientOutputFile({ prefix: 'trace', ext: 'zip' }, 'Trace');
+      await response.addFileResult(file, zip);
+      response.addTextResult('Trace recording stopped. Open the trace with: npx playwright show-trace <file>');
+    },
+  },
+  // Stock start_recording also brings the tab to the front, which raises the
+  // window over whatever the user is doing.
+  browser_start_recording: {
+    handle: async (context, params, response) => {
+      await context.ensureTab();
+      await context.startRecording();
+      response.addTextResult('Recording started. Call browser_stop_recording to retrieve the recorded actions.');
+    },
+  },
   browser_cookie_list: {
     description: 'List the cookies of the sites open in your tabs (or of "domain", if given). Other chats share this browser, so other sites are left out by default.',
     handle: async (context, params, response) => {

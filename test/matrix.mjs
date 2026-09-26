@@ -11,7 +11,7 @@
 // note) and exits non-zero if any LEAK or BROKEN was found. browser_show_tab
 // and browser_annotate are left out: one raises the browser window, the other
 // opens the Playwright Dashboard for the user (see CLAUDE.md).
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
@@ -356,18 +356,34 @@ try {
 
   // Tracing.
   works('browser_start_tracing', await A.call('browser_start_tracing'));
-  // Tracing covers the whole context: one chat at a time, and the others are
-  // told who has it instead of stopping someone else's trace.
+  // Tracing runs once for the whole browser; each chat gets only its own tabs.
   const traceB = await B.call('browser_start_tracing');
-  expect('browser_start_tracing', 'B is told another chat is tracing', traceB.isError && traceB.text.includes('chat-A'), traceB.text);
+  expect('browser_start_tracing', 'B can trace while A does', !traceB.isError, traceB.text, 'BROKEN');
+  await B.eval('() => { console.log("B-TRACED"); return 1; }');
+  await A.eval('() => { console.log("A-TRACED"); return 1; }');
   const stopB = await B.call('browser_stop_tracing');
-  expect('browser_stop_tracing', 'B cannot stop A\'s trace', stopB.isError && stopB.text.includes('chat-A'), stopB.text);
+  works('browser_stop_tracing', stopB, 'B stops its own trace');
   const stopA = await A.call('browser_stop_tracing');
   works('browser_stop_tracing', stopA, 'A stops its own trace');
   expect('browser_stop_tracing', 'A\'s trace saved in A\'s folder', !stopA.text.includes('chat-B'), stopA.text);
-  const traceB2 = await B.call('browser_start_tracing');
-  expect('browser_start_tracing', 'B can trace once A stopped', !traceB2.isError, traceB2.text, 'BROKEN');
-  await B.call('browser_stop_tracing');
+  // Read with Playwright's own trace loader (npx playwright trace ...).
+  const zipText = result => {
+    const file = result.text.match(/(\/\S+\.zip)/)?.[1];
+    if (!file || !fs.existsSync(file))
+      return '';
+    const cwd = fs.mkdtempSync(path.join(home, 'trace-'));
+    const pw = path.resolve(path.dirname(cli), '..', 'node_modules', 'playwright-core', 'cli.js');
+    const run = (...args) => execFileSync(process.execPath, [pw, 'trace', ...args], { cwd, encoding: 'utf8' });
+    run('open', file);
+    return ['actions', 'console', 'requests'].map(command => run(command)).join('\n');
+  };
+  const traceA = zipText(stopA);
+  const traceBText = zipText(stopB);
+  expect('browser_stop_tracing', 'A\'s trace loads with A\'s actions and console', /Evaluate/.test(traceA) && traceA.includes('A-TRACED'), traceA.slice(0, 300), 'BROKEN');
+  const zipEntries = result => execFileSync('unzip', ['-l', result.text.match(/(\/\S+\.zip)/)?.[1] ?? '/nonexistent'], { encoding: 'utf8' });
+  expect('browser_stop_tracing', 'A\'s trace has its screenshots', /screencast\//.test(zipEntries(stopA)), zipEntries(stopA), 'BROKEN');
+  expect('browser_stop_tracing', 'A\'s trace has nothing of B', !traceA.includes('who=B') && !traceA.includes('B-TRACED'), 'B found in A\'s trace');
+  expect('browser_stop_tracing', 'B\'s trace has nothing of A', traceBText.length > 0 && !traceBText.includes('who=A') && !traceBText.includes('A-TRACED'), 'A found in B\'s trace');
 
   // Video.
   works('browser_start_video', await A.call('browser_start_video', {}));
@@ -425,7 +441,10 @@ try {
   if (subId) {
     await A.call('browser_navigate', { url: `${urlA}&sub=1`, agent: subId });
     const parentTabs = await A.call('browser_tabs', { action: 'list' });
-    expect('browser_subagent_start', 'parent does not list the subagent\'s tab', !parentTabs.text.includes('sub=1'), parentTabs.text);
+    const [ownPart, subPart = ''] = parentTabs.text.split("### Your subagents' tabs");
+    expect('browser_subagent_start', 'the subagent\'s tab is not one of the parent\'s', !ownPart.includes('sub=1'), parentTabs.text, 'BROKEN');
+    expect('browser_subagent_start', 'the parent sees its subagent\'s tab', subPart.includes('sub=1'), parentTabs.text, 'BROKEN');
+    expect('browser_subagent_start', 'B does not see A\'s subagent', !(await B.call('browser_tabs', { action: 'list' })).text.includes('sub=1'), 'B lists it');
   } else {
     record('browser_subagent_start', 'returns an agent id', 'note', sub.text.slice(0, 200));
   }

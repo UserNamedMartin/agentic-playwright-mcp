@@ -56,6 +56,7 @@ export class TranscriptIndex {
   private _scanSoon(): Promise<void> {
     const before = this._customTitle;
     return this._scanning ??= this._scan().finally(() => {
+      this._trim();
       this._scanning = undefined;
       if (this._customTitle !== before)
         this._onTitleChange?.();
@@ -120,6 +121,9 @@ export class TranscriptIndex {
     }
   }
 
+  // Ids indexed by the scan running now: a pending lookup is for one of them.
+  private _fresh = new Set<string>();
+
   private _indexLines(text: string, caller: Caller) {
     for (const line of text.split('\n')) {
       if (caller.kind === 'main' && line.includes('"custom-title"'))
@@ -132,14 +136,21 @@ export class TranscriptIndex {
           continue;
         this._callers.delete(id);
         this._callers.set(id, caller);
+        this._fresh.add(id);
       }
     }
-    // Lookups are for calls being made now; the oldest ids can go.
+  }
+
+  // Lookups are for calls being made now: after a scan, the oldest ids can
+  // go, never those this scan found.
+  private _trim() {
     for (const id of this._callers.keys()) {
       if (this._callers.size <= maxCallers)
         break;
-      this._callers.delete(id);
+      if (!this._fresh.has(id))
+        this._callers.delete(id);
     }
+    this._fresh.clear();
   }
 
   private _description(subagentsDir: string, agentId: string) {

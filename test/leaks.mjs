@@ -66,6 +66,16 @@ const check = (name, ok, detail = '') => {
   check('remembers a bounded number of calls', index._callers.size <= 5000, `${index._callers.size} calls kept`);
   fs.appendFileSync(main, toolUse('toolu_new'));
   check('finds a call appended later', (await index.lookup('toolu_new'))?.kind === 'main');
+
+  // A subagent's call must not be pushed out by a busier subagent read after
+  // it in the same scan (the call is routed to the main chat then).
+  const sid2 = 'sid2';
+  fs.mkdirSync(path.join(project, sid2, 'subagents'), { recursive: true });
+  fs.writeFileSync(path.join(project, `${sid2}.jsonl`), '');
+  fs.writeFileSync(path.join(project, sid2, 'subagents', 'agent-a.jsonl'), toolUse('pending_call'));
+  fs.writeFileSync(path.join(project, sid2, 'subagents', 'agent-b.jsonl'), Array.from({ length: 6000 }, (_, i) => toolUse(`busy_${i}`)).join(''));
+  const index2 = new TranscriptIndex(configDir, sid2);
+  check('a pending subagent call survives a busy scan', (await index2.lookup('pending_call'))?.kind === 'subagent');
 }
 
 // --- The gateway's own bookkeeping.
@@ -92,6 +102,13 @@ try {
   await client.connect(transport);
   const call = async (name, args = {}) => await client.callTool({ name, arguments: args });
   await call('browser_navigate', { url: 'data:text/html,<title>a</title>' });
+  const listeners = () => gateway.shared.context.listeners('close').length + gateway.shared.browser.listeners('disconnected').length;
+  const listenersBefore = listeners();
+  for (let i = 0; i < 10; i++) {
+    await call('browser_close');
+    await call('browser_navigate', { url: 'data:text/html,<title>a</title>' });
+  }
+  check('backends do not pile up listeners', listeners() <= listenersBefore + 2, `${listenersBefore} -> ${listeners()}`);
   for (let i = 0; i < 10; i++) {
     await call('browser_tabs', { action: 'new' });
     await call('browser_tabs', { action: 'close' });

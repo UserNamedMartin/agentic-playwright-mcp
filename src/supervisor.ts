@@ -21,7 +21,7 @@ export async function runProfile(profile: Profile, options: Options) {
 
   const start = async () => {
     await startBrowser(profile);
-    gateway = new Gateway({
+    const starting = new Gateway({
       profile: profile.name,
       cdpEndpoint: cdpEndpoint(profile),
       port: profile.port,
@@ -35,7 +35,16 @@ export async function runProfile(profile: Profile, options: Options) {
       dockIconCache: path.join(homeDir, 'profiles', profile.name, 'dock-icon-base.png'),
       stateFile: path.join(homeDir, 'profiles', profile.name, 'sessions.json'),
     });
-    await gateway.start();
+    // Only a gateway that started counts: one that failed (a stalled browser
+    // connection) is stopped, so the next check starts a fresh one instead of
+    // leaving it answering every call with the same error.
+    try {
+      await starting.start();
+    } catch (e) {
+      await starting.stop({ keepBrowser: true }).catch(() => {});
+      throw e;
+    }
+    gateway = starting;
   };
 
   const stop = async (reason: string, { keepBrowser = false } = {}) => {
@@ -50,11 +59,6 @@ export async function runProfile(profile: Profile, options: Options) {
   // manager (a service restart, or logout, which quits the browser anyway):
   // leave the browser running so the restarted gateway gives agents their
   // tabs back.
-  // Playwright leaves some promises unhandled (a download whose page went away
-  // when the browser connection dropped). Upstream every agent's context
-  // catches them; the gateway serves many agents, so it only logs them rather
-  // than let one kill the process for everyone.
-  process.on('unhandledRejection', reason => console.error('unhandled rejection (ignored):', reason));
   process.on('SIGINT', () => void stop('SIGINT').finally(() => process.exit(0)));
   process.on('SIGTERM', () => void stop('SIGTERM', { keepBrowser: true }).finally(() => process.exit(0)));
 

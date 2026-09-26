@@ -5,25 +5,30 @@
 // background.
 import fs from 'node:fs';
 import path from 'node:path';
-import type { CDPSession, Page } from 'playwright-core';
+import type { BrowserContext, CDPSession, Page, Request, Route } from 'playwright-core';
 import type { SharedBrowser } from './browser.js';
 import type { TabGroups } from './groups.js';
 import { touchFolder } from './files.js';
 import { pwTools, verifyContext } from './internals.js';
+import { removeSnippetListeners } from './isolation.js';
+import { callingSession, isTracing, startRecording, stopRecording, stopTracing } from './recording.js';
 import { releaseContextWide } from './scoped.js';
+import { applyEmulation, type Emulation } from './tools.js';
 import { describePasskeyRequests, type PasskeyRequest } from './passkeys.js';
 import type { PermissionRequest } from './permissions.js';
 
 // A tool call is given up after this long unless the agent passes "timeout"
 // (seconds); browser_wait_for gets its own wait time on top.
 export const defaultCallTimeoutSeconds = 120;
+const maxTimeoutSeconds = Math.floor((2 ** 31 - 1) / 1000);
 // A call that waited at least this long behind the previous one says so.
 const queueNoteMs = 2000;
 
 export function callTimeoutSeconds(name: string, args: any, timeout: unknown) {
   const asked = Number(timeout);
+  // setTimeout takes at most 2^31-1 ms (about 24 days).
   if (Number.isFinite(asked) && asked > 0)
-    return asked;
+    return Math.min(asked, maxTimeoutSeconds);
   const waitFor = name === 'browser_wait_for' ? Number(args?.time) || 0 : 0;
   return defaultCallTimeoutSeconds + waitFor;
 }
@@ -62,7 +67,35 @@ export type SessionHost = {
   // A forked chat's first start: copies of the original chat's tabs, adopted
   // by the session; resolves to a note for the agent, if there were any.
   copyForkedTabs(session: AgentSession): Promise<string | undefined>;
+  // The gateway's own address (its status page is not for agents).
+  readonly baseUrl: string;
+  // The tabs of the session's subagents, listed in its browser_tabs results.
+  subagentTabs(session: AgentSession): string | undefined;
 };
+
+export type SavedNetworkState = {
+  offline: boolean;
+  routes: any[];
+  emulation: [string, Emulation][];
+  lostRoutes: boolean;
+};
+
+// The handler browser_route builds from its parameters (as upstream), for
+// routes restored after a gateway restart.
+function routeHandler(params: any) {
+  return async (route: Route) => {
+    if (params.body !== undefined || params.status !== undefined) {
+      await route.fulfill({ status: params.status ?? 200, contentType: params.contentType, body: params.body });
+      return;
+    }
+    const headers = { ...route.request().headers() };
+    for (const [key, value] of Object.entries(params.addHeaders ?? {}))
+      headers[key] = value as string;
+    for (const header of params.removeHeaders ?? [])
+      delete headers[header.toLowerCase()];
+    await route.continue({ headers });
+  };
+}
 
 export class AgentSession {
   readonly info: SessionInfo;
@@ -132,7 +165,26 @@ export class AgentSession {
     const config = { ...this._config, outputDir: filesDir, allowUnrestrictedFileAccess: true };
     // browser_close ends in backend.dispose(), which calls this; the session's
     // tabs are closed after the call (see _callTool), not here.
+    // The stock backend listens for its browser context closing and the
+    // browser disconnecting, and never stops: with one backend per session
+    // (and a new one after each browser_close) on a connection that lives for
+    // days, those listeners, and the backends they hold, piled up.
+    const context: any = this._shared.context;
+    const browser: any = context.browser();
+    const before = { close: context.listeners('close'), disconnected: browser?.listeners('disconnected') ?? [] };
     const backend = new pwTools.BrowserBackend(config, this._shared.context, this._tools, async () => {});
+    const added = {
+      close: context.listeners('close').filter((l: Function) => !before.close.includes(l)),
+      disconnected: (browser?.listeners('disconnected') ?? []).filter((l: Function) => !before.disconnected.includes(l)),
+    };
+    const dispose = backend.dispose.bind(backend);
+    backend.dispose = async () => {
+      for (const listener of added.close)
+        context.off('close', listener as any);
+      for (const listener of added.disconnected)
+        browser?.off('disconnected', listener as any);
+      await dispose();
+    };
     await backend.initialize({ cwd: filesDir, clientName: this.info.title });
     verifyContext(backend._context);
     this._patchContext(backend._context);
@@ -153,6 +205,10 @@ export class AgentSession {
     }
   }
 
+  get gatewayUrl() {
+    return this._host.baseUrl;
+  }
+
   // Tabs copied for a forked chat: adopted in order, the last one flagged
   // current becomes the current tab.
   async adoptCopies(pages: { page: Page; current: boolean }[]) {
@@ -170,6 +226,13 @@ export class AgentSession {
   // the tabs are still open in the browser (see `targets`).
   detach() {
     const backend = this.backend;
+    // What lived in the old connection is gone; the agent is told.
+    if (backend?._context?._video)
+      this._notes.push('### Video\nThe video recording stopped: the browser connection dropped and was restored. Start it again if you still need it.');
+    if (isTracing(this)) {
+      void stopTracing(this, this._shared.context, true).catch(() => {});
+      this._notes.push('### Tracing\nTracing stopped: the browser connection dropped and was restored. Start it again if you still need it.');
+    }
     this.backend = undefined;
     this.owned.clear();
     this._restored = undefined;
@@ -232,12 +295,13 @@ export class AgentSession {
     let onAbort: (() => void) | undefined;
     // An abandoned call that finishes later must not take the notes meant for
     // the agent's next result.
-    const state = { abandoned: false };
-    const call = this._callTool(name, args, signal, state);
+    const state = { abandoned: false as boolean, currentTab: undefined as any };
+    const call = callingSession.run(this, () => this._callTool(name, args, signal, state));
     call.catch(() => {});
     const timedOut = new Promise<any>(resolve => {
       timer = setTimeout(() => {
         state.abandoned = true;
+        state.currentTab = this.backend?._context?._currentTab;
         const url = this.currentPage()?.url();
         console.error(`${name} from ${this.info.title} gave up after ${seconds} s`);
         resolve(errorResult(`${name} did not finish within ${seconds} s and was given up, so your next calls are not ` +
@@ -250,6 +314,7 @@ export class AgentSession {
     const aborted = new Promise<never>((_, reject) => {
       onAbort = () => {
         state.abandoned = true;
+        state.currentTab = this.backend?._context?._currentTab;
         console.error(`${name} from ${this.info.title} was cancelled by the agent`);
         reject(signal!.reason ?? new Error('cancelled'));
       };
@@ -266,15 +331,103 @@ export class AgentSession {
     }
   }
 
-  // Offline mode of this session's tabs (browser_network_state_set). Set per
-  // page over CDP: the stock tool sets it on the whole shared context.
+  // Routes and offline mode of this session. They live here, not on the stock
+  // Context (replaced after a reconnect), and are registered on the shared
+  // browser context with an owner check: context-level routes reach a new
+  // tab before its first load (popups included), while requests of other
+  // chats' pages fall through to their own routes.
+  routes: any[] = [];
   offline = false;
-  private _networkSessions = new Map<Page, CDPSession>();
+  // Device emulation by tab (target id), see browser_emulate_device.
+  emulation = new Map<string, Emulation>();
+  private _registered = new Map<any, { context: BrowserContext; handler: (route: Route, request: Request) => Promise<void> }>();
+  private _offlineRoute: { context: BrowserContext; handler: (route: Route, request: Request) => Promise<void> } | undefined;
+  private _networkSessions = new Map<Page, Promise<CDPSession>>();
+
+  // A page of this session: one of its tabs, or a popup opened by one.
+  async ownsPage(page: Page | null | undefined, depth = 0): Promise<boolean> {
+    if (!page)
+      return false;
+    if (this.owned.has(page))
+      return true;
+    if (depth >= 3)
+      return false;
+    return await this.ownsPage(await page.opener().catch(() => null), depth + 1);
+  }
+
+  async ownsRequest(request: Request): Promise<boolean> {
+    // Service worker requests have no frame.
+    if (request.serviceWorker())
+      return false;
+    try {
+      return await this.ownsPage(request.frame().page());
+    } catch {
+      // A popup's first request comes before Playwright knows its page: its
+      // opener (as Chrome reports it) tells whose it is.
+      if (!request.isNavigationRequest())
+        return false;
+      const opener = await this._shared.popupOpener(request.url());
+      return !!opener && this.targets.has(opener);
+    }
+  }
+
+  async addRoute(entry: any) {
+    this.routes.push(entry);
+    await this._registerRoute(entry);
+    this._host.onTabsChanged();
+  }
+
+  async removeRoutes(pattern?: string) {
+    const removed = this.routes.filter(route => !pattern || route.pattern === pattern);
+    for (const route of removed)
+      await this._unregisterRoute(route);
+    this.routes = this.routes.filter(route => !removed.includes(route));
+    this._host.onTabsChanged();
+    return removed.length;
+  }
+
+  private async _registerRoute(entry: any) {
+    const context = this._shared.context;
+    const handler = async (route: Route, request: Request) => {
+      if (await this.ownsRequest(request))
+        return await entry.handler(route, request);
+      await route.fallback();
+    };
+    await context.route(entry.pattern, handler);
+    this._registered.set(entry, { context, handler });
+  }
+
+  private async _unregisterRoute(entry: any) {
+    const registered = this._registered.get(entry);
+    this._registered.delete(entry);
+    await registered?.context.unroute(entry.pattern, registered.handler).catch(() => {});
+  }
 
   async setOffline(offline: boolean) {
     this.offline = offline;
+    this._host.onTabsChanged();
+    await this._syncOfflineRoute();
     for (const page of this.owned)
-      await this._emulateOffline(page, offline);
+      await this._emulateOffline(page, offline).catch(() => {});
+  }
+
+  // Requests fail at once (even a new tab's first load); the per-page network
+  // emulation also makes navigator.onLine report it.
+  private async _syncOfflineRoute() {
+    if (this.offline && !this._offlineRoute) {
+      const context = this._shared.context;
+      const handler = async (route: Route, request: Request) => {
+        if (await this.ownsRequest(request))
+          return await route.abort('internetdisconnected');
+        await route.fallback();
+      };
+      await context.route('**', handler);
+      this._offlineRoute = { context, handler };
+    } else if (!this.offline && this._offlineRoute) {
+      const { context, handler } = this._offlineRoute;
+      this._offlineRoute = undefined;
+      await context.unroute('**', handler).catch(() => {});
+    }
   }
 
   async _emulateOffline(page: Page, offline: boolean) {
@@ -282,18 +435,96 @@ export class AgentSession {
     if (!cdp) {
       if (!offline)
         return;
-      cdp = await page.context().newCDPSession(page);
+      cdp = page.context().newCDPSession(page).then(async session => {
+        await session.send('Network.enable');
+        return session;
+      });
       this._networkSessions.set(page, cdp);
       page.once('close', () => this._networkSessions.delete(page));
-      await cdp.send('Network.enable');
     }
-    await cdp.send('Network.emulateNetworkConditions', { offline, latency: 0, downloadThroughput: -1, uploadThroughput: -1 });
+    await (await cdp).send('Network.emulateNetworkConditions', { offline, latency: 0, downloadThroughput: -1, uploadThroughput: -1 });
+  }
+
+  // After a reconnect the shared browser context is a new one: register the
+  // session's routes and network state on it again.
+  async reapplyNetworkState() {
+    this._registered.clear();
+    this._offlineRoute = undefined;
+    this._networkSessions.clear();
+    for (const entry of this.routes)
+      await this._registerRoute(entry).catch(() => {});
+    await this._syncOfflineRoute().catch(() => {});
+    for (const page of this.owned) {
+      if (this.offline)
+        await this._emulateOffline(page, true).catch(() => {});
+      const targetId = this._shared.cachedTargetId(page);
+      const settings = targetId && this.emulation.get(targetId);
+      if (settings)
+        await applyEmulation(page, settings).catch(() => {});
+    }
+    for (const targetId of [...this.emulation.keys()]) {
+      if (!this.targets.has(targetId))
+        this.emulation.delete(targetId);
+    }
+  }
+
+  // What survives a gateway restart: offline mode, routes made with
+  // browser_route (routes from code cannot be saved) and device emulation.
+  savedState(): SavedNetworkState {
+    return {
+      offline: this.offline,
+      routes: this.routes.filter(route => 'removeHeaders' in route).map(({ handler, ...params }) => params),
+      emulation: [...this.emulation].filter(([id]) => this.targets.has(id)),
+      lostRoutes: this.routes.some(route => !('removeHeaders' in route)),
+    };
+  }
+
+  restoreSavedState(saved: SavedNetworkState | undefined) {
+    if (!saved)
+      return;
+    this.offline = saved.offline;
+    this.routes = saved.routes.map(params => ({ ...params, handler: routeHandler(params) }));
+    this.emulation = new Map(saved.emulation);
+    if (saved.lostRoutes)
+      this._notes.push('### Routes\nThe browser gateway restarted: routes you added from code (browser_run_code_unsafe) are gone; routes added with browser_route, offline mode and device emulation were kept.');
+  }
+
+  private async _clearNetworkState() {
+    for (const entry of [...this._registered.keys()])
+      await this._unregisterRoute(entry);
+    this.routes = [];
+    this.offline = false;
+    await this._syncOfflineRoute().catch(() => {});
+  }
+
+  // Tabs opened by this session's pages, for page.waitForEvent('popup') in
+  // browser_run_code_unsafe (such tabs have no opener, see popups.ts).
+  private _popupListeners = new Set<(opener: Page, popup: Page) => void>();
+  openers = new WeakMap<Page, Page>();
+
+  onPopup(listener: (opener: Page, popup: Page) => void) {
+    this._popupListeners.add(listener);
+    return () => this._popupListeners.delete(listener);
+  }
+
+  private _popupOpened(opener: Page, popup: Page) {
+    this.openers.set(popup, opener);
+    for (const listener of this._popupListeners)
+      listener(opener, popup);
+  }
+
+  // Tabs this session adopted, for context "page" events in the isolated view.
+  private _adoptListeners = new Set<(page: Page) => void>();
+
+  onAdopt(listener: (page: Page) => void) {
+    this._adoptListeners.add(listener);
+    return () => this._adoptListeners.delete(listener);
   }
 
   private _queue: Promise<unknown> = Promise.resolve();
   private _running: { name: string; since: number } | undefined;
 
-  private async _callTool(name: string, rawArgs: any, signal?: AbortSignal, state = { abandoned: false }) {
+  private async _callTool(name: string, rawArgs: any, signal?: AbortSignal, state: { abandoned: boolean; currentTab?: any } = { abandoned: false }) {
     this.lastActivity = Date.now();
     if (!this.backend)
       await this.start();
@@ -312,8 +543,12 @@ export class AgentSession {
     }
     const result = await this.backend.callTool(name, args, signal);
     if (state.abandoned) {
+      // Given up earlier: whatever it did to the tabs, the agent's current
+      // tab stays the one it was working on.
       if (this.backend?._disposed)
-        this.backend = undefined;
+        await this._afterClose();
+      else if (state.currentTab && this.backend?._context?._tabs.includes(state.currentTab))
+        this.backend._context._currentTab = state.currentTab;
       return result;
     }
     // Tell the agent once where its files go; paths in later results are
@@ -345,12 +580,24 @@ export class AgentSession {
     // browser_close disposes the backend and means "close my tabs": the
     // stock Context only forgets them. The next call gets a fresh backend.
     if (this.backend._disposed) {
-      this.backend = undefined;
-      for (const page of [...this.owned])
-        await page.close().catch(() => {});
-    } else if (name === 'browser_tabs' && !result.isError)
+      await this._afterClose();
+    } else if (name === 'browser_tabs' && !result.isError) {
       result.content.push({ type: 'text', text: await this._tabIds() });
+      const subagents = this._host.subagentTabs(this);
+      if (subagents)
+        result.content.push({ type: 'text', text: subagents });
+    }
     return result;
+  }
+
+  // browser_close disposed the backend: "close my browser" means the tabs,
+  // routes and offline mode go too, as with upstream's own browser.
+  private async _afterClose() {
+    this.backend = undefined;
+    for (const page of [...this.owned])
+      await page.close().catch(() => {});
+    await this._clearNetworkState();
+    await releaseContextWide(this, this._shared.context).catch(() => {});
   }
 
   private async _findTab(context: any, id: string) {
@@ -374,14 +621,42 @@ export class AgentSession {
 
   // A link this session's page wanted to open in a new tab (see popups.ts):
   // becomes one of our tabs, in the background, without changing the current tab.
-  async openInBackground(url: string) {
+  // It opens blank and navigates once it is ours, so the session's routes
+  // and offline mode already apply to its first load.
+  async openInBackground(url: string, opener?: Page) {
     if (!this.backend)
       await this.start();
     const context = this.backend._context;
     await context.ensureBrowserContext();
-    const page = await this._shared.newBackgroundPage(url);
+    const page = await this._shared.newBackgroundPage();
     this._adopt(context, page);
     await this._groups?.addPage(this, page).catch(() => {});
+    // Told as a popup once it is on its way to the URL, as a real popup is.
+    await page.goto(url, { referer: opener?.url(), waitUntil: 'commit' }).catch(() => {});
+    if (opener)
+      this._popupOpened(opener, page);
+  }
+
+  // A background tab no session owns, closed when fn is done.
+  async withScratchPage<T>(fn: (page: Page) => Promise<T>): Promise<T> {
+    const page = await this._shared.newBackgroundPage();
+    try {
+      return await fn(page);
+    } finally {
+      await page.close().catch(() => {});
+    }
+  }
+
+  // A new tab of this session in the background; the current tab stays.
+  async openTab(): Promise<Page> {
+    if (!this.backend)
+      await this.start();
+    const context = this.backend._context;
+    await context.ensureBrowserContext();
+    const page = await this._shared.newBackgroundPage();
+    this._adopt(context, page);
+    await this._groups?.addPage(this, page).catch(() => {});
+    return page;
   }
 
   currentPage(): Page | undefined {
@@ -397,6 +672,8 @@ export class AgentSession {
       for (const page of pages)
         await page.close().catch(() => {});
     }
+    await this._clearNetworkState().catch(() => {});
+    removeSnippetListeners(this);
     await releaseContextWide(this, this._shared.context).catch(() => {});
     await backend?.dispose().catch(() => {});
   }
@@ -418,6 +695,8 @@ export class AgentSession {
     this._host.onTabsChanged();
     if (!context._tabs.some((tab: any) => tab.page === page))
       context._onPageCreated(page);
+    for (const listener of this._adoptListeners)
+      listener(page);
   }
 
   private _patchContext(context: any) {
@@ -433,6 +712,7 @@ export class AgentSession {
         const opener = await page.opener().catch(() => null);
         if (opener && session.owned.has(opener)) {
           session._adopt(this, page);
+          session._popupOpened(opener, page);
           await session._groups?.addPage(session, page).catch(() => {});
         }
       };
@@ -454,22 +734,20 @@ export class AgentSession {
     // browser context; here they act on this session's tabs only.
     context._agentSession = session;
 
-    context.addRoute = async function(entry: any) {
-      await this.ensureBrowserContext();
-      for (const tab of this._tabs)
-        await tab.page.route(entry.pattern, entry.handler);
-      this._routes.push(entry);
+    const upstreamStartRecording = context.startRecording.bind(context);
+    context.startRecording = async function() {
+      await startRecording(session, this, upstreamStartRecording);
+    };
+    context.stopRecording = async function() {
+      return await stopRecording(session, this);
     };
 
-    context.removeRoute = async function(pattern?: string) {
-      const removed = this._routes.filter((route: any) => !pattern || route.pattern === pattern);
-      for (const route of removed) {
-        for (const tab of this._tabs)
-          await tab.page.unroute(route.pattern, route.handler).catch(() => {});
-      }
-      this._routes = this._routes.filter((route: any) => !removed.includes(route));
-      return removed.length;
+    context.routes = () => session.routes;
+    context.addRoute = async function(entry: any) {
+      await this.ensureBrowserContext();
+      await session.addRoute(entry);
     };
+    context.removeRoute = async (pattern?: string) => await session.removeRoutes(pattern);
 
     context.startVideoRecording = async function(fileName: string, params: any) {
       if (this._video)
@@ -496,15 +774,14 @@ export class AgentSession {
     // killed the gateway. The gateway logs them instead (see gateway.ts).
     process.off('unhandledRejection', context._onUnhandledRejection);
 
-    // New tabs of the session get its routes and network state too.
+    // New tabs of the session: tab headers that cannot hang, and offline
+    // mode for navigator.onLine (routes are context-level, see addRoute).
     const onPageCreated = context._onPageCreated.bind(context);
     context._onPageCreated = function(page: Page) {
       onPageCreated(page);
       const tab = this._tabs.find((tab: any) => tab.page === page);
       if (tab)
         patchTabHeader(tab);
-      for (const route of this._routes)
-        void page.route(route.pattern, route.handler).catch(() => {});
       if (session.offline)
         void session._emulateOffline(page, true).catch(() => {});
     };

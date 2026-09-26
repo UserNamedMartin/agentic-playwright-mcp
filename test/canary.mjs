@@ -1,0 +1,282 @@
+// Nothing of one chat reaches another: chat B's pages carry a secret (in URLs,
+// cookies, local storage, console output, requests, popups), and chat A tries
+// every way to see or touch B found so far, from tools and from
+// browser_run_code_unsafe. Every text A gets back and every file A saves is
+// searched for the secret, and no call of A may leave a tab behind that is not
+// A's own. Also checks that A's own views still work (popups, new pages,
+// routes on first loads, recording and tracing next to B).
+//
+// Usage: node test/canary.mjs [browser executable]
+//
+// Self-contained and headless: its own browser, gateway, site and scratch
+// AGENTIC_PLAYWRIGHT_HOME. Prints one line per check.
+import { execFileSync, spawn } from 'node:child_process';
+import fs from 'node:fs';
+import http from 'node:http';
+import os from 'node:os';
+import path from 'node:path';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+
+const executable = process.argv[2] ?? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
+const home = fs.mkdtempSync(path.join(os.tmpdir(), 'apm-canary-'));
+const [cdpPort, gatewayPort] = [19461, 19462];
+const cli = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..', 'dist', 'cli.js');
+const pwCli = path.resolve(path.dirname(cli), '..', 'node_modules', 'playwright-core', 'cli.js');
+const env = { ...process.env, AGENTIC_PLAYWRIGHT_HOME: home };
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const SECRET = 'CANARY7f3a91';
+let failures = 0;
+const check = (name, ok, detail = '') => {
+  if (!ok)
+    failures++;
+  console.log(`${ok ? 'ok  ' : 'FAIL'} ${name}${detail ? ` — ${String(detail).replace(/\s+/g, ' ').slice(0, 220)}` : ''}`);
+};
+
+const page = who => `<!doctype html><title>${who} page</title><p>hello ${who}</p>
+<button id=b onclick="window.__clicks=(window.__clicks||0)+1">Go</button>
+<a id=blank href="/first-blank?who=${who}" target=_blank>blank</a>
+<a id=probe href="/probe?who=${who}" target=_blank>probe</a>`;
+const site = http.createServer((req, res) => {
+  const url = new URL(req.url, 'http://x');
+  if (url.pathname.startsWith('/first') || url.pathname.startsWith('/probe') || url.pathname.startsWith('/api')) {
+    res.writeHead(200, { 'content-type': 'text/html', 'access-control-allow-origin': '*' });
+    return res.end(`<title>REAL ${url.pathname}</title>REAL`);
+  }
+  res.writeHead(200, { 'content-type': 'text/html' });
+  res.end(page(url.searchParams.get('who') ?? 'X'));
+}).listen(0, '127.0.0.1');
+await new Promise(r => site.on('listening', r));
+const port = site.address().port;
+const urlA = `http://127.0.0.1:${port}/?who=A`;
+const urlB = `http://localhost:${port}/?who=B&token=${SECRET}`;
+
+const run = (...args) => spawn(process.execPath, [cli, ...args], { env, stdio: ['ignore', 'ignore', 'ignore'] });
+await new Promise(r => run('profile', 'add', 'test', '--headless', '--port', String(gatewayPort), '--cdp-port', String(cdpPort), '--browser', executable).on('exit', r));
+const gateway = run('start', 'test');
+for (let i = 0; i < 150; i++) {
+  if (await fetch(`http://127.0.0.1:${gatewayPort}/`).then(r => r.ok, () => false))
+    break;
+  await sleep(200);
+}
+
+async function chat(id) {
+  const transport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${gatewayPort}/mcp`), {
+    requestInit: { headers: { 'x-agent-session-id': id, 'x-agent-title': id, 'x-agent-pid': String(process.pid) } },
+  });
+  const client = new Client({ name: id, version: '1' });
+  await client.connect(transport);
+  const received = [];
+  const call = async (name, args = {}) => {
+    try {
+      const r = await client.callTool({ name, arguments: args }, undefined, { timeout: 60000 });
+      const text = r.content.map(c => c.text ?? '').join('\n');
+      received.push(text);
+      return { text, isError: !!r.isError };
+    } catch (e) {
+      received.push(e.message);
+      return { text: `PROTOCOL ERROR ${e.message}`, isError: true };
+    }
+  };
+  const code = async snippet => (await call('browser_run_code_unsafe', { code: snippet })).text;
+  const result = text => { const m = text.match(/### Result\n([\s\S]*?)(\n###|$)/); try { return m ? JSON.parse(m[1]) : text; } catch { return m[1]; } };
+  return { call, code, result, received, client };
+}
+
+const targets = async () => (await (await fetch(`http://127.0.0.1:${cdpPort}/json`)).json()).filter(t => t.type === 'page');
+const tabIds = text => [...text.matchAll(/- \d+: ([0-9A-F]{8})/g)].map(m => m[1]);
+
+try {
+  const A = await chat('chat-A');
+  const B = await chat('chat-B');
+
+  // B's secret everywhere.
+  await B.call('browser_navigate', { url: urlB });
+  await B.call('browser_evaluate', { function: `() => { document.cookie = "b_secret=${SECRET}; path=/"; localStorage.setItem("b_secret", "${SECRET}"); console.log("${SECRET}"); fetch("/api?tok=${SECRET}"); return 1; }` });
+  await B.call('browser_evaluate', { function: `() => { window.open("/probe?popup=${SECRET}"); return 1; }` });
+  await B.call('browser_click', { element: 'blank', target: '#blank' });
+  await sleep(500);
+  const bTabs = tabIds((await B.call('browser_tabs', { action: 'list' })).text);
+  await B.call('browser_tabs', { action: 'select', index: 0 });
+
+  await A.call('browser_navigate', { url: urlA });
+  // A's calls must not leave tabs that are not A's (or B's) behind.
+  const known = async () => new Set([...tabIds((await A.call('browser_tabs', { action: 'list' })).text), ...bTabs, ...tabIds((await B.call('browser_tabs', { action: 'list' })).text)]);
+  const strays = async before => {
+    const own = await known();
+    return (await targets()).filter(t => !before.has(t.id) && !own.has(t.id.slice(0, 8)) && !t.url.includes(`:${gatewayPort}`));
+  };
+  const beforeAll = new Set((await targets()).map(t => t.id));
+
+  // Tools.
+  await A.call('browser_tabs', { action: 'list' });
+  await A.call('browser_snapshot');
+  await A.call('browser_console_messages', { level: 'debug', all: true });
+  await A.call('browser_network_requests', { static: true });
+  await A.call('browser_cookie_list');
+  await A.call('browser_cookie_get', { name: 'b_secret' });
+  await A.call('browser_storage_state', { filename: 'state.json' });
+  check('storage_state opens no tab', (await strays(beforeAll)).length === 0, JSON.stringify(await strays(beforeAll)));
+
+  // Restoring local storage of a site no tab of A shows.
+  const other = http.createServer((req, res) => { res.writeHead(200, { 'content-type': 'text/html' }); res.end('<title>other</title>'); }).listen(0, '127.0.0.1');
+  await new Promise(r => other.on('listening', r));
+  const otherOrigin = `http://127.0.0.1:${other.address().port}`;
+  const stateFile = path.join(home, 'restore.json');
+  fs.writeFileSync(stateFile, JSON.stringify({ cookies: [], origins: [{ origin: otherOrigin, localStorage: [{ name: 'restored', value: 'yes' }] }] }));
+  const restore = await A.call('browser_set_storage_state', { filename: stateFile });
+  check('set_storage_state for a site not open', !restore.isError, restore.text);
+  await A.call('browser_tabs', { action: 'new', url: `${otherOrigin}/?who=A2` });
+  check('its local storage was written', /yes/.test((await A.call('browser_evaluate', { function: '() => localStorage.getItem("restored")' })).text));
+  await A.call('browser_tabs', { action: 'close' });
+  await A.call('browser_tabs', { action: 'select', index: 0 });
+  check('no stray tabs so far', (await strays(beforeAll)).length === 0, JSON.stringify(await strays(beforeAll)));
+
+  // The status page is the user's.
+  for (const host of ['127.0.0.1', 'localhost']) {
+    const status = await A.call('browser_navigate', { url: `http://${host}:${gatewayPort}/` });
+    check(`status page blocked for agents (${host})`, status.isError && /BLOCKED/.test(status.text), status.text);
+  }
+  await A.call('browser_navigate', { url: urlA });
+  const viaRequest = await A.code(`async page => { try { await page.request.get('http://127.0.0.1:${gatewayPort}/'); return 'got it'; } catch (e) { return 'refused'; } }`);
+  check('status page blocked for page.request', /refused/.test(viaRequest), viaRequest);
+  check('annotate is not offered', !(await A.client.listTools()).tools.some(t => t.name === 'browser_annotate'));
+  const bTarget = (await targets()).find(t => t.url.includes('who=B'));
+  const raise = await A.call('browser_open_tab_window', { targetId: bTarget?.id ?? 'none' });
+  check('open_tab_window refuses another chat\'s tab', raise.isError, raise.text);
+
+  // Cookie domains.
+  await A.call('browser_cookie_set', { name: 'sid', value: '1', domain: 'example.test', path: '/' });
+  await A.call('browser_cookie_set', { name: 'sid', value: '2', domain: 'notexample.test', path: '/' });
+  await A.call('browser_cookie_delete', { name: 'sid', domain: 'example.test' });
+  const left = await A.call('browser_cookie_list', { domain: 'notexample.test' });
+  check('domain "example.test" does not match "notexample.test"', /sid=2/.test(left.text), left.text);
+
+  // run_code: every way to the browser context shows only A's tabs.
+  const paths = await A.code(`async page => {
+    const urls = ctx => ctx.pages().map(p => p.url()).join(' ');
+    return [
+      urls(page.context()),
+      urls(page.mainFrame().page().context()),
+      urls(page.locator('body').page().context()),
+      urls((await page.$('body')).ownerFrame ? (await (await page.$('body')).ownerFrame()).page().context() : page.context()),
+      String(page.context().browser()),
+      page.context().serviceWorkers().length + ' workers',
+      JSON.stringify(await page.request.storageState()),
+      JSON.stringify(await page.context().request.storageState()),
+      JSON.stringify(await page.context().storageState()),
+    ].join(' | ');
+  }`);
+  check('run_code: pages, frames, locators, handles lead only to A\'s tabs', paths.includes('who=A') && !paths.includes('who=B'), paths);
+
+  // run_code: context events while B is busy.
+  const listening = A.code(`async page => {
+    const seen = [];
+    const ctx = page.context();
+    for (const event of ['request', 'response', 'console', 'dialog', 'requestfinished'])
+      ctx.on(event, x => seen.push(event + ':' + (x.url ? x.url() : x.text ? x.text() : x.message ? x.message() : '')));
+    ctx.on('dialog', d => d.accept('HIJACKED'));
+    const waited = await ctx.waitForEvent('response', { timeout: 2500 }).then(r => 'got ' + r.url(), () => 'none');
+    return JSON.stringify({ seen, waited });
+  }`);
+  await sleep(300);
+  await B.call('browser_evaluate', { function: `() => { fetch("/api?again=${SECRET}"); console.log("again ${SECRET}"); return 1; }` });
+  await B.call('browser_navigate', { url: `${urlB}&step=2` });
+  const events = await listening;
+  check('run_code: context events of B not delivered to A', !events.includes('who=B') && !events.includes(SECRET) && /waited\W+none/.test(events), events);
+  await B.call('browser_evaluate', { function: '() => { setTimeout(() => window.__answer = prompt("q?"), 50); return 1; }' });
+  await sleep(500);
+  const bDialog = await B.call('browser_snapshot');
+  check('a listener A left behind does not answer B\'s dialog', /prompt/.test(bDialog.text) && /q\?/.test(bDialog.text), bDialog.text.slice(0, 200));
+  await B.call('browser_handle_dialog', { accept: true, promptText: 'from-B' });
+
+  // run_code: A's own popups and new pages, as upstream.
+  const popup = await A.code(`async page => { const [p] = await Promise.all([page.waitForEvent('popup'), page.click('#probe')]); await p.waitForLoadState(); return 'popup ' + p.url(); }`);
+  check('page.waitForEvent("popup") gets a target=_blank tab', /popup .*probe\?who=A/.test(popup), popup);
+  const newPageEvent = await A.code(`async page => { const [p] = await Promise.all([page.context().waitForEvent('page'), page.context().newPage()]); return 'new ' + p.url(); }`);
+  check('context.waitForEvent("page") gets newPage()', /new about:blank/.test(newPageEvent), newPageEvent);
+  const blankEvent = await A.code(`async page => { const [p] = await Promise.all([page.context().waitForEvent('page'), page.click('#probe')]); return 'blank ' + p.url(); }`);
+  check('context.waitForEvent("page") gets a target=_blank tab', /blank/.test(blankEvent) && !/Timeout/.test(blankEvent), blankEvent);
+  const current = await A.call('browser_evaluate', { function: '() => location.href' });
+  check('newPage() leaves the current tab alone', current.text.includes('who=A'), current.text);
+  const zero = await A.code(`async page => { const p = page.context().waitForEvent('page', { timeout: 0 }); await page.waitForTimeout(300); const fresh = await page.context().newPage(); return (await p) === fresh ? 'same' : 'resolved'; }`);
+  check('waitForEvent timeout 0 means no timeout', /same|resolved/.test(zero), zero);
+  const aTabs = (await A.call('browser_tabs', { action: 'list' })).text;
+  for (let i = tabIds(aTabs).length - 1; i >= 1; i--)
+    await A.call('browser_tabs', { action: 'close', index: i });
+  await A.call('browser_tabs', { action: 'select', index: 0 });
+
+  // Routes and offline mode reach tabs A's page opens, from their first load.
+  await A.call('browser_route', { pattern: '**/first-blank*', body: 'MOCKED-FIRST' });
+  await A.call('browser_click', { element: 'blank', target: '#blank' });
+  await sleep(1000);
+  await A.call('browser_tabs', { action: 'select', index: 1 });
+  const firstLoad = await A.call('browser_evaluate', { function: '() => document.body.innerText' });
+  check('route applies to a target=_blank tab\'s first load', firstLoad.text.includes('MOCKED-FIRST'), firstLoad.text);
+  await A.call('browser_tabs', { action: 'close' });
+  await A.call('browser_tabs', { action: 'select', index: 0 });
+  await A.call('browser_evaluate', { function: '() => { window.open("/first-blank?popup=1"); return 1; }' });
+  await sleep(1000);
+  await A.call('browser_tabs', { action: 'select', index: 1 });
+  const popupLoad = await A.call('browser_evaluate', { function: '() => document.body.innerText' });
+  check('route applies to a window.open popup\'s first load', popupLoad.text.includes('MOCKED-FIRST'), popupLoad.text);
+  await A.call('browser_tabs', { action: 'close' });
+  await A.call('browser_tabs', { action: 'select', index: 0 });
+  await A.call('browser_unroute', {});
+  const bUnrouted = await B.call('browser_evaluate', { function: '() => fetch("/first-blank?b=1").then(r => r.text())' });
+  check('A\'s routes never answered B', bUnrouted.text.includes('REAL'), bUnrouted.text);
+  await A.call('browser_network_state_set', { state: 'offline' });
+  await A.call('browser_click', { element: 'probe', target: '#probe' });
+  await sleep(1000);
+  await A.call('browser_tabs', { action: 'select', index: 1 });
+  const offlineLoad = await A.call('browser_evaluate', { function: '() => document.body.innerText' });
+  check('offline applies to a new tab\'s first load', !offlineLoad.text.includes('REAL'), offlineLoad.text);
+  await A.call('browser_tabs', { action: 'close' });
+  await A.call('browser_tabs', { action: 'select', index: 0 });
+  await A.call('browser_network_state_set', { state: 'online' });
+
+  // Recording and tracing next to each other: each gets only its own.
+  const [recA, recB] = await Promise.all([A.call('browser_start_recording'), B.call('browser_start_recording')]);
+  check('two chats can record at once', !recA.isError && !recB.isError, recA.text + ' / ' + recB.text);
+  await Promise.all([A.call('browser_start_tracing'), B.call('browser_start_tracing')]);
+  await B.call('browser_navigate', { url: `${urlB}&recorded=1` });
+  await B.call('browser_click', { element: 'Go', target: '#b' });
+  await A.call('browser_click', { element: 'Go', target: '#b' });
+  const recordedA = await A.call('browser_stop_recording');
+  const recordedB = await B.call('browser_stop_recording');
+  check('B\'s recording kept going after A stopped', !recordedB.isError, recordedB.text);
+  const traced = await A.call('browser_stop_tracing');
+  await B.call('browser_stop_tracing');
+  const traceFile = traced.text.match(/(\/\S+\.zip)/)?.[1];
+  let traceText = '';
+  if (traceFile) {
+    const cwd = fs.mkdtempSync(path.join(home, 'trace-'));
+    const pw = (...args) => execFileSync(process.execPath, [pwCli, 'trace', ...args], { cwd, encoding: 'utf8' });
+    pw('open', traceFile);
+    traceText = ['actions', 'console', 'requests'].map(c => pw(c)).join('\n');
+    A.received.push(traceText);
+  }
+  check('A\'s trace loads', traceText.length > 0, traced.text);
+
+  // Every text A got, and every file A saved.
+  const files = [];
+  const walk = dir => fs.existsSync(dir) && fs.readdirSync(dir, { withFileTypes: true }).forEach(e =>
+    e.isDirectory() ? walk(path.join(dir, e.name)) : files.push(path.join(dir, e.name)));
+  walk(path.join(home, 'profiles', 'test', 'files', 'chat-A'));
+  const textFiles = files.filter(f => /\.(json|md|yml|yaml|txt|log|js|ts|html)$/.test(f));
+  const leakedIn = [...A.received.map((t, i) => [`result ${i}`, t]), ...textFiles.map(f => [f, fs.readFileSync(f, 'utf8')])]
+      .filter(([, text]) => text.includes(SECRET) || text.includes('who=B'))
+      .map(([where, text]) => `${where}: …${text.slice(Math.max(0, text.search(new RegExp(`${SECRET}|who=B`)) - 80), text.search(new RegExp(`${SECRET}|who=B`)) + 40)}…`);
+  check(`nothing of B in anything A got (${A.received.length} results, ${textFiles.length} files)`, leakedIn.length === 0, leakedIn.join(' || '));
+  check('A\'s recording has only A\'s actions', /click/.test(recordedA.text) && !recordedA.text.includes('recorded=1'), recordedA.text);
+  check('no stray tabs at the end', (await strays(beforeAll)).length === 0, JSON.stringify(await strays(beforeAll)));
+} catch (e) {
+  failures++;
+  console.log(`FAIL ${e.stack}`);
+} finally {
+  gateway.kill('SIGINT');
+  await sleep(1500);
+  site.close();
+  console.log(failures ? `${failures} check(s) failed` : 'all checks passed');
+  process.exit(failures ? 1 : 0);
+}

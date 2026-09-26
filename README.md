@@ -222,16 +222,24 @@ the gateway created). Change the location or the retention with `filesDir` and
 ## Things to know
 
 - Sessions share one browser context, and upstream Playwright MCP assumes it
-  owns the whole of it. Here the cookie and storage-state tools are scoped to
-  the sites of the session's own tabs, routes, offline mode and video to its
-  own tabs, and tracing and the recorder (which Playwright can only run on the
-  whole context) to one session at a time, stopped when it ends
-  (`src/scoped.ts`, `src/session.ts`). `browser_run_code_unsafe` gets a view of
-  the browser holding only the session's tabs (`src/isolation.ts`); context-wide
-  calls there are scoped the same way or refused with the page-level
-  alternative. That keeps agents from reaching each other by accident; it is
-  not a security boundary, since the code runs in the gateway process.
-  `test/matrix.mjs` checks every tool across two sessions.
+  owns the whole of it. Here every agent works as if it had the browser to
+  itself:
+  - cookie and storage-state tools act on the sites of the session's own tabs
+    (`src/scoped.ts`);
+  - routes and offline mode are registered on the context with an owner
+    check, so they reach the session's new tabs and popups from their first
+    load and nobody else's (`src/session.ts`); they and device emulation are
+    kept across reconnects and restarts;
+  - the recorder and tracing (which Playwright can only run on a whole
+    context) run once for every session that asked, and each gets only its own
+    tabs' actions, snapshots, console and network (`src/recording.ts`);
+  - `browser_run_code_unsafe` gets a membrane: every object reachable from
+    `page` leads only to the session's tabs and events (`src/isolation.ts`).
+    That keeps agents from reaching each other by accident; it is not a
+    security boundary, since the code runs in the gateway process;
+  - the status page is for the user: agents' tabs cannot load it.
+  `test/matrix.mjs` checks every tool across two sessions, and
+  `test/canary.mjs` searches everything one chat gets for another's secret.
 - Remote debugging gives local processes full control of the profile. The ports
   listen on localhost only; use a profile dedicated to agents, never your
   everyday browser profile.
