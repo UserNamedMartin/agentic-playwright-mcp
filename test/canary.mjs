@@ -174,6 +174,7 @@ try {
       urls(page.mainFrame().page().context()),
       urls(page.locator('body').page().context()),
       urls((await page.$('body')).ownerFrame ? (await (await page.$('body')).ownerFrame()).page().context() : page.context()),
+      urls((await (await (await page.evaluateHandle(() => ({ el: document.body }))).getProperties()).get('el').asElement().ownerFrame()).page().context()),
       String(page.context().browser()),
       page.context().serviceWorkers().length + ' workers',
       JSON.stringify(await page.request.storageState()),

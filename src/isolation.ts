@@ -205,6 +205,11 @@ export function isolatedView(context: any) {
       return value.then(wrap);
     if (Array.isArray(value))
       return value.map(wrap);
+    // Collections of Playwright objects (JSHandle.getProperties() is a Map).
+    if (value instanceof Map)
+      return new Map([...value].map(([k, v]) => [k, wrap(v)]));
+    if (value instanceof Set)
+      return new Set([...value].map(wrap));
     if (!value || typeof value !== 'object')
       return value;
     if (wrapped.has(value))
