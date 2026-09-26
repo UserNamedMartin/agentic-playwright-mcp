@@ -237,10 +237,10 @@ the gateway created). Change the location or the retention with `filesDir` and
     `page` leads only to the session's tabs and events (`src/isolation.ts`).
     That keeps agents from reaching each other by accident; it is not a
     security boundary, since the code runs in the gateway process;
-  - the status page is for the user: it lists chats only with a key that the
-    browser's pinned home tab carries (kept in `sessions.json`); any other
-    request to the gateway's address, from an agent's tab or code, gets a
-    short note;
+  - the status page is for the user: the gateway writes it into the
+    browser's pinned home tab over DevTools; over HTTP the gateway's address
+    only shows a note, so no tab, request or redirect can read it; tab links
+    (/focus) act only when signed (`src/linktoken.ts`);
   - agents cannot open the DevTools port (its /json endpoints list and close
     every tab) or the gateway's pages, through the tools or through `page`,
     requests, routes or a CDP session (`src/urls.ts`). The browser's own

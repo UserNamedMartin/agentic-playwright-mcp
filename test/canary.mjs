@@ -151,9 +151,16 @@ try {
   check('status page shows route.fetch nothing', !viaRoute.includes('chat-B'), viaRoute.slice(0, 200));
   await A.code('async page => { await page.unrouteAll(); return 1; }');
   await A.call('browser_navigate', { url: urlA });
-  const statusKey = JSON.parse(fs.readFileSync(path.join(home, 'profiles', 'test', 'sessions.json'), 'utf8')).statusKey;
-  const withKey = await (await fetch(`http://127.0.0.1:${gatewayPort}/?key=${statusKey}`)).text();
-  check('the status page with its key still lists the chats', withKey.includes('chat-B'), withKey.slice(0, 200));
+  // The pinned home tab shows the chats (written over DevTools); no URL does.
+  const { chromium } = (await import('playwright-core')).default;
+  const viewer = await chromium.connectOverCDP(`http://127.0.0.1:${cdpPort}`);
+  await sleep(5500);
+  const homeTab = viewer.contexts()[0].pages().find(p => p.url().startsWith(`http://127.0.0.1:${gatewayPort}/`));
+  const homeText = homeTab ? await homeTab.innerText('body') : '';
+  await viewer.close();
+  check('the pinned home tab lists the chats', homeText.includes('chat-B'), homeText.slice(0, 200));
+  const anyUrlKnows = (await targets()).some(t => /key=/.test(t.url));
+  check('no tab URL carries a status key', !anyUrlKnows);
   // The DevTools port and the gateway's pages (tab links raise the window)
   // are not for agents, by any path. The browser's own pages are.
   const bTab = (await targets()).find(t => t.url.includes('who=B'));

@@ -108,12 +108,6 @@ export class Gateway implements SessionHost {
     return `http://${this.options.host ?? '127.0.0.1'}:${this.options.port}`;
   }
 
-  // The status page lists every chat with its tabs' URLs. It is for the user
-  // (the browser's pinned home tab), so it takes a key only that tab's URL
-  // carries: an agent reaching the gateway's address by any host name,
-  // redirect or request gets nothing. Kept across restarts (sessions.json).
-  private _statusKey = crypto.randomUUID();
-
   get cdpEndpoint() {
     return this.options.cdpEndpoint;
   }
@@ -124,8 +118,22 @@ export class Gateway implements SessionHost {
   }
   private __linkSecret: string | undefined;
 
+  // The status page lists every chat with its tabs' URLs, for the user. It
+  // is not served over HTTP (anything can reach the gateway's address: an
+  // agent's tab by redirect, a page's request): the gateway writes it into
+  // the pinned home tab over DevTools, whose own URL shows only a note.
   get statusUrl() {
-    return `${this.baseUrl}/?key=${this._statusKey}`;
+    return `${this.baseUrl}/`;
+  }
+
+  private _homePage: Page | undefined;
+  private _homeTimer: NodeJS.Timeout | undefined;
+
+  private _renderHome() {
+    const page = this._homePage;
+    if (!page || page.isClosed())
+      return;
+    void page.setContent(renderDashboard(this), { timeout: 5000 }).catch(() => {});
   }
 
   async start() {
@@ -176,6 +184,7 @@ export class Gateway implements SessionHost {
   async stop({ keepBrowser = false } = {}) {
     this._stopping = true;
     clearInterval(this._sweeper);
+    clearInterval(this._homeTimer);
     for (const { transport } of this._transports.values())
       await transport.close().catch(() => {});
     if (keepBrowser) {
@@ -326,8 +335,7 @@ export class Gateway implements SessionHost {
     // gateway's address): the status page with its key, else one from
     // before the key, else any tab no chat owns.
     const unowned = [...byTarget].filter(([id]) => !kept.has(id));
-    const homeId = unowned.find(([, page]) => page.url() === this.statusUrl)?.[0]
-      ?? unowned.find(([, page]) => page.url().startsWith(this.baseUrl))?.[0]
+    const homeId = unowned.find(([, page]) => page.url().startsWith(this.baseUrl))?.[0]
       ?? unowned[0]?.[0];
     // With --no-startup-window there may be no window yet.
     const home = homeId ? byTarget.get(homeId)! : await this.shared.newBackgroundPage(this.statusUrl, true);
@@ -343,6 +351,11 @@ export class Gateway implements SessionHost {
   private async _adoptHome(home: Page) {
     if (home.url() !== this.statusUrl)
       await home.goto(this.statusUrl).catch(() => {});
+    this._homePage = home;
+    this._renderHome();
+    clearInterval(this._homeTimer);
+    this._homeTimer = setInterval(() => this._renderHome(), 5000);
+    this._homeTimer.unref();
     await this.groups?.pin(home).catch(() => {});
     this._homeTargetId = await this.shared.targetId(home);
     this.shared.setHomeTarget(this._homeTargetId);
@@ -390,6 +403,7 @@ export class Gateway implements SessionHost {
     this._saveTimer = setTimeout(() => {
       this._saveTimer = undefined;
       this._saveState();
+      this._renderHome();
     }, 1000);
     this._saveTimer.unref();
   }
@@ -414,7 +428,7 @@ export class Gateway implements SessionHost {
     }));
     try {
       fs.mkdirSync(path.dirname(file), { recursive: true });
-      fs.writeFileSync(`${file}.tmp`, JSON.stringify({ version: 1, sessions, permissions: this._permissions, statusKey: this._statusKey }, null, 2));
+      fs.writeFileSync(`${file}.tmp`, JSON.stringify({ version: 1, sessions, permissions: this._permissions }, null, 2));
       fs.renameSync(`${file}.tmp`, file);
     } catch (e) {
       console.error(`could not save sessions: ${(e as Error).message}`);
@@ -609,8 +623,6 @@ export class Gateway implements SessionHost {
       return undefined;
     try {
       const state = JSON.parse(fs.readFileSync(this.options.stateFile, 'utf8'));
-      if (typeof state?.statusKey === 'string')
-        this._statusKey = state.statusKey;
       return Array.isArray(state?.sessions) ? state.sessions : undefined;
     } catch {
       return undefined;
@@ -701,15 +713,9 @@ export class Gateway implements SessionHost {
       return await this._handleFocus(url, res);
     }
     if (url.pathname === '/' && req.method === 'GET') {
-      // Without the key: a note, answered 200 (it also tells that the
-      // gateway is up, which is what plain requests to "/" check).
-      if (url.searchParams.get('key') !== this._statusKey) {
-        res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' });
-        res.end('The status page is shown in the agent browser\'s pinned tab.');
-        return;
-      }
+      // A note only (answered 200: it also tells that the gateway is up).
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-      res.end(renderDashboard(this));
+      res.end(`<!doctype html><title>${escapeHtml(this.options.profile)} · agentic-playwright-mcp</title><p>The status page is shown in the agent browser's pinned tab.</p>`);
       return;
     }
     res.writeHead(404).end('Not found');

@@ -11,7 +11,6 @@ export function renderDashboard(gateway: Gateway) {
   }).join('');
   return `<!doctype html>
 <meta charset="utf-8">
-<meta http-equiv="refresh" content="5">
 <title>${escapeHtml(gateway.options.profile)} · agentic-playwright-mcp</title>
 <style>
   body { font: 14px system-ui, sans-serif; margin: 24px; color: #222; background: #fff; }
