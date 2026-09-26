@@ -185,44 +185,55 @@ export async function startTracing(session: any, context: any) {
 export async function stopTracing(session: any, context: any, discard = false): Promise<Buffer | undefined> {
   const raw: any = context._rawBrowserContext ?? context;
   const tracer = raw && tracers.get(raw);
-  if (!tracer || !tracer.active.has(session)) {
+  if (!tracer) {
     tracingSessions.delete(session);
     if (discard)
       return undefined;
     throw new Error('Tracing is not started');
   }
+  // Checked in the queue: a start still waiting there counts.
   return await serialized(tracer, async () => {
-    const entry = tracer.active.get(session)!;
+    const entry = tracer.active.get(session);
+    if (!entry) {
+      tracingSessions.delete(session);
+      if (discard)
+        return undefined;
+      throw new Error('Tracing is not started');
+    }
     tracer.active.delete(session);
     tracingSessions.delete(session);
     entry.stopWatching();
     const last = !tracer.active.size;
-    await cutChunk(raw, tracer, !last);
-    if (last) {
-      await raw.tracing.stop().catch(() => {});
-      tracer.unhook();
-    }
-    for (const page of session.owned)
-      entry.pages.add((page as any)._guid);
-    const calls = new Set([...tracer.callOwners].filter(([, owner]) => owner === session).map(([id]) => `call@${id}`));
-    const zip = discard ? undefined : await filterChunks(tracer.chunks.slice(entry.firstChunk).filter(Boolean) as string[], entry.pages, calls);
-    for (const [id, owner] of tracer.callOwners) {
-      if (owner === session)
-        tracer.callOwners.delete(id);
-    }
-    // Chunks no session needs any more.
-    const needed = Math.min(...[...tracer.active.values()].map(e => e.firstChunk), tracer.chunks.length);
-    for (let i = 0; i < needed; i++) {
-      if (tracer.chunks[i]) {
-        fs.rmSync(tracer.chunks[i]!, { force: true });
-        tracer.chunks[i] = undefined;
+    try {
+      await cutChunk(raw, tracer, !last);
+      for (const page of session.owned)
+        entry.pages.add((page as any)._guid);
+      const calls = new Set([...tracer.callOwners].filter(([, owner]) => owner === session).map(([id]) => `call@${id}`));
+      return discard ? undefined : await filterChunks(tracer.chunks.slice(entry.firstChunk).filter(Boolean) as string[], entry.pages, calls);
+    } finally {
+      // Whatever failed (a dropped connection, a disk error), the shared
+      // trace must not stay on for everyone, nor its files stay behind.
+      for (const [id, owner] of tracer.callOwners) {
+        if (owner === session)
+          tracer.callOwners.delete(id);
+      }
+      if (last) {
+        await raw.tracing.stop().catch(() => {});
+        tracer.unhook();
+        tracer.unhook = () => {};
+        fs.rmSync(tracer.dir, { recursive: true, force: true });
+        tracer.chunks = [];
+        tracer.callOwners.clear();
+      } else {
+        const needed = Math.min(...[...tracer.active.values()].map(e => e.firstChunk), tracer.chunks.length);
+        for (let i = 0; i < needed; i++) {
+          if (tracer.chunks[i]) {
+            fs.rmSync(tracer.chunks[i]!, { force: true });
+            tracer.chunks[i] = undefined;
+          }
+        }
       }
     }
-    if (last) {
-      fs.rmSync(tracer.dir, { recursive: true, force: true });
-      tracer.chunks = [];
-    }
-    return zip;
   });
 }
 

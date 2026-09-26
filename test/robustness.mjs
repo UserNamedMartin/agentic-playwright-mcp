@@ -21,7 +21,9 @@ const executable = process.argv[2] ?? '/Applications/Google Chrome.app/Contents/
 const home = fs.mkdtempSync(path.join(os.tmpdir(), 'apm-robust-'));
 const [browserPort, proxyPort, gatewayPort] = [19411, 19412, 19413];
 const cli = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..', 'dist', 'cli.js');
-const env = { ...process.env, AGENTIC_PLAYWRIGHT_HOME: home };
+const tmp = path.join(home, 'tmp');
+fs.mkdirSync(tmp);
+const env = { ...process.env, AGENTIC_PLAYWRIGHT_HOME: home, TMPDIR: tmp };
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 let failures = 0;
 const check = (name, ok, detail = '') => {
@@ -158,6 +160,12 @@ try {
   check('the agent is told video and tracing stopped', /### Video/.test(mocked.text) && /### Tracing/.test(mocked.text), mocked.text);
   const width = await A('browser_evaluate', { function: '() => innerWidth' });
   check('device emulation survives a dropped connection', /500/.test(width.text), width.text);
+  await sleep(1000);
+  const traceDirs = fs.readdirSync(tmp).filter(name => name.startsWith('agentic-trace-'));
+  check('a trace cut off by the drop leaves no files behind', traceDirs.length === 0, traceDirs.join(', '));
+  const retrace = await A('browser_start_tracing');
+  const stopped = await A('browser_stop_tracing');
+  check('tracing works again after the drop', !retrace.isError && !stopped.isError && /\.zip/.test(stopped.text), `${retrace.text.slice(0, 100)} / ${stopped.text.slice(0, 100)}`);
   await A('browser_network_state_set', { state: 'offline' });
   sockets.forEach(s => s.destroy());
   await sleep(6000);
