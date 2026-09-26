@@ -683,8 +683,10 @@ export class Gateway implements SessionHost {
       return await this._handleFocus(url, res);
     }
     if (url.pathname === '/' && req.method === 'GET') {
+      // Without the key: a note, answered 200 (it also tells that the
+      // gateway is up, which is what plain requests to "/" check).
       if (url.searchParams.get('key') !== this._statusKey) {
-        res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' });
+        res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' });
         res.end('The status page is shown in the agent browser\'s pinned tab.');
         return;
       }
