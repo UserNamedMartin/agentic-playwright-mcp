@@ -43,7 +43,10 @@ function refuse(name: string): never {
 // Methods whose function argument runs in the page: it is passed as it is.
 const serializingMethods = new Set(['evaluate', 'evaluateHandle', '$eval', '$$eval', 'evaluateAll', 'waitForFunction', 'addInitScript']);
 
-// Context events and how to find the page each belongs to.
+// Context events and how to find the page each belongs to. Only these are
+// delivered (to the owner of that page); any other context event is not:
+// "page" and "close" are handled separately, and events added by a later
+// Playwright stay silent until they are listed here.
 const pageOfEvent: Record<string, (arg: any) => Page | undefined> = {
   request: request => request.frame().page(),
   requestfinished: request => request.frame().page(),
@@ -51,29 +54,81 @@ const pageOfEvent: Record<string, (arg: any) => Page | undefined> = {
   response: response => response.request().frame().page(),
   console: message => message.page() ?? undefined,
   dialog: dialog => dialog.page() ?? undefined,
+  dialogclosed: dialog => dialog.page?.() ?? undefined,
   weberror: error => error.page() ?? undefined,
+  framenavigated: frame => frame.page(),
+  frameattached: frame => frame.page(),
+  framedetached: frame => frame.page(),
+  pageload: page => page,
+  pageclose: page => page,
+  download: download => download.page(),
 };
-// Context events that never belong to one chat's tabs.
-const silentEvents = new Set(['serviceworker', 'backgroundpage']);
 
-// Removed when their session ends (see AgentSession.dispose).
-const leftovers = new WeakMap<object, (() => void)[]>();
+// Listeners a snippet leaves behind, removed when its session ends (see
+// AgentSession.dispose); each leaves the set once removed.
+const leftovers = new WeakMap<object, Set<() => void>>();
 
 export function removeSnippetListeners(session: object) {
-  for (const remove of leftovers.get(session)?.splice(0) ?? [])
+  for (const remove of [...leftovers.get(session) ?? []])
     remove();
 }
+
+const emitterMethods = ['on', 'once', 'addListener', 'prependListener', 'prependOnceListener', 'off', 'removeListener', 'removeAllListeners', 'listeners', 'rawListeners', 'listenerCount'];
 
 export function isolatedView(context: any) {
   const session = context._agentSession;
   const toTarget = new WeakMap<object, any>();
   const wrapped = new WeakMap<object, any>();
   let rawContext: BrowserContext;
-  const cleanup = () => {
-    let list = leftovers.get(session);
-    if (!list)
-      leftovers.set(session, list = []);
-    return list;
+  const track = (remove: () => void) => {
+    let set = leftovers.get(session);
+    if (!set)
+      leftovers.set(session, set = new Set());
+    const tracked = () => {
+      set!.delete(tracked);
+      remove();
+    };
+    set.add(tracked);
+    return tracked;
+  };
+
+  // EventEmitter methods of a view, over `listen(event, listener, once)`
+  // returning a remover; `self` is what chaining methods return.
+  const emitter = (listen: (event: string, listener: Function, once: boolean) => () => void, self: () => any) => {
+    const listeners = new Map<string, Map<Function, () => void>>();
+    const add = (event: string, listener: Function, once: boolean) => {
+      if (!listeners.has(event))
+        listeners.set(event, new Map());
+      listeners.get(event)!.get(listener)?.();
+      listeners.get(event)!.set(listener, listen(event, listener, once));
+      return self();
+    };
+    const off = (event: string, listener: Function) => {
+      listeners.get(event)?.get(listener)?.();
+      listeners.get(event)?.delete(listener);
+      return self();
+    };
+    return {
+      on: (event: string, listener: Function) => add(event, listener, false),
+      addListener: (event: string, listener: Function) => add(event, listener, false),
+      prependListener: (event: string, listener: Function) => add(event, listener, false),
+      once: (event: string, listener: Function) => add(event, listener, true),
+      prependOnceListener: (event: string, listener: Function) => add(event, listener, true),
+      off,
+      removeListener: off,
+      removeAllListeners: (event?: string) => {
+        for (const [name, map] of listeners) {
+          if (event && name !== event)
+            continue;
+          map.forEach(remove => remove());
+          map.clear();
+        }
+        return self();
+      },
+      listeners: (event: string) => [...listeners.get(event)?.keys() ?? []],
+      rawListeners: (event: string) => [...listeners.get(event)?.keys() ?? []],
+      listenerCount: (event: string) => listeners.get(event)?.size ?? 0,
+    };
   };
 
   const unwrap = (value: any): any => {
@@ -137,7 +192,8 @@ export function isolatedView(context: any) {
     switch (typeOf(value)) {
       case 'BrowserContext': return contextView();
       case 'Browser': return null;
-      case 'Page': return pageView(value);
+      // A page of another chat is never handed out.
+      case 'Page': return session.owned.has(value) || session.owned.has(session.openers.get(value)) ? pageView(value) : null;
       case 'APIRequestContext': return requestView(value);
       case 'Frame': case 'Locator': case 'FrameLocator': case 'ElementHandle': case 'JSHandle':
       case 'Request': case 'Response': case 'Route': case 'Dialog': case 'ConsoleMessage': case 'Download':
@@ -151,12 +207,12 @@ export function isolatedView(context: any) {
     }
   }
 
-  // Event subscriptions filtered to this session's pages.
-  const subscribe = (emitter: any, event: string, listener: Function, filter: (arg: any) => Promise<boolean>, once = false) => {
+  // A context event subscription delivering only this session's pages' events.
+  const subscribe = (emitterObject: any, event: string, listener: Function, once: boolean) => {
     const handler = async (arg: any) => {
       let ok = false;
       try {
-        ok = await filter(arg);
+        ok = await session.ownsPage(pageOfEvent[event](arg));
       } catch {}
       if (!ok)
         return;
@@ -164,13 +220,10 @@ export function isolatedView(context: any) {
         remove();
       listener(wrap(arg));
     };
-    const remove = () => emitter.off(event, handler);
-    emitter.on(event, handler);
-    cleanup().push(remove);
-    return { handler, remove };
+    const remove = track(() => emitterObject.off(event, handler));
+    emitterObject.on(event, handler);
+    return remove;
   };
-
-  const ownsEventArg = (event: string) => async (arg: any) => await session.ownsPage(pageOfEvent[event]?.(arg));
 
   const waitFor = (subscribeFn: (resolve: (value: any) => void) => () => void, event: string, options: any) => {
     const timeout = typeof options === 'object' && options?.timeout !== undefined ? options.timeout : 30000;
@@ -193,20 +246,34 @@ export function isolatedView(context: any) {
   const predicateOf = (options: any) => typeof options === 'function' ? options : options?.predicate;
 
   function pageView(page: Page): Page {
-    const popupSubscription = (listener: Function, once: boolean) => {
-      let done = false;
-      const off = session.onPopup((opener: Page, popup: Page) => {
-        if (done || opener !== page)
-          return;
-        if (once)
-          done = true;
-        listener(pageView(popup));
-      });
-      cleanup().push(off);
-      return off;
+    if (wrapped.has(page))
+      return wrapped.get(page);
+    // Tabs the page opens become background tabs without an opener (see
+    // popups.ts); they still arrive as "popup" events here. Other events of
+    // the page are its own.
+    const listen = (event: string, listener: Function, once: boolean) => {
+      if (event === 'popup') {
+        let done = false;
+        let off: () => void;
+        const unsubscribe = session.onPopup((opener: Page, popup: Page) => {
+          if (done || opener !== page)
+            return;
+          if (once) {
+            done = true;
+            off();
+          }
+          listener(pageView(popup));
+        });
+        off = track(unsubscribe);
+        return off;
+      }
+      const handler = wrapCallback(listener);
+      (once ? page.once : page.on).call(page, event as any, handler as any);
+      return track(() => page.off(event as any, handler as any));
     };
-    const popupListeners = new Map<Function, () => void>();
+    const events = emitter(listen, () => pageView(page));
     return wrapObject(page, {
+      ...events,
       context: () => contextView(),
       request: requestView(page.request),
       clock: new Proxy({}, { get: () => () => refuse('clock') }),
@@ -214,39 +281,12 @@ export function isolatedView(context: any) {
         const opener = session.openers.get(page) ?? await page.opener();
         return opener && await session.ownsPage(opener) ? pageView(opener) : null;
       },
-      // Tabs the page opens become background tabs without an opener (see
-      // popups.ts); they still arrive as "popup" events here.
-      on: (event: string, listener: Function) => {
-        if (event === 'popup')
-          popupListeners.set(listener, popupSubscription(listener, false));
-        else
-          page.on(event as any, wrapCallback(listener) as any);
-        return pageView(page);
-      },
-      once: (event: string, listener: Function) => {
-        if (event === 'popup')
-          popupListeners.set(listener, popupSubscription(listener, true));
-        else
-          page.once(event as any, wrapCallback(listener) as any);
-        return pageView(page);
-      },
-      off: (event: string, listener: Function) => {
-        if (event === 'popup') {
-          popupListeners.get(listener)?.();
-          popupListeners.delete(listener);
-        } else {
-          page.off(event as any, wrapCallback(listener) as any);
-        }
-        return pageView(page);
-      },
       waitForEvent: async (event: string, options?: any) => {
-        if (event !== 'popup')
-          return wrap(await page.waitForEvent(event as any, typeof options === 'function' ? wrapCallback(options) as any : options));
         const predicate = predicateOf(options);
-        return await waitFor(resolve => session.onPopup(async (opener: Page, popup: Page) => {
-          if (opener === page && (!predicate || await predicate(pageView(popup))))
-            resolve(pageView(popup));
-        }), 'popup', options);
+        return await waitFor(resolve => listen(event, async (value: any) => {
+          if (!predicate || await predicate(value))
+            resolve(value);
+        }, false), event, options);
       },
     });
   }
@@ -269,33 +309,29 @@ export function isolatedView(context: any) {
     if (view)
       return view;
     const own = () => context.tabs().map((tab: any) => tab.page as Page);
-    const listeners = new Map<string, Map<Function, () => void>>();
-    const listen = (event: string, listener: Function, once: boolean) => {
-      let remove: () => void;
+    const listen = (event: string, listener: Function, once: boolean): (() => void) => {
       if (event === 'page') {
-        const off = session.onAdopt((page: Page) => {
+        let off: () => void;
+        const unsubscribe = session.onAdopt((page: Page) => {
           if (once)
             off();
           listener(pageView(page));
         });
-        cleanup().push(off);
-        remove = off;
-      } else if (silentEvents.has(event)) {
-        remove = () => {};
-      } else if (event in pageOfEvent) {
-        remove = subscribe(rawContext, event, listener, ownsEventArg(event), once).remove;
-      } else {
-        const handler = wrapCallback(listener);
-        (once ? rawContext.once : rawContext.on).call(rawContext, event as any, handler as any);
-        remove = () => rawContext.off(event as any, handler as any);
-        cleanup().push(remove);
+        off = track(unsubscribe);
+        return off;
       }
-      if (!listeners.has(event))
-        listeners.set(event, new Map());
-      listeners.get(event)!.set(listener, remove);
-      return view;
+      if (event in pageOfEvent)
+        return subscribe(rawContext, event, listener, once);
+      if (event === 'close') {
+        const handler = () => listener(view);
+        (once ? rawContext.once : rawContext.on).call(rawContext, 'close' as any, handler as any);
+        return track(() => rawContext.off('close' as any, handler as any));
+      }
+      return () => {};
     };
+    const events = emitter(listen, () => view);
     const overrides: Record<string, any> = {
+      ...events,
       pages: () => own().map(pageView),
       newPage: async () => pageView(await session.openTab()),
       browser: () => null,
@@ -338,34 +374,12 @@ export function isolatedView(context: any) {
         for (const origin of origins)
           await rawContext.grantPermissions(permissions, { origin });
       },
-      on: (event: string, listener: Function) => listen(event, listener, false),
-      addListener: (event: string, listener: Function) => listen(event, listener, false),
-      once: (event: string, listener: Function) => listen(event, listener, true),
-      off: (event: string, listener: Function) => {
-        listeners.get(event)?.get(listener)?.();
-        listeners.get(event)?.delete(listener);
-        return view;
-      },
-      removeListener: (event: string, listener: Function) => overrides.off(event, listener),
-      removeAllListeners: (event?: string) => {
-        for (const [name, map] of listeners) {
-          if (event && name !== event)
-            continue;
-          map.forEach(remove => remove());
-          map.clear();
-        }
-        return view;
-      },
       waitForEvent: async (event: string, options?: any) => {
         const predicate = predicateOf(options);
-        return await waitFor(resolve => {
-          const handler = async (value: any) => {
-            if (!predicate || await predicate(value))
-              resolve(value);
-          };
-          listen(event, handler, false);
-          return () => overrides.off(event, handler);
-        }, event, options);
+        return await waitFor(resolve => listen(event, async (value: any) => {
+          if (!predicate || await predicate(value))
+            resolve(value);
+        }, false), event, options);
       },
     };
     for (const name of Object.keys(refused)) {

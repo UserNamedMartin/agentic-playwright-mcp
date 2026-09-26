@@ -36,9 +36,14 @@ const check = (name, ok, detail = '') => {
 const page = who => `<!doctype html><title>${who} page</title><p>hello ${who}</p>
 <button id=b onclick="window.__clicks=(window.__clicks||0)+1">Go</button>
 <a id=blank href="/first-blank?who=${who}" target=_blank>blank</a>
-<a id=probe href="/probe?who=${who}" target=_blank>probe</a>`;
+<a id=probe href="/probe?who=${who}" target=_blank>probe</a>
+<a id=dl href="/dl" download>dl</a>`;
 const site = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://x');
+  if (url.pathname === '/dl') {
+    res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-disposition': 'attachment; filename=b.bin' });
+    return res.end('data');
+  }
   if (url.pathname.startsWith('/first') || url.pathname.startsWith('/probe') || url.pathname.startsWith('/api')) {
     res.writeHead(200, { 'content-type': 'text/html', 'access-control-allow-origin': '*' });
     return res.end(`<title>REAL ${url.pathname}</title>REAL`);
@@ -182,8 +187,11 @@ try {
   const listening = A.code(`async page => {
     const seen = [];
     const ctx = page.context();
-    for (const event of ['request', 'response', 'console', 'dialog', 'requestfinished'])
-      ctx.on(event, x => seen.push(event + ':' + (x.url ? x.url() : x.text ? x.text() : x.message ? x.message() : '')));
+    const describe = x => x ? (x.url ? x.url() : x.text ? x.text() : x.message ? x.message() : x.suggestedFilename ? x.suggestedFilename() : String(x)) : String(x);
+    for (const event of ['request', 'response', 'console', 'dialog', 'requestfinished', 'pageload', 'pageclose', 'framenavigated', 'frameattached', 'framedetached', 'download', 'page', 'weberror'])
+      ctx.on(event, x => seen.push(event + ':' + describe(x)));
+    ctx.prependListener('request', x => seen.push('prepend:' + describe(x)));
+    ctx.prependOnceListener('response', x => seen.push('prepend-once:' + describe(x)));
     ctx.on('dialog', d => d.accept('HIJACKED'));
     const waited = await ctx.waitForEvent('response', { timeout: 2500 }).then(r => 'got ' + r.url(), () => 'none');
     return JSON.stringify({ seen, waited });
@@ -191,6 +199,10 @@ try {
   await sleep(300);
   await B.call('browser_evaluate', { function: `() => { fetch("/api?again=${SECRET}"); console.log("again ${SECRET}"); return 1; }` });
   await B.call('browser_navigate', { url: `${urlB}&step=2` });
+  await B.call('browser_tabs', { action: 'new', url: `${urlB}&step=3` });
+  await B.call('browser_tabs', { action: 'close' });
+  await B.call('browser_tabs', { action: 'select', index: 0 });
+  await B.call('browser_click', { element: 'dl', target: '#dl' });
   const events = await listening;
   check('run_code: context events of B not delivered to A', !events.includes('who=B') && !events.includes(SECRET) && /waited\W+none/.test(events), events);
   await B.call('browser_evaluate', { function: '() => { setTimeout(() => window.__answer = prompt("q?"), 50); return 1; }' });
@@ -198,6 +210,25 @@ try {
   const bDialog = await B.call('browser_snapshot');
   check('a listener A left behind does not answer B\'s dialog', /prompt/.test(bDialog.text) && /q\?/.test(bDialog.text), bDialog.text.slice(0, 200));
   await B.call('browser_handle_dialog', { accept: true, promptText: 'from-B' });
+
+  // run_code: the same page is the same object; popup listeners of every kind.
+  const identity = await A.code(`async page => {
+    const same = page.context().pages().includes(page) && page.context().pages()[0] === page;
+    let calls = 0;
+    const f = () => calls++;
+    const chained = page.on('popup', f).off('popup', f) === page;
+    const got = [];
+    page.addListener('popup', p => got.push('add'));
+    page.prependListener('popup', p => got.push('prepend'));
+    await Promise.all([page.waitForEvent('popup'), page.click('#probe')]);
+    await page.waitForTimeout(200);
+    return JSON.stringify({ same, chained, calls, got });
+  }`);
+  check('run_code: one object per page, popup listeners of every kind', /same\W+true/.test(identity) && /chained\W+true/.test(identity) && /calls\W+0/.test(identity) && /add/.test(identity) && /prepend/.test(identity), identity);
+  const tabsNow = (await A.call('browser_tabs', { action: 'list' })).text;
+  for (let i = tabIds(tabsNow).length - 1; i >= 1; i--)
+    await A.call('browser_tabs', { action: 'close', index: i });
+  await A.call('browser_tabs', { action: 'select', index: 0 });
 
   // run_code: A's own popups and new pages, as upstream.
   const popup = await A.code(`async page => { const [p] = await Promise.all([page.waitForEvent('popup'), page.click('#probe')]); await p.waitForLoadState(); return 'popup ' + p.url(); }`);
