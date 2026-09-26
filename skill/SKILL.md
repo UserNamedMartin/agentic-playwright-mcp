@@ -135,20 +135,26 @@ requests" in your tool results; answer with `browser_permission` ("allow" or
 
 ## Shared between all chats of this setup
 
-Cookies, local storage and logins are shared. The cookie and storage-state
-tools only act on the sites open in your own tabs (cookie list and delete take
-a `domain` for another site), so they cannot wipe or export other chats'
-logins. Still, unless the user asks for it, do not clear cookies or storage or
-load a storage state. Everything else works as if you had the browser to
-yourself: routes, offline mode, video, device emulation, tracing and the
-action recorder only see and affect your own tabs (other chats can use them at
-the same time), and `browser_run_code_unsafe`'s `page` only leads to your own
-tabs. Tabs your pages open (links with target=_blank, window.open) are yours,
-open in the background, and arrive as `page.waitForEvent('popup')` in code.
-Your `browser_tabs` list also shows your subagents' tabs. The gateway's status
-page (its own address) is not for agents: it shows you nothing.
-Routes, offline mode and device emulation survive a dropped browser connection
-and a gateway restart; you are told when a video or trace was cut off.
+Other chats use this browser at the same time, but you mostly work as if it
+were yours alone:
+
+- **Cookies and storage:** the cookie and storage-state tools act only on the
+  sites open in your own tabs (cookie list and delete take a `domain` for
+  another site). Logins are shared, so do not clear cookies or storage or load
+  a storage state unless the user asks.
+- **Your own tabs only:** routes, offline mode, video, device emulation,
+  tracing and the action recorder see and affect only your tabs (other chats
+  can use them at the same time); so does `browser_run_code_unsafe`'s `page`.
+  Tabs your pages open (target=_blank links, window.open) are yours, open in
+  the background, and arrive as `page.waitForEvent('popup')` in code. Your
+  `browser_tabs` list also shows your subagents' tabs.
+- **The whole browser:** `chrome://` pages (settings, history, downloads,
+  extensions, ...) act on every chat. Look if you need to, but do not change
+  settings, clear data or touch extensions there unless the user asks. The
+  DevTools port and the gateway's own address are not for agents.
+- **Kept across interruptions:** routes, offline mode and device emulation
+  survive a dropped browser connection and a gateway restart; you are told
+  when a video, trace or recording was cut off.
 
 ## Phones and screen sizes
 
