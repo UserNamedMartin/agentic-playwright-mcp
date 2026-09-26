@@ -164,6 +164,12 @@ export function isTracing(session: any) {
   return tracingSessions.has(session);
 }
 
+// The session's trace is lost (a dropped connection): no longer tracing,
+// right away, before the gateway saves its state.
+export function forgetTracing(session: any) {
+  tracingSessions.delete(session);
+}
+
 // Temp dirs of traces left by gateway processes that are gone (a restart or
 // a crash mid-trace). Dirs of a running gateway (another profile) stay.
 // Nothing here may keep the gateway from starting (launchd would restart it

@@ -185,7 +185,13 @@ try {
   const sessionT = gateway.sessions.get('chat-T');
   const afterFire = snippetListenerCount(sessionT);
   check('a fired once listener is forgotten', afterFire === 2, `${afterFire} listeners kept`);
+  await T('browser_start_tracing');
+  const savedAtDrop = new Promise(resolve => {
+    const detach = sessionT.detach.bind(sessionT);
+    sessionT.detach = () => { detach(); resolve(sessionT.savedState()); sessionT.detach = detach; };
+  });
   await gateway.shared.browser.close();
+  check('a trace cut off by a drop is not saved as still running', (await savedAtDrop).tracing === false, JSON.stringify(await savedAtDrop));
   for (let i = 0; i < 50 && !gateway.shared?.browser?.isConnected(); i++)
     await sleep(200);
   await sleep(1500);

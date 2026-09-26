@@ -12,7 +12,7 @@ import type { TabGroups } from './groups.js';
 import { touchFolder } from './files.js';
 import { pwTools, verifyContext } from './internals.js';
 import { removeSnippetListeners } from './isolation.js';
-import { callingSession, isRecording, isTracing, startRecording, stopRecording, stopTracing } from './recording.js';
+import { callingSession, forgetTracing, isRecording, isTracing, startRecording, stopRecording, stopTracing } from './recording.js';
 import { releaseContextWide } from './scoped.js';
 import { applyEmulation, type Emulation } from './tools.js';
 import { internalUrlResolved } from './urls.js';
@@ -266,6 +266,7 @@ export class AgentSession {
       this._notes.push('### Recording\nThe action recording stopped: the browser connection dropped and was restored. Start it again if you still need it.');
     }
     if (isTracing(this)) {
+      forgetTracing(this);
       void stopTracing(this, this._shared.context, true).catch(() => {});
       this._notes.push('### Tracing\nTracing stopped: the browser connection dropped and was restored. Start it again if you still need it.');
     }
