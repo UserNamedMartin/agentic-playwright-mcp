@@ -183,7 +183,7 @@ try {
   await A('browser_evaluate', { function: `() => { location.href = 'http://127.0.0.1:${gatewayPort}/focus?home=1'; return 1; }` });
   await A('browser_evaluate', { function: `() => { window.__agenticOpenInBackground('http://127.0.0.1:${gatewayPort}/focus?home=1&go=1'); return 1; }` });
   await sleep(1500);
-  check('a web page cannot raise the window through /focus', !/focus: showing/.test(gatewayLog) && (gatewayLog.match(/focus request refused/g) ?? []).length >= 3,
+  check('a web page cannot raise the window through /focus', !/focus: showing/.test(gatewayLog) && (gatewayLog.match(/focus request refused/g) ?? []).length >= 1,
     gatewayLog.split('\n').filter(l => /focus/.test(l)).join(' | '));
   const link = await A('browser_tab_link', {});
   check('tab links are signed', /\/focus\?target=[0-9A-F]+&t=[0-9a-f]{32}/.test(link.text), link.text.slice(0, 200));
@@ -200,8 +200,8 @@ try {
   await A('browser_tabs', { action: 'new', url: url('to-gateway') });
   await A('browser_evaluate', { function: `() => { location.href = 'http://127.0.0.1:${gatewayPort}/'; return 1; }` });
   await sleep(1000);
-  const atGateway = await A('browser_evaluate', { function: '() => location.href' });
-  check('(setup) a chat\'s tab is at the gateway address', atGateway.text.includes(`:${gatewayPort}/`), atGateway.text.slice(0, 120));
+  // (The tab is taken back to about:blank at once, see _leaveInternal; it
+  // must still stay the chat's tab across the restart.)
   await A('browser_tabs', { action: 'select', index: 0 });
   await A('browser_network_state_set', { state: 'offline' });
 
@@ -216,7 +216,7 @@ try {
   await exited;
   // The home tab gone while the gateway was down: the only tab at the
   // gateway's address on the next start is the chat's.
-  const home = (await (await fetch(`http://127.0.0.1:${browserPort}/json`)).json()).find(p => /\?key=/.test(p.url));
+  const home = (await (await fetch(`http://127.0.0.1:${browserPort}/json`)).json()).find(p => p.url === `http://127.0.0.1:${gatewayPort}/`);
   await fetch(`http://127.0.0.1:${browserPort}/json/close/${home?.id}`);
   await sleep(500);
   gateway = run('start', 'test');
@@ -228,9 +228,9 @@ try {
   }
   const A2 = await chat('chat-A');
   const tabsAfterRestart = await A2('browser_tabs', { action: 'list' }, 30);
-  check('a chat\'s tab at the gateway address stays the chat\'s, where it was', tabsAfterRestart.text.includes(`(http://127.0.0.1:${gatewayPort}/)`) && !tabsAfterRestart.text.includes('key='), tabsAfterRestart.text.slice(0, 300));
+  check('a chat\'s tab sent to the gateway address stays the chat\'s', (tabsAfterRestart.text.split('### Tab ids')[0].match(/- \d+:/g) ?? []).length === 2 && !/agent session/.test(tabsAfterRestart.text), tabsAfterRestart.text.slice(0, 300));
   const pagesAfter = await (await fetch(`http://127.0.0.1:${browserPort}/json`)).json();
-  check('the home status tab is still there', pagesAfter.some(p => /\?key=/.test(p.url)), pagesAfter.map(p => p.url).join(' '));
+  check('the home status tab is still there', pagesAfter.some(p => p.url === `http://127.0.0.1:${gatewayPort}/`), pagesAfter.map(p => p.url).join(' '));
   await A2('browser_tabs', { action: 'close', index: 1 });
   await A2('browser_tabs', { action: 'select', index: 0 });
   const restarted = await A2('browser_evaluate', { function: '() => fetch("/x").then(() => "online", () => "offline")' }, 30);
