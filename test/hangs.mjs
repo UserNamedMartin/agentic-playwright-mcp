@@ -87,6 +87,15 @@ try {
   check('a late given-up call leaves the tab the agent switched to', /"t2"/.test(where), where.split('\n').slice(0, 2).join(' '));
   await call('browser_tabs', { action: 'close' });
   await call('browser_tabs', { action: 'select', index: 0 });
+  // ... also when it finishes in the middle of the agent's next call.
+  const ids = (await call('browser_tabs', { action: 'new', url: 'data:text/html,<title>t2</title>' })).match(/- \d+: ([0-9A-F]{8})/g).map(l => l.split(': ')[1]);
+  await call('browser_tabs', { action: 'select', index: 0 });
+  await call('browser_evaluate', { function: '() => new Promise(r => setTimeout(() => r(1), 2500))', timeout: 1 });
+  await call('browser_wait_for', { time: 3, tab: ids[1] });
+  const where2 = await call('browser_evaluate', { function: '() => document.title' });
+  check('... also when it finishes during the next call', /"t2"/.test(where2), where2.split('\n').slice(0, 2).join(' '));
+  await call('browser_tabs', { action: 'close', index: 1 });
+  await call('browser_tabs', { action: 'select', index: 0 });
 
   const slow = call('browser_evaluate', { function: '() => new Promise(r => setTimeout(() => r("slow"), 3000))' });
   await sleep(200);

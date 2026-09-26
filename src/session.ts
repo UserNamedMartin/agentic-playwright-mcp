@@ -3,6 +3,7 @@
 // the browser context and opens tabs in the foreground; here each session only
 // sees the tabs it opened (plus popups those tabs open), and opens them in the
 // background.
+import { AsyncLocalStorage } from 'node:async_hooks';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { BrowserContext, CDPSession, Page, Request, Route } from 'playwright-core';
@@ -16,6 +17,9 @@ import { releaseContextWide } from './scoped.js';
 import { applyEmulation, type Emulation } from './tools.js';
 import { describePasskeyRequests, type PasskeyRequest } from './passkeys.js';
 import type { PermissionRequest } from './permissions.js';
+
+// The state of the tool call running (given up or not), see _callWithTimeout.
+const callState = new AsyncLocalStorage<{ abandoned: boolean }>();
 
 // A tool call is given up after this long unless the agent passes "timeout"
 // (seconds); browser_wait_for gets its own wait time on top.
@@ -307,7 +311,7 @@ export class AgentSession {
     // An abandoned call that finishes later must not take the notes meant for
     // the agent's next result.
     const state = { abandoned: false as boolean };
-    const call = callingSession.run(this, () => this._callTool(name, args, signal, state));
+    const call = callingSession.run(this, () => callState.run(state, () => this._callTool(name, args, signal, state)));
     call.catch(() => {});
     const timedOut = new Promise<any>(resolve => {
       timer = setTimeout(() => {
@@ -530,9 +534,6 @@ export class AgentSession {
     return () => this._adoptListeners.delete(listener);
   }
 
-  // The current tab as the agent's latest finished call left it.
-  private _agentTab: any;
-
   private _queue: Promise<unknown> = Promise.resolve();
   private _running: { name: string; since: number } | undefined;
 
@@ -555,12 +556,8 @@ export class AgentSession {
     }
     const result = await this.backend.callTool(name, args, signal);
     if (state.abandoned) {
-      // Given up earlier: whatever it did to the tabs, the current tab stays
-      // the one the agent's latest finished call left it on.
       if (this.backend?._disposed)
         await this._afterClose();
-      else if (this._agentTab && this.backend?._context?._tabs.includes(this._agentTab))
-        this.backend._context._currentTab = this._agentTab;
       return result;
     }
     // Tell the agent once where its files go; paths in later results are
@@ -589,7 +586,6 @@ export class AgentSession {
       result.content.push({ type: 'text', text: passkeys });
     // Remembered for a dropped connection, when the pages are already gone.
     this.currentTarget = this.currentTargetId();
-    this._agentTab = this.backend?._context?._currentTab;
     // browser_close disposes the backend and means "close my tabs": the
     // stock Context only forgets them. The next call gets a fresh backend.
     if (this.backend._disposed) {
@@ -754,6 +750,19 @@ export class AgentSession {
     context.stopRecording = async function() {
       return await stopRecording(session, this);
     };
+
+    // A call given up at its timeout keeps running; whatever it does, it no
+    // longer changes which tab is current (the agent has moved on, maybe to
+    // another tab). Tabs closing still move it, from outside any call.
+    let currentTab = context._currentTab;
+    Object.defineProperty(context, '_currentTab', {
+      configurable: true,
+      get: () => currentTab,
+      set: (tab: any) => {
+        if (!callState.getStore()?.abandoned)
+          currentTab = tab;
+      },
+    });
 
     context.routes = () => session.routes;
     context.addRoute = async function(entry: any) {
