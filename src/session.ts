@@ -295,13 +295,12 @@ export class AgentSession {
     let onAbort: (() => void) | undefined;
     // An abandoned call that finishes later must not take the notes meant for
     // the agent's next result.
-    const state = { abandoned: false as boolean, currentTab: undefined as any };
+    const state = { abandoned: false as boolean };
     const call = callingSession.run(this, () => this._callTool(name, args, signal, state));
     call.catch(() => {});
     const timedOut = new Promise<any>(resolve => {
       timer = setTimeout(() => {
         state.abandoned = true;
-        state.currentTab = this.backend?._context?._currentTab;
         const url = this.currentPage()?.url();
         console.error(`${name} from ${this.info.title} gave up after ${seconds} s`);
         resolve(errorResult(`${name} did not finish within ${seconds} s and was given up, so your next calls are not ` +
@@ -314,7 +313,6 @@ export class AgentSession {
     const aborted = new Promise<never>((_, reject) => {
       onAbort = () => {
         state.abandoned = true;
-        state.currentTab = this.backend?._context?._currentTab;
         console.error(`${name} from ${this.info.title} was cancelled by the agent`);
         reject(signal!.reason ?? new Error('cancelled'));
       };
@@ -521,10 +519,13 @@ export class AgentSession {
     return () => this._adoptListeners.delete(listener);
   }
 
+  // The current tab as the agent's latest finished call left it.
+  private _agentTab: any;
+
   private _queue: Promise<unknown> = Promise.resolve();
   private _running: { name: string; since: number } | undefined;
 
-  private async _callTool(name: string, rawArgs: any, signal?: AbortSignal, state: { abandoned: boolean; currentTab?: any } = { abandoned: false }) {
+  private async _callTool(name: string, rawArgs: any, signal?: AbortSignal, state: { abandoned: boolean } = { abandoned: false }) {
     this.lastActivity = Date.now();
     if (!this.backend)
       await this.start();
@@ -543,12 +544,12 @@ export class AgentSession {
     }
     const result = await this.backend.callTool(name, args, signal);
     if (state.abandoned) {
-      // Given up earlier: whatever it did to the tabs, the agent's current
-      // tab stays the one it was working on.
+      // Given up earlier: whatever it did to the tabs, the current tab stays
+      // the one the agent's latest finished call left it on.
       if (this.backend?._disposed)
         await this._afterClose();
-      else if (state.currentTab && this.backend?._context?._tabs.includes(state.currentTab))
-        this.backend._context._currentTab = state.currentTab;
+      else if (this._agentTab && this.backend?._context?._tabs.includes(this._agentTab))
+        this.backend._context._currentTab = this._agentTab;
       return result;
     }
     // Tell the agent once where its files go; paths in later results are
@@ -577,6 +578,7 @@ export class AgentSession {
       result.content.push({ type: 'text', text: passkeys });
     // Remembered for a dropped connection, when the pages are already gone.
     this.currentTarget = this.currentTargetId();
+    this._agentTab = this.backend?._context?._currentTab;
     // browser_close disposes the backend and means "close my tabs": the
     // stock Context only forgets them. The next call gets a fresh backend.
     if (this.backend._disposed) {

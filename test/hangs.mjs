@@ -77,6 +77,17 @@ try {
   const huge = await call('browser_evaluate', { function: '() => 1 + 1', timeout: 1e10 });
   check('a huge timeout is not an overflow (given up at once)', /### Result\n2/.test(huge), huge);
 
+  // A call given up that finishes later must not move the agent back to the
+  // tab it ran on once the agent has switched tabs.
+  await call('browser_navigate', { url: 'data:text/html,<title>t1</title>' });
+  await call('browser_evaluate', { function: '() => new Promise(r => setTimeout(() => r(1), 4000))', timeout: 1 });
+  await call('browser_tabs', { action: 'new', url: 'data:text/html,<title>t2</title>' });
+  await sleep(4000);
+  const where = await call('browser_evaluate', { function: '() => document.title' });
+  check('a late given-up call leaves the tab the agent switched to', /"t2"/.test(where), where.split('\n').slice(0, 2).join(' '));
+  await call('browser_tabs', { action: 'close' });
+  await call('browser_tabs', { action: 'select', index: 0 });
+
   const slow = call('browser_evaluate', { function: '() => new Promise(r => setTimeout(() => r("slow"), 3000))' });
   await sleep(200);
   const waiting = await call('browser_evaluate', { function: '() => 1 + 1' });
