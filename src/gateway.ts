@@ -20,6 +20,7 @@ import { CallToolRequestSchema, ListResourcesRequestSchema, ListToolsRequestSche
 import { SharedBrowser } from './browser.js';
 import { TabGroups } from './groups.js';
 import { applyBrowserConfig } from './config.js';
+import { linkToken, readLinkSecret } from './linktoken.js';
 import { removeStaleTraceDirs } from './recording.js';
 import { scopeTools } from './scoped.js';
 import { type SavedNetworkState, AgentSession, defaultCallTimeoutSeconds, errorResult, type SessionHost, type SessionInfo } from './session.js';
@@ -116,6 +117,12 @@ export class Gateway implements SessionHost {
   get cdpEndpoint() {
     return this.options.cdpEndpoint;
   }
+
+  // Signs tab links (see linktoken.ts); kept in the profile's folder.
+  private get _linkSecret() {
+    return this.__linkSecret ??= readLinkSecret(this.options.profile, true)!;
+  }
+  private __linkSecret: string | undefined;
 
   get statusUrl() {
     return `${this.baseUrl}/?key=${this._statusKey}`;
@@ -691,7 +698,7 @@ export class Gateway implements SessionHost {
       return await this._handleMcp(req, res);
     if (url.pathname === '/focus') {
       await this._ready;
-      return await this._handleFocus(req, url, res);
+      return await this._handleFocus(url, res);
     }
     if (url.pathname === '/' && req.method === 'GET') {
       // Without the key: a note, answered 200 (it also tells that the
@@ -873,7 +880,7 @@ export class Gateway implements SessionHost {
     const targetId = await this.shared.targetId(tab.page);
     const url = tab.page.url();
     const title = await tab.page.title().catch(() => '');
-    const link = `${this.baseUrl}/focus?target=${targetId}`;
+    const link = `${this.baseUrl}/focus?target=${targetId}&t=${linkToken(this._linkSecret, `target:${targetId}`)}`;
     // Claude Code shows the model structuredContent instead of the text, so the
     // link and what to do with it are in both.
     const instruction = `Give the user this link as a markdown link, e.g. [Open "${title || url}" in the agent browser](${link}). ` +
@@ -936,18 +943,15 @@ export class Gateway implements SessionHost {
   // Activating our window right away loses that race, so the page itself asks
   // for the switch (…&go=1) once it is showing, then closes itself.
   // go=1 is also what the CLI and the agentic-browser:// handler call directly.
-  private async _handleFocus(req: http.IncomingMessage, url: URL, res: http.ServerResponse) {
+  private async _handleFocus(url: URL, res: http.ServerResponse) {
     const target = url.searchParams.get('home') ? this._homeTargetId : url.searchParams.get('target');
-    // Tab links raise the browser window, for the user who clicks one. A web
-    // page (in an agent's tab or anywhere) must not: browsers mark its
-    // requests cross-site or same-site. A clicked link arrives as "none", the
-    // opening page's own request as "same-origin"; tools without the header
-    // (curl, the link handler) are fine.
-    const site = req.headers['sec-fetch-site'];
-    const allowed = url.searchParams.get('go') ? [undefined, 'none', 'same-origin'] : [undefined, 'none'];
-    if (!allowed.includes(site as string | undefined)) {
-      console.error(`focus request refused: it came from a web page (sec-fetch-site: ${site})`);
-      res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' }).end('Tab links are for the user to click.');
+    // Tab links raise the browser window, so only signed links act: a web
+    // page (in an agent's tab or anywhere) cannot make one, the user can
+    // click one from anywhere (see linktoken.ts).
+    const signed = url.searchParams.get('home') ? 'home' : `target:${url.searchParams.get('target') ?? ''}`;
+    if (url.searchParams.get('t') !== linkToken(this._linkSecret, signed)) {
+      console.error('focus request refused: the link is not signed');
+      res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' }).end('This link is not valid. Ask the agent for a new tab link.');
       return;
     }
     if (!url.searchParams.get('go')) {

@@ -9,6 +9,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import crypto from 'node:crypto';
 import { getProfile, homeDir } from './profiles.js';
+import { linkToken, readLinkSecret } from './linktoken.js';
 
 export const linkScheme = 'agentic-browser';
 const appPath = path.join(os.homedir(), 'Applications', 'Agentic Browser Links.app');
@@ -23,7 +24,9 @@ export async function openLink(url: string) {
     throw new Error(`Not an ${linkScheme}:// link: ${url}`);
   const profile = getProfile(parsed.hostname);
   const [, kind, id] = parsed.pathname.split('/');
-  const query = (kind === 'tab' && id ? `target=${encodeURIComponent(id)}` : 'home=1') + '&go=1';
+  const secret = readLinkSecret(profile.name) ?? '';
+  const signed = kind === 'tab' && id ? `target:${id}` : 'home';
+  const query = (kind === 'tab' && id ? `target=${encodeURIComponent(id)}` : 'home=1') + `&t=${linkToken(secret, signed)}&go=1`;
   const res = await fetch(`http://127.0.0.1:${profile.port}/focus?${query}`);
   if (!res.ok)
     throw new Error(`Gateway for "${profile.name}" answered ${res.status}`);

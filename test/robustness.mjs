@@ -181,9 +181,16 @@ try {
   await A('browser_network_state_set', { state: 'online' });
   await A('browser_evaluate', { function: `() => { fetch('http://127.0.0.1:${gatewayPort}/focus?home=1&go=1', { mode: 'no-cors' }).catch(() => {}); return 1; }` });
   await A('browser_evaluate', { function: `() => { location.href = 'http://127.0.0.1:${gatewayPort}/focus?home=1'; return 1; }` });
+  await A('browser_evaluate', { function: `() => { window.__agenticOpenInBackground('http://127.0.0.1:${gatewayPort}/focus?home=1&go=1'); return 1; }` });
   await sleep(1500);
-  check('a web page cannot raise the window through /focus', !/focus: showing/.test(gatewayLog) && (gatewayLog.match(/focus request refused/g) ?? []).length >= 2,
+  check('a web page cannot raise the window through /focus', !/focus: showing/.test(gatewayLog) && (gatewayLog.match(/focus request refused/g) ?? []).length >= 3,
     gatewayLog.split('\n').filter(l => /focus/.test(l)).join(' | '));
+  const link = await A('browser_tab_link', {});
+  check('tab links are signed', /\/focus\?target=[0-9A-F]+&t=[0-9a-f]{32}/.test(link.text), link.text.slice(0, 200));
+  const tabsNow = await A('browser_tabs', { action: 'list' });
+  for (let i = (tabsNow.text.match(/- \d+:/g) ?? []).length - 1; i >= 1; i--)
+    await A('browser_tabs', { action: 'close', index: i });
+  await A('browser_tabs', { action: 'select', index: 0 });
   await A('browser_navigate', { url: url('a2') });
   await A('browser_network_state_set', { state: 'offline' });
 

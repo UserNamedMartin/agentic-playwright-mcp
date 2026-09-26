@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import path from 'node:path';
+import { linkToken, readLinkSecret } from './linktoken.js';
 import { parseArgs } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { identityHeaders } from './identity.js';
@@ -123,7 +124,8 @@ async function main() {
     }
     case 'open': {
       const profile = getProfile(requireArg(sub, 'profile'));
-      const res = await fetch(`http://127.0.0.1:${profile.port}/focus?home=1&go=1`).catch(() => undefined);
+      const token = linkToken(readLinkSecret(profile.name) ?? '', 'home');
+      const res = await fetch(`http://127.0.0.1:${profile.port}/focus?home=1&t=${token}&go=1`).catch(() => undefined);
       if (!res?.ok)
         throw new Error(`Gateway for "${profile.name}" is not running.`);
       return;
