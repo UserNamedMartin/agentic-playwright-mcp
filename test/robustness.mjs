@@ -176,6 +176,17 @@ try {
   const offline = await A('browser_evaluate', { function: '() => fetch("/x").then(() => "online", () => "offline")' }, 20);
   check('offline mode survives a dropped connection', /"offline"/.test(offline.text), offline.text);
 
+  // A web page cannot raise the browser window through the gateway's tab
+  // links (fetch, or sending the tab there).
+  await A('browser_network_state_set', { state: 'online' });
+  await A('browser_evaluate', { function: `() => { fetch('http://127.0.0.1:${gatewayPort}/focus?home=1&go=1', { mode: 'no-cors' }).catch(() => {}); return 1; }` });
+  await A('browser_evaluate', { function: `() => { location.href = 'http://127.0.0.1:${gatewayPort}/focus?home=1'; return 1; }` });
+  await sleep(1500);
+  check('a web page cannot raise the window through /focus', !/focus: showing/.test(gatewayLog) && (gatewayLog.match(/focus request refused/g) ?? []).length >= 2,
+    gatewayLog.split('\n').filter(l => /focus/.test(l)).join(' | '));
+  await A('browser_navigate', { url: url('a2') });
+  await A('browser_network_state_set', { state: 'offline' });
+
   // A chat's page at the gateway's address (a site may send it there) must
   // not become the home status tab on a restart.
   await A('browser_network_state_set', { state: 'online' });
