@@ -313,8 +313,13 @@ export class Gateway implements SessionHost {
       session.targets.forEach(id => kept.add(id));
       await session.reapplyNetworkState();
     }
-    const homeId = [...byTarget].find(([, page]) => page.url().startsWith(this.baseUrl))?.[0]
-      ?? [...byTarget.keys()].find(id => !kept.has(id));
+    // The home tab is never a chat's tab (a chat's page may well be at the
+    // gateway's address): the status page with its key, else one from
+    // before the key, else any tab no chat owns.
+    const unowned = [...byTarget].filter(([id]) => !kept.has(id));
+    const homeId = unowned.find(([, page]) => page.url() === this.statusUrl)?.[0]
+      ?? unowned.find(([, page]) => page.url().startsWith(this.baseUrl))?.[0]
+      ?? unowned[0]?.[0];
     // With --no-startup-window there may be no window yet.
     const home = homeId ? byTarget.get(homeId)! : await this.shared.newBackgroundPage(this.statusUrl, true);
     for (const [id, page] of byTarget) {

@@ -176,12 +176,29 @@ try {
   const offline = await A('browser_evaluate', { function: '() => fetch("/x").then(() => "online", () => "offline")' }, 20);
   check('offline mode survives a dropped connection', /"offline"/.test(offline.text), offline.text);
 
+  // A chat's page at the gateway's address (a site may send it there) must
+  // not become the home status tab on a restart.
+  await A('browser_network_state_set', { state: 'online' });
+  await A('browser_tabs', { action: 'new', url: url('to-gateway') });
+  await A('browser_evaluate', { function: `() => { location.href = 'http://127.0.0.1:${gatewayPort}/'; return 1; }` });
+  await sleep(1000);
+  const atGateway = await A('browser_evaluate', { function: '() => location.href' });
+  check('(setup) a chat\'s tab is at the gateway address', atGateway.text.includes(`:${gatewayPort}/`), atGateway.text.slice(0, 120));
+  await A('browser_tabs', { action: 'select', index: 0 });
+  await A('browser_network_state_set', { state: 'offline' });
+
+
   // ... and a gateway restart; routes made from code cannot be saved: told.
   await A('browser_run_code_unsafe', { code: 'async page => { await page.context().route("**/fromcode*", r => r.fulfill({ body: "CODE" })); return 1; }' });
   await sleep(1500);
   const exited = new Promise(r => gateway.on('exit', r));
   gateway.kill('SIGTERM');
   await exited;
+  // The home tab gone while the gateway was down: the only tab at the
+  // gateway's address on the next start is the chat's.
+  const home = (await (await fetch(`http://127.0.0.1:${browserPort}/json`)).json()).find(p => /\?key=/.test(p.url));
+  await fetch(`http://127.0.0.1:${browserPort}/json/close/${home?.id}`);
+  await sleep(500);
   gateway = run('start', 'test');
   gateway.stderr.on('data', d => gatewayLog += d);
   for (let i = 0; i < 150; i++) {
@@ -190,9 +207,15 @@ try {
     await sleep(200);
   }
   const A2 = await chat('chat-A');
+  const tabsAfterRestart = await A2('browser_tabs', { action: 'list' }, 30);
+  check('a chat\'s tab at the gateway address stays the chat\'s, where it was', tabsAfterRestart.text.includes(`(http://127.0.0.1:${gatewayPort}/)`) && !tabsAfterRestart.text.includes('key='), tabsAfterRestart.text.slice(0, 300));
+  const pagesAfter = await (await fetch(`http://127.0.0.1:${browserPort}/json`)).json();
+  check('the home status tab is still there', pagesAfter.some(p => /\?key=/.test(p.url)), pagesAfter.map(p => p.url).join(' '));
+  await A2('browser_tabs', { action: 'close', index: 1 });
+  await A2('browser_tabs', { action: 'select', index: 0 });
   const restarted = await A2('browser_evaluate', { function: '() => fetch("/x").then(() => "online", () => "offline")' }, 30);
   check('offline mode survives a gateway restart', /"offline"/.test(restarted.text), restarted.text);
-  check('the agent is told routes from code are gone', /### Routes/.test(restarted.text), restarted.text);
+  check('the agent is told routes from code are gone', /### Routes/.test(tabsAfterRestart.text + restarted.text), restarted.text);
   await A2('browser_network_state_set', { state: 'online' });
   const mockedAgain = await A2('browser_evaluate', { function: '() => fetch("/mocked").then(r => r.text())' });
   check('browser_route routes survive a gateway restart', mockedAgain.text.includes('MOCKED'), mockedAgain.text);
