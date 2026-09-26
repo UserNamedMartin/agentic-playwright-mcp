@@ -706,6 +706,19 @@ export class Gateway implements SessionHost {
 
   private async _handle(req: http.IncomingMessage, res: http.ServerResponse) {
     const url = new URL(req.url ?? '/', this.baseUrl);
+    // Only this machine's own clients. Any web page can send requests here,
+    // and with DNS rebinding a site's own name resolves to this address, which
+    // makes the gateway "same origin" with it; browser_run_code_unsafe runs
+    // code in this process. Browsers send that name as Host, and an Origin
+    // header with requests pages make; MCP clients send neither.
+    const port = this.options.port;
+    const localHosts = [`127.0.0.1:${port}`, `localhost:${port}`, `[::1]:${port}`, `${this.options.host ?? '127.0.0.1'}:${port}`];
+    if (!localHosts.includes(String(req.headers.host ?? '').toLowerCase()) ||
+        (url.pathname === '/mcp' && req.headers.origin !== undefined)) {
+      console.error(`refused a request for ${url.pathname} (host ${req.headers.host ?? '-'}, origin ${req.headers.origin ?? '-'})`);
+      res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' }).end('Only local MCP clients may use this address.');
+      return;
+    }
     if (url.pathname === '/mcp')
       return await this._handleMcp(req, res);
     if (url.pathname === '/focus') {

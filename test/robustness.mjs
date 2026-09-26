@@ -185,6 +185,23 @@ try {
   await sleep(1500);
   check('a web page cannot raise the window through /focus', !/focus: showing/.test(gatewayLog) && (gatewayLog.match(/focus request refused/g) ?? []).length >= 1,
     gatewayLog.split('\n').filter(l => /focus/.test(l)).join(' | '));
+  // A site the browser reaches under its own name (DNS rebinding) or a page's
+  // own request must not get an MCP session: run_code runs in the gateway.
+  const raw = headers => new Promise(resolve => {
+    const body = JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'page', version: '1' } } });
+    const req = http.request({ host: '127.0.0.1', port: gatewayPort, path: '/mcp', method: 'POST',
+      headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', ...headers } }, res => {
+      res.resume();
+      resolve(res.statusCode);
+    });
+    req.on('error', () => resolve('error'));
+    req.end(body);
+  });
+  const rebound = await raw({ host: `rebound.example:${gatewayPort}` });
+  const fromPage = await raw({ host: `127.0.0.1:${gatewayPort}`, origin: 'http://some.site' });
+  const local = await raw({ host: `127.0.0.1:${gatewayPort}` });
+  check('the gateway answers only local MCP clients (no foreign Host, no Origin)', rebound === 403 && fromPage === 403 && local === 200,
+    `rebound host: ${rebound}, page origin: ${fromPage}, local client: ${local}`);
   const link = await A('browser_tab_link', {});
   check('tab links are signed', /\/focus\?target=[0-9A-F]+&t=[0-9a-f]{32}/.test(link.text), link.text.slice(0, 200));
   const tabsNow = await A('browser_tabs', { action: 'list' });
