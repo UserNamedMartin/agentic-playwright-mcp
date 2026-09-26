@@ -56,7 +56,9 @@ Read README.md first for what the project does. This file is about changing it.
 - Tests must never put anything on the user's screen: quitting Chrome while a
   download runs shows a "Download is in progress" prompt even for a headless
   browser, so tests end their downloads and kill their own browser with
-  SIGKILL.
+  SIGKILL. `browser_annotate` opens the Playwright Dashboard (its own visible
+  browser, which outlives the gateway) and `browser_show_tab` raises the
+  window: tests do not call them.
 - Keep personal data out of the repo: no user names, paths, profile names or
   ports of a particular machine.
 

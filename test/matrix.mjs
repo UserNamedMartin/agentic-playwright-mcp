@@ -9,7 +9,8 @@
 // Self-contained and headless: its own browser, gateway, site and scratch
 // AGENTIC_PLAYWRIGHT_HOME. Prints one line per check (ok / LEAK / BROKEN /
 // note) and exits non-zero if any LEAK or BROKEN was found. browser_show_tab
-// is left out: it raises the window (see CLAUDE.md, headed profiles only).
+// and browser_annotate are left out: one raises the browser window, the other
+// opens the Playwright Dashboard for the user (see CLAUDE.md).
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import http from 'node:http';
@@ -430,10 +431,6 @@ try {
   }
   const bogus = await A.call('browser_open_tab_window', { targetId: 'NOPE' });
   expect('browser_open_tab_window', 'a failure is an error result, not a protocol error', bogus.isError && !bogus.protocolError, bogus.text, 'BROKEN');
-  const annotate = await A.call('browser_annotate', { timeout: 3 }, 3);
-  record('browser_annotate', 'gives up instead of waiting forever (headless, no user)', annotate.protocolError ? 'BROKEN' : 'ok', annotate.protocolError ? annotate.text : '');
-  expect('browser_evaluate', 'session answers after annotate', (await A.eval('() => 2')) === 2, 'session stuck', 'BROKEN');
-
   // browser_close: must close A's tabs and leave A usable.
   const C = await chat('chat-C');
   await C.call('browser_navigate', { url: `${urlA}&c=1` });
@@ -480,7 +477,7 @@ try {
 
   record('(gateway)', 'still running', gatewayExit === undefined ? 'ok' : 'BROKEN', `exit code ${gatewayExit}`);
   const all = new Set(JSON.parse(JSON.stringify((await A.client.listTools()).tools.map(t => t.name))));
-  const missed = [...all].filter(t => !covered.has(t) && !['browser_show_tab', 'browser_open_tab_window'].includes(t));
+  const missed = [...all].filter(t => !covered.has(t) && !['browser_show_tab', 'browser_annotate', 'browser_open_tab_window'].includes(t));
   record('(matrix)', 'every tool exercised', missed.length ? 'note' : 'ok', missed.join(', '));
 } catch (e) {
   record('(matrix)', 'ran to the end', 'BROKEN', e.stack);
