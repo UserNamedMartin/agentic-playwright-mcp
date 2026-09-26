@@ -20,6 +20,7 @@ process.env.AGENTIC_CLAUDE_APP_SUPPORT = path.join(home, 'claude-app');
 const dist = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..', 'dist');
 const { Gateway } = await import(path.join(dist, 'gateway.js'));
 const { TranscriptIndex } = await import(path.join(dist, 'subagents.js'));
+const { snippetListenerCount } = await import(path.join(dist, 'isolation.js'));
 const [cdpPort, gatewayPort] = [19431, 19432];
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 let failures = 0;
@@ -159,6 +160,18 @@ try {
   const network = zip ? execFileSync('unzip', ['-p', zip, 'trace.network'], { encoding: 'utf8' }) : '';
   const count = name => network.split('\n').filter(l => l.includes(`/${name}"`) || l.includes(`/${name}`)).length;
   check('each request is in the trace once', count('n1') === 1 && count('n2') === 1, `n1 ${count('n1')}×, n2 ${count('n2')}×`);
+  // Listeners a snippet leaves: a fired once listener is forgotten, and the
+  // rest go when the browser connection drops.
+  await T('browser_run_code_unsafe', { code: 'async page => { page.once("console", () => {}); page.on("console", () => {}); page.context().on("request", () => {}); await page.evaluate(() => console.log("fire")); await page.waitForTimeout(300); return 1; }' });
+  const sessionT = gateway.sessions.get('chat-T');
+  const afterFire = snippetListenerCount(sessionT);
+  check('a fired once listener is forgotten', afterFire === 2, `${afterFire} listeners kept`);
+  await gateway.shared.browser.close();
+  for (let i = 0; i < 50 && !gateway.shared?.browser?.isConnected(); i++)
+    await sleep(200);
+  await sleep(1500);
+  check('snippet listeners go when the connection drops', snippetListenerCount(sessionT) === 0, `${snippetListenerCount(sessionT)} listeners kept`);
+
   // Stopping must not slow down with the resources other chats loaded while
   // tracing (it was quadratic: 37 s at 500).
   await T('browser_start_tracing');

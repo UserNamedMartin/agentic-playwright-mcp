@@ -237,6 +237,9 @@ export class AgentSession {
   // the tabs are still open in the browser (see `targets`).
   detach() {
     const backend = this.backend;
+    // Listeners snippets left on the old connection's objects never fire
+    // again; they only hold that connection in memory.
+    removeSnippetListeners(this);
     // What lived in the old connection is gone; the agent is told.
     if (backend?._context?._video)
       this._notes.push('### Video\nThe video recording stopped: the browser connection dropped and was restored. Start it again if you still need it.');

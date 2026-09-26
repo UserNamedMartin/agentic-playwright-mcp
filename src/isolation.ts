@@ -81,6 +81,11 @@ export function removeSnippetListeners(session: object) {
     remove();
 }
 
+// For tests: how many listeners a session's snippets have left.
+export function snippetListenerCount(session: object) {
+  return leftovers.get(session)?.size ?? 0;
+}
+
 const emitterMethods = ['on', 'once', 'addListener', 'prependListener', 'prependOnceListener', 'off', 'removeListener', 'removeAllListeners', 'listeners', 'rawListeners', 'listenerCount'];
 
 export function isolatedView(context: any) {
@@ -309,9 +314,12 @@ export function isolatedView(context: any) {
         off = track(unsubscribe);
         return off;
       }
-      const handler = wrapCallback(listener);
-      (once ? page.once : page.on).call(page, event as any, handler as any);
-      return track(() => page.off(event as any, handler as any));
+      const callback = wrapCallback(listener);
+      // A once listener that fired is gone: so is its bookkeeping.
+      const handler = once ? (...args: any[]) => { remove(); callback(...args); } : callback;
+      page.on(event as any, handler as any);
+      const remove = track(() => page.off(event as any, handler as any));
+      return remove;
     };
     const events = emitter(listen, () => pageView(page));
     return wrapObject(page, {
