@@ -210,6 +210,25 @@ try {
   check('tracing starts after a failed start', /Trace recording started/.test(retry), retry.slice(0, 120));
   await T('browser_stop_tracing');
 
+  // A recorder start the browser answers only after it was given up does
+  // not leave the recorder on, nor block the next start.
+  const rawContext = gateway.shared.context;
+  const realEnable = rawContext._enableRecorder.bind(rawContext);
+  let delayed = false;
+  rawContext._enableRecorder = (...args) => {
+    if (delayed)
+      return realEnable(...args);
+    delayed = true;
+    return new Promise(r => setTimeout(r, 22000)).then(() => realEnable(...args));
+  };
+  const lateStart = await T('browser_start_recording');
+  check('a recorder start answered too late is given up', /did not answer/.test(lateStart), lateStart.slice(0, 100));
+  await sleep(4000);
+  const nextStart = await T('browser_start_recording');
+  check('the next recording starts after that', /Recording started/.test(nextStart), nextStart.slice(0, 120));
+  await T('browser_stop_recording');
+  rawContext._enableRecorder = realEnable;
+
   // A browser that never answers a trace call does not hold tracing (or the
   // session) forever.
   await T('browser_start_tracing');

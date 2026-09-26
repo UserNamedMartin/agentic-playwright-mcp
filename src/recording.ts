@@ -37,7 +37,7 @@ export const callingSession = new AsyncLocalStorage<any>();
 // recording, and a queue so that turning it on and off never overlap (a
 // chat's stop turning it off while another's start turned it on left the
 // second one recording nothing).
-type Recorder = { sessions: Map<any, string[]>; enabled: boolean; queue: Promise<unknown>; sink: any };
+type Recorder = { sessions: Map<any, string[]>; enabled: boolean; queue: Promise<unknown>; sink: any; params?: any };
 const recorders = new WeakMap<BrowserContext, Recorder>();
 
 function recorderFor(raw: BrowserContext) {
@@ -85,9 +85,21 @@ export async function startRecording(session: any, context: any, upstreamStart: 
       if (recorder.enabled || !recorder.sessions.has(session))
         return;
       const enable = raw._enableRecorder.bind(raw);
-      raw._enableRecorder = (params: any) => enable(params, recorder.sink);
+      raw._enableRecorder = (params: any) => {
+        recorder.params = params;
+        return enable(params, recorder.sink);
+      };
+      const starting = upstreamStart();
       try {
-        await bounded(upstreamStart(), 'Starting the recorder');
+        await bounded(starting, 'Starting the recorder');
+      } catch (e) {
+        // Answered after all, later: nobody is recording then, so off again.
+        starting.then(async () => {
+          context._recordedActions = undefined;
+          if (!recorder.enabled)
+            await raw._disableRecorder().catch(() => {});
+        }, () => {});
+        throw e;
       } finally {
         raw._enableRecorder = enable;
         context._recordedActions = undefined;
@@ -111,7 +123,15 @@ export async function stopRecording(session: any, context: any): Promise<string[
     if (recorder.sessions.size || !recorder.enabled)
       return;
     recorder.enabled = false;
-    await bounded(raw._disableRecorder(), 'Stopping the recorder').catch(() => {});
+    const stopping = raw._disableRecorder();
+    await bounded(stopping, 'Stopping the recorder').catch(() => {
+      // Answered after all, later: if a chat started recording meanwhile,
+      // turn it back on for it.
+      stopping.then(() => {
+        if (recorder.enabled && recorder.params)
+          void raw._enableRecorder(recorder.params, recorder.sink).catch(() => {});
+      }, () => {});
+    });
   });
   return actions.filter((code: string) => code.trim()).map(dedent);
 }
