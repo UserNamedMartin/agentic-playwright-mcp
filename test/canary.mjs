@@ -294,6 +294,18 @@ try {
   check('run_code: A\'s page.request.dispose() leaves B\'s working', /200/.test(bRequest), bRequest);
   check('run_code: clearCookies with a domain pattern leaves B\'s cookies', (await B.call('browser_evaluate', { function: '() => document.cookie' })).text.includes('b_keep'), 'B lost its cookie');
 
+  // run_code: shared recorder mode, debugger, download behavior.
+  const shared = await A.code(`async page => {
+    const out = [];
+    for (const name of ['pickLocator', 'cancelPickLocator', 'pause'])
+      out.push(await page[name]().then(() => name + ' RAN', e => /not available here/.test(e.message) ? name + ' refused' : name + ' other ' + e.message.slice(0, 40)));
+    const cdp = await page.context().newCDPSession(page);
+    for (const method of ['Page.setDownloadBehavior', 'ServiceWorker.stopAllWorkers'])
+      out.push(await cdp.send(method, method.startsWith('Page') ? { behavior: 'deny' } : {}).then(() => method + ' RAN', () => method + ' refused'));
+    return out.join(' | ');
+  }`).then(t => t.split('### Ran')[0]);
+  check('run_code: shared recorder mode, debugger and download behavior refused', (shared.match(/refused/g) ?? []).length === 5, shared);
+
   // run_code: objects handed to callbacks and option predicates.
   const handedIn = await A.code(`async page => {
     const seen = [];

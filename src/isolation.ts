@@ -41,7 +41,16 @@ const refusedObjects = new Set(['clock', 'tracing', 'debugger', 'credentials']);
 
 // DevTools commands of a CDP session on one of the session's pages that reach
 // the whole browser (other tabs, every site's cookies and storage).
-const browserWideCommands = /^(Target|Browser|Storage|SystemInfo|Extensions|Tethering|Tracing)\.|^Network\.(getAllCookies|clearBrowserCookies|clearBrowserCache)$|^Security\.setIgnoreCertificateErrors$/;
+const browserWideCommands = /^(Target|Browser|Storage|SystemInfo|Extensions|Tethering|Tracing|ServiceWorker|PWA)\.|^Network\.(getAllCookies|clearBrowserCookies|clearBrowserCache)$|^Security\.setIgnoreCertificateErrors$|^Page\.setDownloadBehavior$/;
+
+// Page members that drive something every chat shares: the recorder (locator
+// picking switches its mode for all) and the debugger (pause stops, and a
+// headed browser opens the Inspector; any chat's browser_resume ends it).
+const refusedPageMembers: Record<string, string> = {
+  pickLocator: 'the action recorder is shared by every chat; use browser_generate_locator',
+  cancelPickLocator: 'the action recorder is shared by every chat',
+  pause: 'the debugger is shared by every chat (and would open a window on the user\'s screen)',
+};
 
 function refuse(name: string): never {
   throw new Error(`context.${name} is not available here: other chats share this browser and it would reach their ` +
@@ -360,6 +369,8 @@ export function isolatedView(context: any) {
     return wrapObject(page, {
       ...events,
       ...urlMembers(page, ['goto'], args => args[0]),
+      ...Object.fromEntries(Object.entries(refusedPageMembers).map(([name, why]) => [name,
+        async () => { throw new Error(`page.${name}() is not available here: ${why}.`); }])),
       context: () => contextView(),
       request: requestView(page.request),
       clock: new Proxy({}, { get: () => () => refuse('clock') }),
