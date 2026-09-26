@@ -1,13 +1,12 @@
-// Addresses no agent's tab or request may go to: the browser's own pages
-// (chrome://history, tab search, inspect, ... list every chat's tabs, and
-// chrome://version shows the DevTools port), the DevTools HTTP endpoint
+// Addresses no agent's tab or request may go to: the DevTools HTTP endpoint
 // (/json/list lists every tab, /json/close/<id> closes one) and the
 // gateway's own pages (the status page, tab links that raise the window).
+// Nothing legitimate needs them, and they act on every chat at once.
+// The browser's own pages (chrome://...) stay open: agents know they share
+// the browser (see the skill), and may need them.
 //
 // This covers what agents do through the browser tools; any local process can
 // still reach the DevTools port directly (see README, "Things to know").
-
-const allowedAbout = new Set(['about:blank', 'about:srcdoc']);
 
 function isLoopback(hostname: string) {
   const host = hostname.replace(/^\[|\]$/g, '').replace(/\.$/, '').toLowerCase();
@@ -36,10 +35,6 @@ export function internalUrl(url: string, ports: string[]): string | undefined {
     return undefined;
   }
   const scheme = parsed.protocol;
-  if (['chrome:', 'chrome-untrusted:', 'devtools:', 'chrome-extension:', 'chrome-search:', 'edge:', 'brave:'].includes(scheme))
-    return 'the browser\'s own pages show every chat\'s tabs';
-  if (scheme === 'about:' && !allowedAbout.has(`about:${parsed.pathname}`) && !allowedAbout.has(target.split(/[?#]/)[0]))
-    return 'the browser\'s own pages show every chat\'s tabs';
   if ((scheme === 'http:' || scheme === 'https:') && isLoopback(parsed.hostname)) {
     const port = parsed.port || (scheme === 'https:' ? '443' : '80');
     if (ports.includes(port))
