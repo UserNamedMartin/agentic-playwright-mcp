@@ -237,7 +237,10 @@ the gateway created). Change the location or the retention with `filesDir` and
     `page` leads only to the session's tabs and events (`src/isolation.ts`).
     That keeps agents from reaching each other by accident; it is not a
     security boundary, since the code runs in the gateway process;
-  - the status page is for the user: agents' tabs cannot load it.
+  - the status page is for the user: it lists chats only with a key that the
+    browser's pinned home tab carries (kept in `sessions.json`); any other
+    request to the gateway's address, from an agent's tab or code, gets a
+    short note.
   `test/matrix.mjs` checks every tool across two sessions, and
   `test/canary.mjs` searches everything one chat gets for another's secret.
 - Remote debugging gives local processes full control of the profile. The ports

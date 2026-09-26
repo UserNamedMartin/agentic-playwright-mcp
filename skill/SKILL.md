@@ -146,7 +146,7 @@ the same time), and `browser_run_code_unsafe`'s `page` only leads to your own
 tabs. Tabs your pages open (links with target=_blank, window.open) are yours,
 open in the background, and arrive as `page.waitForEvent('popup')` in code.
 Your `browser_tabs` list also shows your subagents' tabs. The gateway's status
-page (its own address) is not for agents and does not load in your tabs.
+page (its own address) is not for agents: it shows you nothing.
 Routes, offline mode and device emulation survive a dropped browser connection
 and a gateway restart; you are told when a video or trace was cut off.
 
