@@ -142,18 +142,31 @@ export function isolatedView(context: any) {
   // Functions the snippet hands to Playwright (listeners, predicates, route
   // handlers) get wrapped arguments, and their results are unwrapped.
   const callbacks = new WeakMap<Function, Function>();
+  const isPlain = (value: any) => !!value && typeof value === 'object' && !Array.isArray(value) &&
+      [Object.prototype, null].includes(Object.getPrototypeOf(value));
+  // Plain objects handed to a callback (exposeBinding's source: its page,
+  // frame and context) are wrapped member by member.
+  const wrapArg = (value: any) => isPlain(value) ? Object.fromEntries(Object.entries(value).map(([k, v]) => [k, wrap(v)])) : wrap(value);
   const wrapCallback = (fn: Function) => {
     let inner = callbacks.get(fn);
     if (!inner) {
       inner = (...args: any[]) => {
-        const result = fn(...args.map(wrap));
+        const result = fn(...args.map(wrapArg));
         return result instanceof Promise ? result.then(unwrap) : unwrap(result);
       };
       callbacks.set(fn, inner);
     }
     return inner;
   };
-  const unwrapArgs = (args: any[], serializes = false) => args.map(arg => typeof arg === 'function' && !serializes ? wrapCallback(arg) : unwrap(arg));
+  // Functions in option objects ({ predicate }) are callbacks too.
+  const unwrapArg = (arg: any, serializes: boolean): any => {
+    if (typeof arg === 'function')
+      return serializes ? arg : wrapCallback(arg);
+    if (isPlain(arg))
+      return Object.fromEntries(Object.entries(arg).map(([k, v]) => [k, typeof v === 'function' && !serializes ? wrapCallback(v) : unwrap(v)]));
+    return unwrap(arg);
+  };
+  const unwrapArgs = (args: any[], serializes = false) => args.map(arg => unwrapArg(arg, serializes));
 
   const typeOf = (value: any): string | undefined => {
     if (!value || typeof value !== 'object')

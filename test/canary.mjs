@@ -183,6 +183,18 @@ try {
   }`);
   check('run_code: pages, frames, locators, handles lead only to A\'s tabs', paths.includes('who=A') && !paths.includes('who=B'), paths);
 
+  // run_code: objects handed to callbacks and option predicates.
+  const handedIn = await A.code(`async page => {
+    const seen = [];
+    await page.exposeBinding('peek', source => { seen.push('binding: ' + source.context.pages().map(p => p.url()).join(' ')); });
+    await page.evaluate(() => window.peek());
+    const request = page.waitForEvent('request', { predicate: r => { seen.push('predicate: ' + r.frame().page().context().pages().map(p => p.url()).join(' ')); return true; } });
+    await page.evaluate(() => fetch('/api?own=1'));
+    await request;
+    return seen.join(' | ');
+  }`);
+  check('run_code: callback sources and option predicates lead only to A\'s tabs', handedIn.includes('binding:') && handedIn.includes('predicate:') && !handedIn.includes('who=B'), handedIn);
+
   // run_code: context events while B is busy.
   const listening = A.code(`async page => {
     const seen = [];
