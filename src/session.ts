@@ -84,6 +84,8 @@ export type SavedNetworkState = {
   routes: any[];
   emulation: [string, Emulation][];
   lostRoutes: boolean;
+  tracing?: boolean;
+  recording?: boolean;
 };
 
 // The handler browser_route builds from its parameters (as upstream), for
@@ -492,6 +494,8 @@ export class AgentSession {
       routes: this.routes.filter(route => !route.fromCode).map(({ handler, ...params }) => params),
       emulation: [...this.emulation].filter(([id]) => this.targets.has(id)),
       lostRoutes: this.routes.some(route => route.fromCode),
+      tracing: isTracing(this),
+      recording: isRecording(this, this._shared.context),
     };
   }
 
@@ -501,6 +505,10 @@ export class AgentSession {
     this.offline = saved.offline;
     this.routes = saved.routes.map(params => ({ ...params, handler: routeHandler(params) }));
     this.emulation = new Map(saved.emulation);
+    if (saved.tracing)
+      this._notes.push('### Tracing\nTracing stopped: the browser gateway restarted. Start it again if you still need it.');
+    if (saved.recording)
+      this._notes.push('### Recording\nThe action recording stopped: the browser gateway restarted. Start it again if you still need it.');
     if (saved.lostRoutes)
       this._notes.push('### Routes\nThe browser gateway restarted: routes you added from code (browser_run_code_unsafe) are gone; routes added with browser_route, offline mode and device emulation were kept.');
   }

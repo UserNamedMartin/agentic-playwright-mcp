@@ -20,6 +20,7 @@ import { CallToolRequestSchema, ListResourcesRequestSchema, ListToolsRequestSche
 import { SharedBrowser } from './browser.js';
 import { TabGroups } from './groups.js';
 import { applyBrowserConfig } from './config.js';
+import { removeStaleTraceDirs } from './recording.js';
 import { scopeTools } from './scoped.js';
 import { type SavedNetworkState, AgentSession, defaultCallTimeoutSeconds, errorResult, type SessionHost, type SessionInfo } from './session.js';
 import { pwTools, z, verifyInternals } from './internals.js';
@@ -150,6 +151,7 @@ export class Gateway implements SessionHost {
         res.writeHead(500).end(String(e));
     }));
     await new Promise<void>(resolve => this._server!.listen(this.options.port, this.options.host ?? '127.0.0.1', resolve));
+    removeStaleTraceDirs();
     const saved = this._loadState();
     this._permissions = this._loadPermissions();
     this._ready = this._attachBounded(saved);

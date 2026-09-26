@@ -130,6 +130,21 @@ export function isTracing(session: any) {
   return tracingSessions.has(session);
 }
 
+// Temp dirs of traces left by gateway processes that are gone (a restart or
+// a crash mid-trace). Dirs of a running gateway (another profile) stay.
+export function removeStaleTraceDirs() {
+  for (const name of fs.readdirSync(os.tmpdir())) {
+    const pid = Number(name.match(/^agentic-trace-(\d+)-/)?.[1]);
+    if (!pid || pid === process.pid)
+      continue;
+    try {
+      process.kill(pid, 0);
+    } catch {
+      fs.rmSync(path.join(os.tmpdir(), name), { recursive: true, force: true });
+    }
+  }
+}
+
 // Records which session made each Playwright call while tracing runs.
 function hookCalls(raw: any, tracer: Tracer) {
   const connection = raw._connection;
@@ -169,7 +184,7 @@ export async function startTracing(session: any, context: any) {
     if (t.active.has(session))
       throw new Error('Tracing has been already started');
     if (!t.active.size) {
-      t.dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentic-trace-'));
+      t.dir = fs.mkdtempSync(path.join(os.tmpdir(), `agentic-trace-${process.pid}-`));
       t.chunks = [];
       t.unhook = hookCalls(raw, t);
       try {

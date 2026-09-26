@@ -201,6 +201,8 @@ try {
 
   // ... and a gateway restart; routes made from code cannot be saved: told.
   await A('browser_run_code_unsafe', { code: 'async page => { await page.context().route("**/fromcode*", r => r.fulfill({ body: "CODE" })); return 1; }' });
+  await A('browser_start_tracing');
+  await A('browser_start_recording');
   await sleep(1500);
   const exited = new Promise(r => gateway.on('exit', r));
   gateway.kill('SIGTERM');
@@ -227,6 +229,9 @@ try {
   const restarted = await A2('browser_evaluate', { function: '() => fetch("/x").then(() => "online", () => "offline")' }, 30);
   check('offline mode survives a gateway restart', /"offline"/.test(restarted.text), restarted.text);
   check('the agent is told routes from code are gone', /### Routes/.test(tabsAfterRestart.text + restarted.text), restarted.text);
+  check('the agent is told tracing and recording stopped with the restart', /### Tracing/.test(tabsAfterRestart.text) && /### Recording/.test(tabsAfterRestart.text), tabsAfterRestart.text.slice(-400));
+  const staleDirs = fs.readdirSync(tmp).filter(name => name.startsWith('agentic-trace-'));
+  check('no trace dir left from before the restart', staleDirs.length === 0, staleDirs.join(', '));
   await A2('browser_network_state_set', { state: 'online' });
   const mockedAgain = await A2('browser_evaluate', { function: '() => fetch("/mocked").then(r => r.text())' });
   check('browser_route routes survive a gateway restart', mockedAgain.text.includes('MOCKED'), mockedAgain.text);
