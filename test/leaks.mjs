@@ -214,6 +214,26 @@ try {
   check('tracing starts after a failed start', /Trace recording started/.test(retry), retry.slice(0, 120));
   await T('browser_stop_tracing');
 
+  // A stuck tab creation of the gateway does not hold popups' first loads.
+  gateway.shared._inFlight.add(new Promise(() => {}));
+  await T('browser_navigate', { url: `${siteUrl}/popups` });
+  await T('browser_route', { pattern: '**/popup-target*', body: 'ROUTED' });
+  const popupStart = Date.now();
+  await T('browser_evaluate', { function: '() => { window.open("/popup-target"); return 1; }' });
+  let popupText = '';
+  for (let i = 0; i < 40 && !/ROUTED|popup-target/.test(popupText); i++) {
+    await sleep(100);
+    const list = await T('browser_tabs', { action: 'list' });
+    popupText = list;
+  }
+  await T('browser_tabs', { action: 'select', index: 1 });
+  const routed = await T('browser_evaluate', { function: '() => document.body.innerText' });
+  check('a stuck tab creation does not hold a popup\'s first load', routed.includes('ROUTED') && Date.now() - popupStart < 5000, `${Date.now() - popupStart} ms ${routed.slice(0, 80)}`);
+  await T('browser_tabs', { action: 'close' });
+  await T('browser_tabs', { action: 'select', index: 0 });
+  await T('browser_unroute', {});
+  gateway.shared._inFlight.clear();
+
   // A recorder start the browser answers only after it was given up does
   // not leave the recorder on, nor block the next start.
   const rawContext = gateway.shared.context;

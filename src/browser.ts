@@ -84,8 +84,9 @@ export class SharedBrowser {
     // Tabs the gateway opens itself are no popups, whatever opener Chrome
     // reports for them (a headed Chrome gives them the active tab): wait for
     // those being made to be known.
+    // (Half a second at most: one stuck creation must not hold every popup.)
     if (this._inFlight.size)
-      await Promise.all([...this._inFlight].map(creation => creation.catch(() => {})));
+      await Promise.race([Promise.all([...this._inFlight].map(creation => creation.catch(() => {}))), new Promise(r => setTimeout(r, 500))]);
     for (let waited = 0; waited <= 500; waited += 25) {
       const now = Date.now();
       const openers = new Set<string>();
@@ -205,8 +206,10 @@ export class SharedBrowser {
   // In a headed browser Chrome records the active tab as the opener of a tab
   // created over CDP, so "has an opener" does not mean "is a popup". A page is
   // a popup only if the gateway did not create it.
+  // Tab creations under way are waited for, two seconds at most: one stuck
+  // creation must not keep every popup from being adopted.
   async isGatewayCreated(page: Page): Promise<boolean> {
-    await Promise.allSettled([...this._inFlight]);
+    await Promise.race([Promise.allSettled([...this._inFlight]), new Promise(r => setTimeout(r, 2000))]);
     return this._created.has(await this.targetId(page));
   }
 
