@@ -326,6 +326,13 @@ try {
   await A.call('browser_unroute', {});
   await B.call('browser_unroute', {});
 
+  // One chat stopping while another starts: the second still records.
+  await A.call('browser_start_recording');
+  await Promise.all([A.call('browser_stop_recording'), B.call('browser_start_recording')]);
+  await B.call('browser_click', { element: 'Go', target: '#b' });
+  const afterRace = await B.call('browser_stop_recording');
+  check('a recording started while another chat stops still records', /click/.test(afterRace.text), afterRace.text.slice(0, 200));
+
   // Recording and tracing next to each other: each gets only its own.
   const [recA, recB] = await Promise.all([A.call('browser_start_recording'), B.call('browser_start_recording')]);
   check('two chats can record at once', !recA.isError && !recB.isError, recA.text + ' / ' + recB.text);

@@ -19,14 +19,43 @@ export const callingSession = new AsyncLocalStorage<any>();
 
 // --- Recorder
 
-type Recorder = { sessions: Map<any, string[]>; enabling: Promise<void> | undefined };
+// One recorder per browser context: whether it is on, the sessions
+// recording, and a queue so that turning it on and off never overlap (a
+// chat's stop turning it off while another's start turned it on left the
+// second one recording nothing).
+type Recorder = { sessions: Map<any, string[]>; enabled: boolean; queue: Promise<unknown>; sink: any };
 const recorders = new WeakMap<BrowserContext, Recorder>();
 
 function recorderFor(raw: BrowserContext) {
   let recorder = recorders.get(raw);
-  if (!recorder)
-    recorders.set(raw, recorder = { sessions: new Map(), enabling: undefined });
+  if (!recorder) {
+    const sessions = new Map<any, string[]>();
+    const listOf = (page: Page) => {
+      const owner = [...sessions.keys()].find(s => s.owned.has(page) || s.owned.has(s.openers.get(page)));
+      return owner && sessions.get(owner);
+    };
+    const sink = {
+      actionAdded: (page: Page, _action: unknown, code: string) => listOf(page)?.push(code),
+      actionUpdated: (page: Page, _action: unknown, code: string) => {
+        const list = listOf(page);
+        if (list)
+          list.length ? list[list.length - 1] = code : list.push(code);
+      },
+      signalAdded: (page: Page, _signal: unknown, code: string) => {
+        const list = listOf(page);
+        if (list?.length && code)
+          list[list.length - 1] = code;
+      },
+    };
+    recorders.set(raw, recorder = { sessions, enabled: false, queue: Promise.resolve(), sink });
+  }
   return recorder;
+}
+
+function inQueue<T>(recorder: Recorder, op: () => Promise<T>): Promise<T> {
+  const run = recorder.queue.then(op);
+  recorder.queue = run.catch(() => {});
+  return run;
 }
 
 // `upstreamStart` is the stock Context.startRecording: it picks the codegen
@@ -37,35 +66,22 @@ export async function startRecording(session: any, context: any, upstreamStart: 
   if (recorder.sessions.has(session))
     throw new Error('Recording is already in progress.');
   recorder.sessions.set(session, []);
-  const ownerOf = (page: Page) => [...recorder.sessions.keys()].find(s => s.owned.has(page) || s.owned.has(s.openers.get(page)));
-  const sink = {
-    actionAdded: (page: Page, _action: unknown, code: string) => ownerOf(page) && recorder.sessions.get(ownerOf(page))!.push(code),
-    actionUpdated: (page: Page, _action: unknown, code: string) => {
-      const list = ownerOf(page) && recorder.sessions.get(ownerOf(page));
-      if (list)
-        list.length ? list[list.length - 1] = code : list.push(code);
-    },
-    signalAdded: (page: Page, _signal: unknown, code: string) => {
-      const list = ownerOf(page) && recorder.sessions.get(ownerOf(page));
-      if (list?.length && code)
-        list[list.length - 1] = code;
-    },
-  };
-  recorder.enabling ??= (async () => {
-    const enable = raw._enableRecorder.bind(raw);
-    raw._enableRecorder = (params: any) => enable(params, sink);
-    try {
-      await upstreamStart();
-    } finally {
-      raw._enableRecorder = enable;
-      context._recordedActions = undefined;
-    }
-  })();
   try {
-    await recorder.enabling;
+    await inQueue(recorder, async () => {
+      if (recorder.enabled || !recorder.sessions.has(session))
+        return;
+      const enable = raw._enableRecorder.bind(raw);
+      raw._enableRecorder = (params: any) => enable(params, recorder.sink);
+      try {
+        await upstreamStart();
+      } finally {
+        raw._enableRecorder = enable;
+        context._recordedActions = undefined;
+      }
+      recorder.enabled = true;
+    });
   } catch (e) {
     recorder.sessions.delete(session);
-    recorder.enabling = undefined;
     throw e;
   }
 }
@@ -77,10 +93,12 @@ export async function stopRecording(session: any, context: any): Promise<string[
   if (!recorder || !actions)
     return undefined;
   recorder.sessions.delete(session);
-  if (!recorder.sessions.size) {
-    recorder.enabling = undefined;
+  await inQueue(recorder, async () => {
+    if (recorder.sessions.size || !recorder.enabled)
+      return;
+    recorder.enabled = false;
     await raw._disableRecorder().catch(() => {});
-  }
+  });
   return actions.filter((code: string) => code.trim()).map(dedent);
 }
 
