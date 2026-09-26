@@ -172,8 +172,18 @@ export async function startTracing(session: any, context: any) {
       t.dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentic-trace-'));
       t.chunks = [];
       t.unhook = hookCalls(raw, t);
-      await raw.tracing.start({ screenshots: true, snapshots: true });
-      await raw.tracing.startChunk();
+      try {
+        await raw.tracing.start({ screenshots: true, snapshots: true });
+        await raw.tracing.startChunk();
+      } catch (e) {
+        // Nothing may stay half on: the next start would find "already
+        // started", a second hook, another temp dir.
+        await raw.tracing.stop().catch(() => {});
+        t.unhook();
+        t.unhook = () => {};
+        fs.rmSync(t.dir, { recursive: true, force: true });
+        throw e;
+      }
     } else {
       await cutChunk(raw, t, true);
     }

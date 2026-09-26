@@ -17,6 +17,8 @@ const executable = process.argv[2] ?? '/Applications/Google Chrome.app/Contents/
 const home = fs.mkdtempSync(path.join(os.tmpdir(), 'apm-leaks-'));
 process.env.AGENTIC_PLAYWRIGHT_HOME = home;
 process.env.AGENTIC_CLAUDE_APP_SUPPORT = path.join(home, 'claude-app');
+process.env.TMPDIR = path.join(home, 'tmp');
+fs.mkdirSync(process.env.TMPDIR);
 const dist = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..', 'dist');
 const { Gateway } = await import(path.join(dist, 'gateway.js'));
 const { TranscriptIndex } = await import(path.join(dist, 'subagents.js'));
@@ -171,6 +173,17 @@ try {
     await sleep(200);
   await sleep(1500);
   check('snippet listeners go when the connection drops', snippetListenerCount(sessionT) === 0, `${snippetListenerCount(sessionT)} listeners kept`);
+
+  // A trace whose start fails leaves nothing half on.
+  const tracing = gateway.shared.context.tracing;
+  const startChunk = tracing.startChunk.bind(tracing);
+  tracing.startChunk = async () => { tracing.startChunk = startChunk; throw new Error('simulated failure'); };
+  const failed = await T('browser_start_tracing');
+  const leftDirs = () => fs.readdirSync(process.env.TMPDIR).filter(n => n.startsWith('agentic-trace-'));
+  check('a failed trace start leaves no temp dir', /simulated failure/.test(failed) && leftDirs().length === 0, `${failed.slice(0, 80)} / ${leftDirs().join(', ')}`);
+  const retry = await T('browser_start_tracing');
+  check('tracing starts after a failed start', /Trace recording started/.test(retry), retry.slice(0, 120));
+  await T('browser_stop_tracing');
 
   // Stopping must not slow down with the resources other chats loaded while
   // tracing (it was quadratic: 37 s at 500).
