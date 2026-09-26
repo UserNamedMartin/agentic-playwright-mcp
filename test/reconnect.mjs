@@ -54,9 +54,11 @@ await new Promise(r => proxy.listen(proxyPort, '127.0.0.1', r));
 const dropConnections = () => sockets.forEach(s => s.destroy());
 
 // A test site: a page with a target=_blank link.
+// /autoclick clicks that link from its own script, as popunder ads do.
 const site = (await import('node:http')).createServer((req, res) => {
   res.writeHead(200, { 'content-type': 'text/html' });
-  res.end(`<title>${req.url}</title><a id=out href="/opened-from-link" target=_blank>open</a><p>${req.url}</p>`);
+  const autoclick = req.url === '/autoclick' ? `<script>for (let i = 0; i < 3; i++) document.getElementById('out').click();</script>` : '';
+  res.end(`<title>${req.url}</title><a id=out href="/opened-from-link" target=_blank>open</a><p>${req.url}</p>${autoclick}`);
 });
 await new Promise(r => site.listen(0, '127.0.0.1', r));
 const siteUrl = `http://127.0.0.1:${site.address().port}`;
@@ -201,6 +203,19 @@ try {
   const state = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
   const saved = state.sessions.find(s => s.info.id === 'chat-a');
   check('closed tab removed from saved state', saved?.targets.length === afterRestart.length - 1, `${saved?.targets.length}`);
+
+  // A page's own script clicking target=_blank links opens nothing without a
+  // user action, as in any Chrome (the agent's clicks still do, see above).
+  const beforeAuto = tabIds(await a2.call('browser_tabs', { action: 'list' })).length;
+  await a2.call('browser_tabs', { action: 'new', url: `${siteUrl}/autoclick` });
+  await sleep(1500);
+  const afterAuto = tabIds(await a2.call('browser_tabs', { action: 'list' })).length;
+  check('a page\'s own script cannot open tabs through links', afterAuto === beforeAuto + 1, `${afterAuto - beforeAuto - 1} extra tab(s)`);
+  // The agent's own evaluate counts as a user action: its click still opens a background tab.
+  await a2.call('browser_evaluate', { function: '() => { document.getElementById("out").click(); return 1; }' });
+  await sleep(1500);
+  const afterAgent = tabIds(await a2.call('browser_tabs', { action: 'list' })).length;
+  check('a link the agent clicks from evaluate still opens a background tab', afterAgent === afterAuto + 1, `${afterAgent - afterAuto} new tab(s)`);
 } catch (e) {
   failures++;
   console.log(`FAIL ${e.stack}`);
