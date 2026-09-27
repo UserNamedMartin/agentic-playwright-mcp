@@ -46,7 +46,9 @@ Read README.md first for what the project does. This file is about changing it.
 - `src/launcher.ts`, `supervisor.ts`, `service.ts`, `profiles.ts`,
   `urlhandler.ts`, `macos.ts` — running profiles on the machine.
 - `extension/` — companion extension (tab groups, duplicating tabs for forked
-  chats), loaded over CDP.
+  chats, muting tabs while the browser is out of sight), loaded over CDP.
+  Bump `self.apmVersion` (and `extensionVersion` in groups.ts) when it
+  changes: the gateway reloads an older copy it finds running.
 - `skill/SKILL.md` — the agent skill users install; keep it in sync with
   behavior changes.
 

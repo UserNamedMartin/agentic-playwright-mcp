@@ -51,7 +51,9 @@ Stock Playwright MCP is built for one agent at a time:
 - **Quiet**: the browser starts without a window and stays out of sight
   (minimized and hidden, so no window thumbnail in the Dock); tabs open in the
   background; links that open new tabs become background tabs. Minimizing the
-  window hides the browser; closing it gets a fresh hidden window.
+  window hides the browser; closing it gets a fresh hidden window. Its tabs
+  are muted while you cannot see it (pages do not notice) and play sound again
+  when the window is in front.
 - **Tab links**: `browser_tab_link` gives the agent a link to put in the chat;
   clicking it opens the window on that tab (for logins, captchas, review).
 - **Tabs survive hiccups**: when the connection to the browser drops (macOS
