@@ -55,6 +55,8 @@ export class CdpProxy {
   private _wss = new wsServer({ noServer: true, perMessageDeflate: false, maxPayload: 1024 * 1024 * 1024 });
   // Download guid -> session key, and where the browser saves downloads.
   private _downloads = new Map<string, string>();
+  // Download guid -> the owner lookup started by its downloadWillBegin.
+  private _downloadLookups = new Map<string, Promise<string | undefined>>();
   readonly downloadsDir: string;
   private _socketPath: string;
 
@@ -130,22 +132,26 @@ export class CdpProxy {
   }
 
   // SharedBrowser: download events go to the session whose page downloads.
+  // Finding the owner can take a round trip to the browser, and a small file
+  // finishes meanwhile: every event of a download waits for the same lookup,
+  // so they reach the session in order (a lost "completed" leaves the file in
+  // the gateway's folder and the session's Playwright waiting for it forever).
   async onDownloadEvent(message: CdpMessage) {
     const { method, params } = message;
-    if (method === 'Browser.downloadWillBegin') {
-      const owner = await this._frameOwner(params.frameId);
-      if (!owner)
-        return;
-      this._downloads.set(params.guid, owner);
-      this._clients.get(owner)?.onDownloadEvent(message);
+    if (method === 'Browser.downloadWillBegin')
+      this._downloadLookups.set(params.guid, this._frameOwner(params.frameId).catch(() => undefined));
+    const lookup = this._downloadLookups.get(params.guid);
+    if (!lookup)
       return;
-    }
-    const owner = this._downloads.get(params.guid);
-    if (!owner)
-      return;
-    if (params.state !== 'inProgress')
+    const owner = await lookup;
+    if (method === 'Browser.downloadProgress' && params.state !== 'inProgress') {
+      this._downloadLookups.delete(params.guid);
       this._downloads.delete(params.guid);
-    this._clients.get(owner)?.onDownloadEvent(message);
+    } else if (owner && method === 'Browser.downloadWillBegin') {
+      this._downloads.set(params.guid, owner);
+    }
+    if (owner)
+      this._clients.get(owner)?.onDownloadEvent(message);
   }
 
   // A main frame's id is its tab's target id; other frames are looked up in

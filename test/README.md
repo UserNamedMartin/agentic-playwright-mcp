@@ -4,7 +4,7 @@ Two kinds of scripts:
 
 - self-contained pass/fail tests (`canary`, `matrix`, `robustness`,
   `reconnect-stall`, `leaks`, `config`, `hangs`, `reconnect`, `permissions`,
-  `passkeys`, `forks`, `headed`): each starts its own browser, gateway and scratch
+  `passkeys`, `forks`, `downloads`, `headed`): each starts its own browser, gateway and scratch
   `AGENTIC_PLAYWRIGHT_HOME`, prints one line per check and exits non-zero on
   failure. All but `headed` are headless; `headed` shows a window (macOS).
 - scripts used while developing the gateway: they talk to a running gateway
@@ -27,6 +27,7 @@ node dist/cli.js start test
 | `hangs.mjs [browser]` | self-contained, pass/fail: a cancelled call and a call past its timeout free the session queue at once; a raised `timeout` is honored; a call that waited behind another says so |
 | `matrix.mjs [browser]` | self-contained, pass/fail: every tool across two sessions — works at all, does not reach the other session, leaves nothing behind when its chat ends |
 | `canary.mjs [browser]` | self-contained, pass/fail: chat B's pages carry a secret; chat A tries every known way to see or touch B (tools, run_code's context, raw CDP sessions, events, cookies, status page, internal addresses by every path, recorder, tracing) and every text and file A gets is searched for it; no call leaves a tab that is not A's; A's own popups, new pages and first-load routes work |
+| `downloads.mjs [browser]` | self-contained, pass/fail: small downloads that finish at once reach their chat from the main frame and from an iframe, with other chats' tabs open; nothing stays in the gateway's download folder |
 | `robustness.mjs [browser]` | self-contained, pass/fail: one session's failed download, stuck page, busy loop in code or given-up call does not reach the others; the gateway survives the browser connection dropping during a download; only local MCP clients get a session |
 | `reconnect-stall.mjs [browser]` | self-contained, pass/fail: a reconnect attempt whose setup the browser never answers is given up and retried; waiting calls get answered (about a minute) |
 | `leaks.mjs [browser]` | self-contained, pass/fail (gateway in-process): a 120 MB transcript is read without blocking the process, remembered tool calls are bounded; closed tabs, ended chats' proxy clients, connections, tabs and title files are forgotten; a tab created as its chat ends is closed |
