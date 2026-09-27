@@ -188,7 +188,7 @@ export class Gateway implements SessionHost, ProxyHost {
     this._socketPath = path.join(os.tmpdir(), `agentic-playwright-${process.pid}.sock`);
     fs.rmSync(this._socketPath, { force: true });
     this.proxy = new CdpProxy(this, this._socketPath, downloadsDir);
-    this._ipcServer = http.createServer((req, res) => res.writeHead(404).end());
+    this._ipcServer = http.createServer((_req, res) => res.writeHead(404).end());
     this._ipcServer.on('upgrade', (req, socket, head) => {
       if (!this.proxy.handleUpgrade(req, socket, head))
         socket.destroy();
@@ -368,7 +368,7 @@ export class Gateway implements SessionHost, ProxyHost {
       if (session?.started)
         continue;
       if (!session) {
-        session = new AgentSession(entry.info, this, this._config, this._tools, this._retentionDays);
+        session = new AgentSession(entry.info, this, this._config, this._retentionDays);
         this.sessions.set(entry.info.id, session);
       }
       session.filesDir = entry.filesDir;
@@ -845,7 +845,7 @@ export class Gateway implements SessionHost, ProxyHost {
     }
     // Nothing is created in the browser or on disk until the chat actually
     // uses the browser (AgentSession.start).
-    session = new AgentSession(info, this, this._config, this._tools, this._retentionDays);
+    session = new AgentSession(info, this, this._config, this._retentionDays);
     this.sessions.set(info.id, session);
     return session;
   }
@@ -951,7 +951,7 @@ export class Gateway implements SessionHost, ProxyHost {
     let sub = this.sessions.get(id);
     if (!sub) {
       const info: SessionInfo = { id, title: `${session.info.title} · ${caller.description}`.slice(0, 60), label: caller.description, pid: session.info.pid, cwd: session.info.cwd };
-      sub = new AgentSession(info, this, this._config, this._tools, this._retentionDays);
+      sub = new AgentSession(info, this, this._config, this._retentionDays);
       this.sessions.set(id, sub);
     }
     return sub;
@@ -1021,7 +1021,7 @@ export class Gateway implements SessionHost, ProxyHost {
       pid: parent.info.pid,
       cwd: parent.info.cwd,
     };
-    this.sessions.set(info.id, new AgentSession(info, this, this._config, this._tools, this._retentionDays));
+    this.sessions.set(info.id, new AgentSession(info, this, this._config, this._retentionDays));
     return { content: [{ type: 'text', text: `Your agent id is "${handle}". Pass "agent": "${handle}" in every browser call; ` +
       'your tabs live in their own tab group and other agents cannot see them.' }] };
   }

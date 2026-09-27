@@ -168,7 +168,7 @@ export class AgentSession {
   private _lastId = 0;
   private _idleTimer: NodeJS.Timeout | undefined;
 
-  constructor(info: SessionInfo, host: SessionHost, config: any, _tools: any[], retentionDays = 7) {
+  constructor(info: SessionInfo, host: SessionHost, config: any, retentionDays = 7) {
     this.info = info;
     this._host = host;
     this._retentionDays = retentionDays;

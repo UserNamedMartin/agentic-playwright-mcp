@@ -191,7 +191,7 @@ try {
   await A('browser_network_state_set', { state: 'online' });
   await A('browser_evaluate', { function: `() => { fetch('http://127.0.0.1:${gatewayPort}/focus?home=1&go=1', { mode: 'no-cors' }).catch(() => {}); return 1; }` });
   await A('browser_evaluate', { function: `() => { location.href = 'http://127.0.0.1:${gatewayPort}/focus?home=1'; return 1; }` });
-  await A('browser_evaluate', { function: `() => { window.__agenticOpenInBackground('http://127.0.0.1:${gatewayPort}/focus?home=1&go=1'); return 1; }` });
+  await A('browser_evaluate', { function: `() => { window.__agenticBridge.call('open', 'http://127.0.0.1:${gatewayPort}/focus?home=1&go=1'); return 1; }` });
   await sleep(1500);
   check('a web page cannot raise the window through /focus', !/focus: showing/.test(gatewayLog) && (gatewayLog.match(/focus request refused/g) ?? []).length >= 1,
     gatewayLog.split('\n').filter(l => /focus/.test(l)).join(' | '));
