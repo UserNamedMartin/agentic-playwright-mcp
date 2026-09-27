@@ -398,19 +398,25 @@ export class SharedBrowser {
       await this.cdp.send('Page.navigate', { url, ...(referrer ? { referrer } : {}) }, session);
   }
 
-  // The frame tree of a tab (to tell which tab a download's frame is in).
+  // Every frame of a tab (to tell which tab a download's frame is in): its
+  // own frame tree, and those of its out-of-process frames (a cross-site
+  // iframe has a session of its own and is missing from the tab's tree).
   async frameIds(targetId: string): Promise<string[]> {
-    const session = this._targets.get(targetId)?.session;
-    if (!session)
+    const page = this._targets.get(targetId)?.session;
+    if (!page)
       return [];
-    const { frameTree } = await this.cdp.send('Page.getFrameTree', {}, session, 5000);
+    const sessions = [page, ...[...this._sessionPage].filter(([session, owner]) => owner === targetId && session !== page).map(([session]) => session)];
     const ids: string[] = [];
     const visit = (node: any) => {
       ids.push(node.frame.id);
       for (const child of node.childFrames ?? [])
         visit(child);
     };
-    visit(frameTree);
+    await Promise.all(sessions.map(async session => {
+      const { frameTree } = await this.cdp.send('Page.getFrameTree', {}, session, 5000).catch(() => ({ frameTree: undefined }));
+      if (frameTree)
+        visit(frameTree);
+    }));
     return ids;
   }
 

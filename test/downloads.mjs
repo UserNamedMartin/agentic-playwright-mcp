@@ -95,6 +95,7 @@ try {
   const where = {
     'main frame': `page.locator('#dl')`,
     'same-site iframe': `page.frameLocator('#same').locator('#dl')`,
+    'cross-site iframe': `page.frameLocator('#cross').locator('#dl')`,
   };
   for (const [label, locator] of Object.entries(where)) {
     let saved = 0, stuck = 0, hung = 0;
