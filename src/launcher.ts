@@ -41,10 +41,35 @@ export function browserArgs(profile: Profile) {
   ];
 }
 
+// Where the browser saves a download when nobody told it otherwise. The
+// gateway sends every download to its own folder, but Chrome falls back to
+// its default whenever another DevTools client that set a download folder
+// disconnects (a script, a test's viewer): that must never be the user's
+// Downloads folder. Set in the profile's preferences before Chrome starts.
+export function downloadFallbackDir(profile: Profile) {
+  return path.join(path.dirname(profile.userDataDir), 'browser-downloads');
+}
+
+function setDownloadFallback(profile: Profile) {
+  const file = path.join(profile.userDataDir, 'Default', 'Preferences');
+  let prefs: any = {};
+  try {
+    prefs = JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch {}
+  const dir = downloadFallbackDir(profile);
+  if (prefs.download?.default_directory === dir && prefs.download?.prompt_for_download === false)
+    return;
+  prefs.download = { ...prefs.download, default_directory: dir, prompt_for_download: false };
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(file, JSON.stringify(prefs));
+}
+
 export async function startBrowser(profile: Profile) {
   if (await isBrowserUp(profile))
     return;
   fs.mkdirSync(profile.userDataDir, { recursive: true });
+  setDownloadFallback(profile);
   const args = browserArgs(profile);
   const appBundle = macAppBundle(profile.executablePath);
   const frontmost = appBundle && !profile.headless ? frontmostPid() : undefined;

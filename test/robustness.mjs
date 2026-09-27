@@ -52,6 +52,10 @@ await new Promise(r => site.on('listening', r));
 const url = p => `http://127.0.0.1:${site.address().port}/${p}`;
 
 // The browser is started by the test, so the proxy can sit in front of it.
+// Downloads the test browser saves by itself stay in the scratch home, never
+// in the user's Downloads folder.
+fs.mkdirSync(path.join(home, 'browser-data', 'Default'), { recursive: true });
+fs.writeFileSync(path.join(home, 'browser-data', 'Default', 'Preferences'), JSON.stringify({ download: { default_directory: path.join(home, 'browser-downloads'), prompt_for_download: false } }));
 const browser = spawn(executable, [`--remote-debugging-port=${browserPort}`, `--user-data-dir=${path.join(home, 'browser-data')}`,
   '--enable-unsafe-extension-debugging', '--no-first-run', '--no-default-browser-check', '--headless=new', 'about:blank'], { stdio: 'ignore' });
 const sockets = new Set();

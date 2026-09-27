@@ -88,6 +88,10 @@ const check = (name, ok, detail = '') => {
 }
 
 // --- The gateway's own bookkeeping.
+// Downloads the test browser saves by itself stay in the scratch home, never
+// in the user's Downloads folder.
+fs.mkdirSync(path.join(home, 'browser-data', 'Default'), { recursive: true });
+fs.writeFileSync(path.join(home, 'browser-data', 'Default', 'Preferences'), JSON.stringify({ download: { default_directory: path.join(home, 'browser-downloads'), prompt_for_download: false } }));
 const browser = spawn(executable, [`--remote-debugging-port=${cdpPort}`, `--user-data-dir=${path.join(home, 'browser-data')}`,
   '--no-first-run', '--no-default-browser-check', '--headless=new', 'about:blank'], { stdio: 'ignore' });
 for (let i = 0; i < 50; i++) {

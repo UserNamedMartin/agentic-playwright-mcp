@@ -29,6 +29,10 @@ const check = (name, ok, detail = '') => {
   console.log(`${ok ? 'ok  ' : 'FAIL'} ${name}${detail ? ` — ${detail}` : ''}`);
 };
 
+// Downloads the test browser saves by itself stay in the scratch home, never
+// in the user's Downloads folder.
+fs.mkdirSync(path.join(home, 'browser-data', 'Default'), { recursive: true });
+fs.writeFileSync(path.join(home, 'browser-data', 'Default', 'Preferences'), JSON.stringify({ download: { default_directory: path.join(home, 'browser-downloads'), prompt_for_download: false } }));
 // Browser, headless, on its own port.
 const browserProc = spawn(executable, [
   `--remote-debugging-port=${browserPort}`, `--user-data-dir=${path.join(home, 'browser-data')}`,

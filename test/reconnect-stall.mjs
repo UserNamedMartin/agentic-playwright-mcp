@@ -37,6 +37,10 @@ const site = http.createServer((req, res) => {
 }).listen(0, '127.0.0.1');
 await new Promise(r => site.on('listening', r));
 
+// Downloads the test browser saves by itself stay in the scratch home, never
+// in the user's Downloads folder.
+fs.mkdirSync(path.join(home, 'browser-data', 'Default'), { recursive: true });
+fs.writeFileSync(path.join(home, 'browser-data', 'Default', 'Preferences'), JSON.stringify({ download: { default_directory: path.join(home, 'browser-downloads'), prompt_for_download: false } }));
 const browser = spawn(executable, [`--remote-debugging-port=${browserPort}`, `--user-data-dir=${path.join(home, 'browser-data')}`,
   '--enable-unsafe-extension-debugging', '--no-first-run', '--no-default-browser-check', '--headless=new', 'about:blank'], { stdio: 'ignore' });
 for (let i = 0; i < 50; i++) {
