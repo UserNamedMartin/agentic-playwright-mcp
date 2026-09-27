@@ -104,6 +104,11 @@ Read README.md first for what the project does. This file is about changing it.
   SIGKILL. `browser_annotate` opens the Playwright Dashboard (its own visible
   browser, which outlives the gateway) and `browser_show_tab` raises the
   window: tests do not call them.
+- Tests must not write into the user's folders: a test that starts its own
+  browser gives it a default download folder in its scratch home (Chrome
+  falls back to it whenever a DevTools client that set a download folder
+  disconnects; without it, test downloads landed in the user's Downloads).
+  Profiles started by the launcher get `browser-downloads` next to their data.
 - Keep personal data out of the repo: no user names, paths, profile names or
   ports of a particular machine.
 

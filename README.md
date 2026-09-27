@@ -256,6 +256,9 @@ the gateway created). Change the location or the retention with `filesDir` and
   runs; a thread idle for 10 minutes is ended and started again on the chat's
   next call (about half a second), with its tabs, routes, offline mode and
   device emulation. Recordings, traces and videos keep their thread running.
+- Downloads go to the chat's files folder. Anything the browser saves on its
+  own (a download you start in the window yourself) goes to
+  `profiles/<name>/browser-downloads`, never to your Downloads folder.
 - `playwright-core` is pinned to an exact version because the gateway relies on
   internal parts of it; startup fails loudly if they change.
 - A page's own `window.open()` (typically a sign-in popup) can still show the
