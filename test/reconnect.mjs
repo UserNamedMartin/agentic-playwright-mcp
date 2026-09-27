@@ -107,18 +107,20 @@ const connect = async (id, title, extra = {}) => {
 };
 const tabIds = text => [...text.matchAll(/^- \d+: ([0-9A-F]{8})/gm)].map(m => m[1]);
 
-const groupTitles = async () => {
+// Runs a function in the companion extension's service worker.
+const inExtension = async (fn, arg) => {
   const browser = await chromium.connectOverCDP(`http://127.0.0.1:${browserPort}`);
   try {
     for (const worker of browser.contexts()[0].serviceWorkers()) {
       if (await worker.evaluate(() => typeof self.apmPing === 'function').catch(() => false))
-        return await worker.evaluate(async () => (await chrome.tabGroups.query({})).map(g => g.title).sort());
+        return await worker.evaluate(fn, arg);
     }
-    return [];
+    return undefined;
   } finally {
     await browser.close();
   }
 };
+const groupTitles = async () => await inExtension(async () => (await chrome.tabGroups.query({})).map(g => g.title).sort()) ?? [];
 
 try {
   // A chat connects but does not use the browser: nothing is created.
@@ -182,7 +184,10 @@ try {
   check('action cut off by a drop says so', evaluated.includes('connection to the browser dropped'), evaluated.split('\n')[1]?.slice(0, 80));
 
   // Restart the gateway (service restart = SIGTERM): the browser and tabs stay.
+  // The browser still runs an older copy of the extension (as after an
+  // update): the new gateway reloads it and finds the groups again.
   const beforeRestart = tabIds(withLink);
+  await inExtension(() => { self.apmVersion = 1; });
   const stateFile = path.join(home, 'profiles', 'test', 'sessions.json');
   gateway.kill('SIGTERM');
   await new Promise(r => gateway.on('exit', r));
@@ -196,8 +201,11 @@ try {
   });
   const afterRestart = tabIds(await a2.call('browser_tabs', { action: 'list' }));
   check('tabs kept after a gateway restart', afterRestart.join() === beforeRestart.join(), afterRestart.join(' '));
+  const versionNow = await inExtension(() => self.apmVersion);
+  check('an older extension is reloaded', versionNow === 2, `extension version ${versionNow}`);
   // The chat connected while the gateway was still starting: a new tab of it
-  // joins its group under its own title, not the client's fallback.
+  // joins its group (found again by its tabs after the reload) under its own
+  // title, not the client's fallback.
   const groupsBeforeNewTab = await groupTitles();
   await a2.call('browser_tabs', { action: 'new', url: `${siteUrl}/after-restart` });
   await sleep(500);

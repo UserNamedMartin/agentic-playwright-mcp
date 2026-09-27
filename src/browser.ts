@@ -425,6 +425,11 @@ export class SharedBrowser {
     return result.value as T;
   }
 
+  // The extension was reloaded: look for its new service worker.
+  forgetExtension() {
+    this._extensionSession = undefined;
+  }
+
   private async _extensionWorker(): Promise<string | undefined> {
     if (this._extensionSession)
       return this._extensionSession;

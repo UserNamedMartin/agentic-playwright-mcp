@@ -10,6 +10,8 @@ import type { AgentSession } from './session.js';
 export const extensionDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'extension');
 
 const colors = ['blue', 'green', 'purple', 'orange', 'cyan', 'pink', 'yellow', 'red', 'grey'];
+// self.apmVersion of the extension in extension/sw.js.
+const extensionVersion = 2;
 
 export class TabGroups {
   private _shared: SharedBrowser;
@@ -21,8 +23,15 @@ export class TabGroups {
   }
 
   async init(): Promise<boolean> {
-    if (await this._ping())
-      return true;
+    if (await this._ping()) {
+      if (await this._shared.extensionEvaluate<number>('self.apmVersion || 1').catch(() => 1) >= extensionVersion)
+        return true;
+      // An older copy of the extension still runs (the browser was started
+      // before an update): loading it again reloads it from disk. Its stored
+      // groups are gone then; a session's group is found again by its tabs.
+      console.error('reloading the companion extension (an older version was running)');
+      this._shared.forgetExtension();
+    }
     try {
       await this._shared.cdp.send('Extensions.loadUnpacked', { path: extensionDir });
     } catch (e) {
@@ -56,7 +65,8 @@ export class TabGroups {
   }
 
   async addTarget(session: AgentSession, targetId: string) {
-    await this._call('apmAddToGroup', targetId, session.info.id, session.info.title, this.colorFor(session));
+    const siblings = [...session.targets].filter(id => id !== targetId);
+    await this._call('apmAddToGroup', targetId, session.info.id, session.info.title, this.colorFor(session), siblings);
   }
 
   // Duplicates a tab (see apmDuplicateTarget); resolves to the new target id.

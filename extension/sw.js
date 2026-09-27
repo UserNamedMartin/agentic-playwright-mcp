@@ -33,10 +33,19 @@ function serialized(fn) {
 }
 
 // Adds the tab to the session's group, creating the group on first use.
-self.apmAddToGroup = serialized(async (targetId, sessionKey, title, color) => {
+// `siblings` are the session's other tabs: when the stored group is unknown
+// (the extension was reloaded), their group is the session's.
+self.apmAddToGroup = serialized(async (targetId, sessionKey, title, color, siblings = []) => {
   const tabId = await tabIdForTarget(targetId);
   const groups = await loadGroups();
   let groupId = await existingGroup(groups[sessionKey]);
+  for (const sibling of groupId === undefined ? siblings : []) {
+    const tab = await tabIdForTarget(sibling).then(id => chrome.tabs.get(id), () => undefined);
+    if (tab && tab.groupId !== undefined && tab.groupId !== -1) {
+      groupId = tab.groupId;
+      break;
+    }
+  }
   groupId = await chrome.tabs.group(groupId === undefined ? { tabIds: [tabId] } : { tabIds: [tabId], groupId });
   await chrome.tabGroups.update(groupId, { title, color, collapsed: false });
   groups[sessionKey] = groupId;
@@ -78,3 +87,6 @@ self.apmPinTarget = async targetId => {
 };
 
 self.apmPing = () => 'ok';
+// What this version of the extension can do: the gateway reloads an older
+// one it finds still running.
+self.apmVersion = 2;
