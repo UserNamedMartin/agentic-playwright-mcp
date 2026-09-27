@@ -250,6 +250,9 @@ export class Gateway implements SessionHost, ProxyHost {
       isOwnerAlive: owner => !!this.sessions.get(owner) && !this.sessions.get(owner)!.disposed,
       onDownloadEvent: message => void this.proxy.onDownloadEvent(message).catch(() => {}),
       onDisconnected: () => this._onDisconnected(shared),
+      // Nobody hears a browser they cannot see: tabs are muted while it is
+      // hidden or minimized (pages do not notice).
+      onVisibilityChanged: visible => void this.groups?.setMuted(!visible).catch(e => console.error(`sound: ${(e as Error).message}`)),
     }, [popupInterceptScript, permissionScript, passkeyScript], connecting => this._attaching = connecting);
     this.shared = shared;
     await shared.setDownloadBehavior(this.proxy.downloadsDir);

@@ -37,6 +37,8 @@ export type BrowserEvents = {
   // Browser.downloadWillBegin / downloadProgress.
   onDownloadEvent(message: CdpMessage): void;
   onDisconnected(): void;
+  // Whether someone could be looking at the browser now (see isVisible).
+  onVisibilityChanged(visible: boolean): void;
 };
 
 // The binding page scripts reach the gateway through, and the object they use.
@@ -550,8 +552,11 @@ export class SharedBrowser {
   // Explicit focusTab() requests are left alone.
   async startFocusGuard(homeTargetId: string) {
     this._homeTargetId = homeTargetId;
-    if (process.platform !== 'darwin' || await this.isHeadless())
+    this._visible = undefined;
+    if (process.platform !== 'darwin' || await this.isHeadless()) {
+      this._setVisible(!await this.isHeadless());
       return;
+    }
     const pid = await this.pid();
     const sample = async () => {
       if (this._guarding || !pid || this._disposed)
@@ -561,6 +566,8 @@ export class SharedBrowser {
         this._otherFrontmost = front;
       this._lastHidden = isHiddenPid(pid);
       const state = await this._windowState().catch(() => undefined);
+      if (state)
+        this._setVisible(!this._lastHidden && state !== 'minimized');
       if (!this._lastHidden && state === 'minimized') {
         console.error('window minimized; hiding the browser too');
         await this.hideApp();
@@ -572,6 +579,17 @@ export class SharedBrowser {
     await sample();
     this._guardTimer = setInterval(() => void sample(), 500);
     this._guardTimer.unref();
+  }
+
+  private _visible: boolean | undefined;
+
+  // Tells the gateway when the browser comes into view or goes out of it
+  // (tabs are muted while nobody can see it).
+  private _setVisible(visible: boolean) {
+    if (visible === this._visible)
+      return;
+    this._visible = visible;
+    this._events.onVisibilityChanged(visible);
   }
 
   // Whether someone could be looking at this tab's window: the browser is

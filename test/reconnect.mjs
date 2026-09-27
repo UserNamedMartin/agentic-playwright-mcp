@@ -235,6 +235,14 @@ try {
   await sleep(1500);
   const afterAgent = tabIds(await a2.call('browser_tabs', { action: 'list' })).length;
   check('a link the agent clicks from evaluate still opens a background tab', afterAgent === afterAuto + 1, `${afterAgent - afterAuto} new tab(s)`);
+
+  // Sound: nobody can see this browser, so its tabs are muted for the user;
+  // the page itself plays as usual.
+  await a2.call('browser_navigate', { url: `${siteUrl}/sound` });
+  const playing = await a2.call('browser_evaluate', { function: '() => { const c = new AudioContext(); const o = c.createOscillator(); o.connect(c.destination); o.start(); return new Promise(r => setTimeout(() => r(c.state), 300)); }' });
+  const soundTab = await inExtension(async () => (await chrome.tabs.query({})).find(t => t.url?.includes('/sound')));
+  check('a hidden browser\'s tab is muted for the user, the page still plays', /running/.test(playing) && soundTab?.mutedInfo?.muted === true,
+    `page: ${playing.split('\n')[1]}, tab muted: ${soundTab?.mutedInfo?.muted}`);
 } catch (e) {
   failures++;
   console.log(`FAIL ${e.stack}`);

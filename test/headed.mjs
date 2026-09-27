@@ -101,6 +101,15 @@ const windowStates = async () => {
   }
   return [...states].join(',');
 };
+// Whether the tab at a URL is muted for the user (the companion extension
+// knows); undefined if it is not found.
+const mutedTab = async urlPart => {
+  for (const worker of browser.contexts()[0].serviceWorkers()) {
+    if (await worker.evaluate(() => typeof self.apmPing === 'function').catch(() => false))
+      return await worker.evaluate(async part => (await chrome.tabs.query({})).find(t => t.url?.includes(part))?.mutedInfo?.muted, urlPart);
+  }
+  return undefined;
+};
 // Samples what the user could see while `action` runs, and for a while after.
 const watch = async (action, afterMs = 3000) => {
   const seen = [];
@@ -127,6 +136,7 @@ try {
   await original('browser_navigate', { url: `${base}/one` });
   await original('browser_evaluate', { function: '() => sessionStorage.setItem("step", "2")' });
   await original('browser_navigate', { url: `${base}/two` });
+  check('hidden: tabs are muted for the user', await mutedTab('/two') === true, `muted: ${await mutedTab('/two')}`);
 
   // Forked chat: the copies must not show the browser.
   writeChat('local_fork', { title: 'Original (fork)', forkedFromSessionId: 'local_original' });
@@ -153,6 +163,16 @@ try {
   await sleep(1500);
   const visible = !isHiddenPid(pid) && /normal|maximized|fullscreen/.test(await windowStates());
   check('browser_show_tab shows the window', visible);
+  // Sound comes back while the window is in front, and goes when it is
+  // minimized (the gateway then hides the browser too).
+  await sleep(1000);
+  check('window in front: tabs are not muted', await mutedTab('/two') === false, `muted: ${await mutedTab('/two')}`);
+  const { windowId } = await cdp.send('Browser.getWindowForTarget', { targetId: (await cdp.send('Target.getTargets')).targetInfos.find(t => t.url.includes('/two')).targetId });
+  await cdp.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'minimized' } });
+  await sleep(2000);
+  check('window minimized: tabs are muted again', await mutedTab('/two') === true, `muted: ${await mutedTab('/two')}`);
+  await original('browser_show_tab');
+  await sleep(1500);
   const shownClick = await original('browser_click', { element: 'register', target: await snapRef() });
   await sleep(3000);
   if (process.env.SCREENSHOT) {

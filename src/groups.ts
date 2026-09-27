@@ -82,6 +82,12 @@ export class TabGroups {
     await this._call('apmRenameGroup', session.info.id, session.info.title);
   }
 
+  // Mutes every tab for the user (pages do not notice), or unmutes the ones
+  // the extension muted.
+  async setMuted(muted: boolean) {
+    await this._call('apmSetMuted', muted);
+  }
+
   async forget(session: AgentSession) {
     this._colors.delete(session.info.id);
     await this._call('apmForgetGroup', session.info.id).catch(() => {});

@@ -86,6 +86,30 @@ self.apmPinTarget = async targetId => {
   await chrome.tabs.update(tabId, { pinned: true });
 };
 
+// Sound: while nobody can see the browser, every tab is muted (for the user;
+// pages do not notice, media keeps playing for them). Tabs the user muted
+// themselves stay as they are.
+async function setTabMuted(tab, muted) {
+  const info = tab.mutedInfo || {};
+  if (muted && !info.muted)
+    await chrome.tabs.update(tab.id, { muted: true });
+  else if (!muted && info.muted && info.reason === 'extension' && info.extensionId === chrome.runtime.id)
+    await chrome.tabs.update(tab.id, { muted: false });
+}
+
+self.apmSetMuted = serialized(async muted => {
+  await chrome.storage.session.set({ muteAll: muted });
+  for (const tab of await chrome.tabs.query({}))
+    await setTabMuted(tab, muted).catch(() => {});
+  return muted;
+});
+
+chrome.tabs.onCreated.addListener(async tab => {
+  const { muteAll } = await chrome.storage.session.get('muteAll');
+  if (muteAll)
+    await setTabMuted(tab, true).catch(() => {});
+});
+
 self.apmPing = () => 'ok';
 // What this version of the extension can do: the gateway reloads an older
 // one it finds still running.
