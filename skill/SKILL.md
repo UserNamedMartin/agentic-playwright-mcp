@@ -177,6 +177,11 @@ ask the user for access). Subagents get a subfolder.
 
 - The folder is temporary: it is deleted after a week without use. Copy
   anything worth keeping into the project yourself (and tell the user where).
+- Downloads save themselves: click with an ordinary tool, and the result's
+  events say `Downloaded file <name> to "<path>"` (or the next result's, for
+  a slow file). Do not wait for the download in `browser_run_code_unsafe`:
+  a download that opens a tab of its own (a new-tab link, `window.open`) is
+  not an event of your page, so `page.waitForEvent('download')` never fires.
 - To upload a project file, pass its absolute path.
 - Give the user the full path when a file matters to them.
 
