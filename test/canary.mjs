@@ -172,6 +172,15 @@ try {
   check('the pinned home tab lists the chats', homeText.includes('chat-B'), homeText.slice(0, 200));
   const anyUrlKnows = (await targets()).some(t => /key=/.test(t.url));
   check('no tab URL carries a status key', !anyUrlKnows);
+  // The viewer set its own download folder and left, which puts the browser
+  // back on its default folder: the chats' downloads must still reach them.
+  const bClick = await B.call('browser_click', { element: 'dl', target: '#dl' });
+  await sleep(1500);
+  const bAfterDownload = bClick.text + (await B.call('browser_snapshot')).text;
+  const fallback = path.join(home, 'profiles', 'test', 'browser-downloads');
+  const stray = fs.existsSync(fallback) ? fs.readdirSync(fallback) : [];
+  check('a download after another DevTools client left still reaches its chat', /b\.bin/.test(bAfterDownload) && !stray.length,
+    `${stray.length ? `in the browser's default folder: ${stray.join(', ')}; ` : ''}${bAfterDownload.slice(0, 160)}`);
   // The DevTools port and the gateway's pages (tab links raise the window)
   // are not for agents, by any path. The browser's own pages are.
   const bTab = (await targets()).find(t => t.url.includes('who=B'));

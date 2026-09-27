@@ -897,6 +897,7 @@ export class Gateway implements SessionHost, ProxyHost {
         console.error(`tab link button clicked in ${session.info.title}`);
         return await this._openTabWindow(target, String(args.targetId ?? ''));
       }
+      await this._keepDownloadFolder();
       return await this._callWithRetry(target, request.params.name, args, extra.signal);
     }
   }
@@ -1099,8 +1100,16 @@ export class Gateway implements SessionHost, ProxyHost {
     }
   }
 
+  // Chrome goes back to its default download folder whenever another
+  // DevTools client that set its own disconnects (a script, a viewer), and
+  // tells nobody: set the gateway's again before each call and now and then.
+  private async _keepDownloadFolder() {
+    await this.shared?.setDownloadBehavior(this.proxy.downloadsDir).catch(() => {});
+  }
+
   private async _sweep() {
     const now = Date.now();
+    await this._keepDownloadFolder();
     if (now - this._dockAppliedAt > 60 * 1000)
       await this._applyDockTile();
     this._refreshTitles();
