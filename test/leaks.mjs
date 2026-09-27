@@ -1,5 +1,8 @@
 // Things that must not grow for as long as the gateway runs (days), and a
 // long chat's transcript that must not block every session while it is read.
+// The gateway keeps track of every tab (owners, the browser's target list),
+// every session's proxy client and Playwright connection: all of it must be
+// forgotten when the tab closes or the chat ends.
 //
 // Usage: node test/leaks.mjs [browser executable]
 //
@@ -22,7 +25,6 @@ fs.mkdirSync(process.env.TMPDIR);
 const dist = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..', 'dist');
 const { Gateway } = await import(path.join(dist, 'gateway.js'));
 const { TranscriptIndex } = await import(path.join(dist, 'subagents.js'));
-const { snippetListenerCount } = await import(path.join(dist, 'isolation.js'));
 const [cdpPort, gatewayPort] = [19431, 19432];
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 let failures = 0;
@@ -93,14 +95,6 @@ for (let i = 0; i < 50; i++) {
     break;
   await sleep(200);
 }
-// Trace dirs left by gone gateways: removed at start; one that cannot be
-// removed must not keep the gateway from starting.
-const staleDir = path.join(process.env.TMPDIR, 'agentic-trace-999999-old');
-const stuckDir = path.join(process.env.TMPDIR, 'agentic-trace-999998-stuck');
-fs.mkdirSync(staleDir);
-fs.mkdirSync(path.join(stuckDir, 'sub'), { recursive: true });
-fs.writeFileSync(path.join(stuckDir, 'sub', 'f'), 'x');
-fs.chmodSync(path.join(stuckDir, 'sub'), 0o500);
 const gateway = new Gateway({
   profile: 'test', cdpEndpoint: `http://127.0.0.1:${cdpPort}`, port: gatewayPort,
   filesDir: path.join(home, 'files'), stateFile: path.join(home, 'sessions.json'),
@@ -108,194 +102,115 @@ const gateway = new Gateway({
 const originalError = console.error;
 console.error = () => {};
 try {
-  let started = true;
-  await gateway.start().catch(() => started = false);
-  check('an undeletable old trace dir does not stop the gateway', started);
-  check('old trace dirs of gone gateways are removed', !fs.existsSync(staleDir));
-  fs.chmodSync(path.join(stuckDir, 'sub'), 0o700);
-  fs.rmSync(stuckDir, { recursive: true, force: true });
-  const sleeper = spawn('sleep', ['600'], { stdio: 'ignore' });
-  const transport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${gatewayPort}/mcp`), {
-    requestInit: { headers: { 'x-agent-session-id': 'chat-A', 'x-agent-title': 'chat-A', 'x-agent-pid': String(sleeper.pid), 'x-agent-desktop-chat': 'local_chat_a' } },
-  });
-  const client = new Client({ name: 'leaks-test', version: '1' });
-  await client.connect(transport);
-  const call = async (name, args = {}) => await client.callTool({ name, arguments: args });
-  await call('browser_navigate', { url: 'data:text/html,<title>a</title>' });
-  const listeners = () => gateway.shared.context.listeners('close').length + gateway.shared.browser.listeners('disconnected').length;
-  const listenersBefore = listeners();
-  for (let i = 0; i < 10; i++) {
-    await call('browser_close');
-    await call('browser_navigate', { url: 'data:text/html,<title>a</title>' });
-  }
-  check('backends do not pile up listeners', listeners() <= listenersBefore + 2, `${listenersBefore} -> ${listeners()}`);
-  for (let i = 0; i < 10; i++) {
-    await call('browser_tabs', { action: 'new' });
-    await call('browser_tabs', { action: 'close' });
-  }
-  await sleep(1000);
-  const open = new Set((await (await fetch(`http://127.0.0.1:${cdpPort}/json`)).json()).map(t => t.id));
-  const stale = [...gateway.shared._created].filter(id => !open.has(id));
-  check('closed tabs are forgotten', stale.length === 0, `${stale.length} closed tab(s) still remembered`);
-  check('a chat\'s desktop title file is looked up', gateway._desktopChats.has('local_chat_a'));
-  sleeper.kill();
-  await sleep(200);
-  await gateway._sweep();
-  check('the chat is closed once its process is gone', !gateway.sessions.has('chat-A'));
-
-  // A long trace, cut into chunks by another chat starting and stopping its
-  // own: stopping must not block the process (it ran out of memory at 3000
-  // console lines), and each request is in the trace once.
+  await gateway.start();
   const http = await import('node:http');
   const site = http.createServer((req, res) => { res.writeHead(200, { 'content-type': 'text/html' }); res.end(`<title>${req.url}</title>`); }).listen(0, '127.0.0.1');
   await new Promise(r => site.on('listening', r));
   const siteUrl = `http://127.0.0.1:${site.address().port}`;
-  const client2 = async id => {
+  const client2 = async (id, headers = {}) => {
     const c = new Client({ name: id, version: '1' });
     await c.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${gatewayPort}/mcp`), {
-      requestInit: { headers: { 'x-agent-session-id': id, 'x-agent-title': id, 'x-agent-pid': String(process.pid) } },
+      requestInit: { headers: { 'x-agent-session-id': id, 'x-agent-title': id, 'x-agent-pid': String(process.pid), ...headers } },
     }));
     return async (name, args = {}) => (await c.callTool({ name, arguments: args }, undefined, { timeout: 120000 })).content.map(x => x.text ?? '').join('\n');
   };
-  const T = await client2('chat-T');
-  const U = await client2('chat-U');
-  await T('browser_navigate', { url: `${siteUrl}/t` });
-  await U('browser_navigate', { url: `${siteUrl}/u` });
-  await T('browser_start_tracing');
-  await U('browser_start_tracing');
-  await T('browser_evaluate', { function: '() => fetch("/n1").then(r => r.status)' });
-  await U('browser_stop_tracing');
-  await T('browser_evaluate', { function: '() => fetch("/n2").then(r => r.status)' });
-  await T('browser_evaluate', { function: '() => { for (let i = 0; i < 3000; i++) console.log("line " + i + " " + "x".repeat(200)); return 1; }' });
-  let tick = Date.now();
-  let stall = 0;
-  const ticker = setInterval(() => { stall = Math.max(stall, Date.now() - tick); tick = Date.now(); }, 5);
-  const stopped = await T('browser_stop_tracing');
-  stall = Math.max(stall, Date.now() - tick);
-  clearInterval(ticker);
-  const zip = stopped.match(/(\/\S+\.zip)/)?.[1];
-  check('stopping a long trace does not block the process', !!zip && stall < 500, `event loop stalled ${stall} ms`);
-  const { execFileSync } = await import('node:child_process');
-  const network = zip ? execFileSync('unzip', ['-p', zip, 'trace.network'], { encoding: 'utf8' }) : '';
-  const count = name => network.split('\n').filter(l => l.includes(`/${name}"`) || l.includes(`/${name}`)).length;
-  check('each request is in the trace once', count('n1') === 1 && count('n2') === 1, `n1 ${count('n1')}×, n2 ${count('n2')}×`);
-  // Listeners a snippet leaves: a fired once listener is forgotten, and the
-  // rest go when the browser connection drops.
-  await T('browser_run_code_unsafe', { code: 'async page => { page.once("console", () => {}); page.on("console", () => {}); page.context().on("request", () => {}); await page.evaluate(() => console.log("fire")); await page.waitForTimeout(300); return 1; }' });
-  const sessionT = gateway.sessions.get('chat-T');
-  const afterFire = snippetListenerCount(sessionT);
-  check('a fired once listener is forgotten', afterFire === 2, `${afterFire} listeners kept`);
-  await T('browser_start_tracing');
-  const savedAtDrop = new Promise(resolve => {
-    const detach = sessionT.detach.bind(sessionT);
-    sessionT.detach = () => { detach(); resolve(sessionT.savedState()); sessionT.detach = detach; };
-  });
-  await gateway.shared.browser.close();
-  check('a trace cut off by a drop is not saved as still running', (await savedAtDrop).tracing === false, JSON.stringify(await savedAtDrop));
-  for (let i = 0; i < 50 && !gateway.shared?.browser?.isConnected(); i++)
-    await sleep(200);
-  await sleep(1500);
-  check('snippet listeners go when the connection drops', snippetListenerCount(sessionT) === 0, `${snippetListenerCount(sessionT)} listeners kept`);
+  const pagesNow = async () => (await (await fetch(`http://127.0.0.1:${cdpPort}/json`)).json()).filter(t => t.type === 'page');
+  // Sessions' Playwright connections to the proxy (a socket file).
+  const ipcConnections = () => new Promise(r => gateway._ipcServer.getConnections((e, n) => r(n)));
 
-  // A tab still being opened when its chat ends is closed, not left unowned.
+  const sleeper = spawn('sleep', ['600'], { stdio: 'ignore' });
+  const A = await client2('chat-A', { 'x-agent-pid': String(sleeper.pid), 'x-agent-desktop-chat': 'local_chat_a' });
+  await A('browser_navigate', { url: `${siteUrl}/a` });
+  const before = await ipcConnections();
+  for (let i = 0; i < 10; i++) {
+    await A('browser_close');
+    await A('browser_navigate', { url: `${siteUrl}/a${i}` });
+  }
+  await sleep(500);
+  check('closing and reopening the browser does not pile up connections', await ipcConnections() <= before, `${before} -> ${await ipcConnections()}`);
+  for (let i = 0; i < 10; i++) {
+    await A('browser_tabs', { action: 'new' });
+    await A('browser_tabs', { action: 'close' });
+  }
+  await sleep(1000);
+  const open = new Set((await pagesNow()).map(t => t.id));
+  const remembered = [...gateway.owners.keys()].filter(id => !open.has(id));
+  const known = gateway.shared.pages().filter(p => !open.has(p.targetId));
+  check('closed tabs are forgotten', remembered.length === 0 && known.length === 0, `${remembered.length} owned, ${known.length} known`);
+  check('a chat\'s desktop title file is looked up', gateway._desktopChats.has('local_chat_a'));
+  sleeper.kill();
+  await sleep(200);
+  await gateway._sweep();
+  await sleep(300);
+  check('the chat is closed once its process is gone', !gateway.sessions.has('chat-A'));
+  check('its proxy client and connection go with it', !gateway.proxy._clients.has('chat-A') && await ipcConnections() === 0, `${await ipcConnections()} connections`);
+  check('its tabs are closed and forgotten', ![...gateway.owners.values()].includes('chat-A') && (await pagesNow()).length === 1, (await pagesNow()).map(p => p.url).join(' '));
+  check('its desktop title file is forgotten', !gateway._desktopChats.has('local_chat_a'), [...gateway._desktopChats.keys()].join(', '));
+
+  // A tab still being opened when its chat ends is closed, not left behind.
   const S = await client2('chat-S');
   await S('browser_navigate', { url: `${siteUrl}/s` });
-  const pagesNow = async () => (await (await fetch(`http://127.0.0.1:${cdpPort}/json`)).json()).filter(t => t.type === 'page').length;
-  const beforeEnd = await pagesNow();
-  const sessionS = gateway.sessions.get('chat-S');
-  const opening = sessionS.openTab().catch(() => {});
-  await gateway._closeSession(sessionS);
+  const beforeEnd = (await pagesNow()).length;
+  // The browser answers the creation only after the chat has ended.
+  const send = gateway.shared.cdp.send.bind(gateway.shared.cdp);
+  let creating;
+  gateway.shared.cdp.send = (method, ...rest) => method === 'Target.createTarget'
+    ? (creating = send(method, ...rest).then(async r => { await sleep(700); return r; }))
+    : send(method, ...rest);
+  const opening = S('browser_tabs', { action: 'new' }).catch(() => {});
+  for (let i = 0; i < 100 && !creating; i++)
+    await sleep(10);
+  await gateway._closeSession(gateway.sessions.get('chat-S'));
+  gateway.shared.cdp.send = send;
+  await creating;
   await opening;
   await sleep(800);
-  check('a tab opened as its chat ends is not left behind', await pagesNow() <= beforeEnd - 1, `${beforeEnd} -> ${await pagesNow()} pages`);
+  check('a tab opened as its chat ends is not left behind', (await pagesNow()).length <= beforeEnd - 1, `${beforeEnd} -> ${(await pagesNow()).length} pages`);
 
   // A call still queued when its chat ends does not start the chat again.
   const Q = await client2('chat-Q');
   await Q('browser_navigate', { url: `${siteUrl}/q` });
   const sessionQ = gateway.sessions.get('chat-Q');
-  const pagesBeforeQ = await pagesNow();
+  const pagesBeforeQ = (await pagesNow()).length;
   const running = Q('browser_evaluate', { function: '() => new Promise(r => setTimeout(() => r(1), 1500))' }).catch(e => e.message);
   await sleep(200);
   const queued = Q('browser_tabs', { action: 'new' }).catch(e => e.message);
   await gateway._closeSession(sessionQ);
   await Promise.all([running, queued]);
   await sleep(800);
-  check('a call queued when its chat ends leaves no tab and no backend', !sessionQ.backend && await pagesNow() <= pagesBeforeQ - 1, `backend ${!!sessionQ.backend}, ${pagesBeforeQ} -> ${await pagesNow()} pages`);
+  check('a call queued when its chat ends leaves no tab and no backend', !sessionQ.backend && (await pagesNow()).length <= pagesBeforeQ - 1, `backend ${!!sessionQ.backend}, ${pagesBeforeQ} -> ${(await pagesNow()).length} pages`);
 
-  // A trace whose start fails leaves nothing half on.
-  const tracing = gateway.shared.context.tracing;
-  const startChunk = tracing.startChunk.bind(tracing);
-  tracing.startChunk = async () => { tracing.startChunk = startChunk; throw new Error('simulated failure'); };
-  const failed = await T('browser_start_tracing');
-  const leftDirs = () => fs.readdirSync(process.env.TMPDIR).filter(n => n.startsWith('agentic-trace-'));
-  check('a failed trace start leaves no temp dir', /simulated failure/.test(failed) && leftDirs().length === 0, `${failed.slice(0, 80)} / ${leftDirs().join(', ')}`);
-  const retry = await T('browser_start_tracing');
-  check('tracing starts after a failed start', /Trace recording started/.test(retry), retry.slice(0, 120));
-  await T('browser_stop_tracing');
+  // A dropped connection: what the chat had running is not saved as still
+  // running, and it comes back.
+  const T = await client2('chat-T');
+  await T('browser_navigate', { url: `${siteUrl}/t` });
+  await T('browser_start_tracing');
+  const sessionT = gateway.sessions.get('chat-T');
+  const savedAtDrop = new Promise(resolve => {
+    const detach = sessionT.detach.bind(sessionT);
+    sessionT.detach = () => { detach(); resolve(sessionT.savedState()); sessionT.detach = detach; };
+  });
+  gateway.shared.cdp.close();
+  check('a trace cut off by a drop is not saved as still running', (await savedAtDrop).tracing === false, JSON.stringify(await savedAtDrop));
+  await sleep(2000);
+  const back = await T('browser_evaluate', { function: '() => location.pathname' });
+  check('the chat is back after the drop', back.includes('/t'), back.slice(0, 120));
 
-  // A stuck tab creation of the gateway does not hold popups' first loads.
-  gateway.shared._inFlight.add(new Promise(() => {}));
-  await T('browser_navigate', { url: `${siteUrl}/popups` });
+  // A stuck tab creation does not hold popups' first loads for long.
+  gateway.shared._creations.add(new Promise(() => {}));
   await T('browser_route', { pattern: '**/popup-target*', body: 'ROUTED' });
   const popupStart = Date.now();
   await T('browser_evaluate', { function: '() => { window.open("/popup-target"); return 1; }' });
   let popupText = '';
   for (let i = 0; i < 40 && !/ROUTED|popup-target/.test(popupText); i++) {
     await sleep(100);
-    const list = await T('browser_tabs', { action: 'list' });
-    popupText = list;
+    popupText = await T('browser_tabs', { action: 'list' });
   }
   await T('browser_tabs', { action: 'select', index: 1 });
   const routed = await T('browser_evaluate', { function: '() => document.body.innerText' });
   check('a stuck tab creation does not hold a popup\'s first load', routed.includes('ROUTED') && Date.now() - popupStart < 5000, `${Date.now() - popupStart} ms ${routed.slice(0, 80)}`);
-  await T('browser_tabs', { action: 'close' });
-  await T('browser_tabs', { action: 'select', index: 0 });
-  await T('browser_unroute', {});
-  gateway.shared._inFlight.clear();
-
-  // A recorder start the browser answers only after it was given up does
-  // not leave the recorder on, nor block the next start.
-  const rawContext = gateway.shared.context;
-  const realEnable = rawContext._enableRecorder.bind(rawContext);
-  let delayed = false;
-  rawContext._enableRecorder = (...args) => {
-    if (delayed)
-      return realEnable(...args);
-    delayed = true;
-    return new Promise(r => setTimeout(r, 22000)).then(() => realEnable(...args));
-  };
-  const lateStart = await T('browser_start_recording');
-  check('a recorder start answered too late is given up', /did not answer/.test(lateStart), lateStart.slice(0, 100));
-  await sleep(4000);
-  const nextStart = await T('browser_start_recording');
-  check('the next recording starts after that', /Recording started/.test(nextStart), nextStart.slice(0, 120));
-  await T('browser_stop_recording');
-  rawContext._enableRecorder = realEnable;
-
-  // A browser that never answers a trace call does not hold tracing (or the
-  // session) forever.
-  await T('browser_start_tracing');
-  const stopChunk = tracing.stopChunk.bind(tracing);
-  tracing.stopChunk = () => { tracing.stopChunk = stopChunk; return new Promise(() => {}); };
-  const stuckStart = Date.now();
-  const stuck = await T('browser_stop_tracing');
-  check('a trace call the browser never answers is given up', /did not answer/.test(stuck) && Date.now() - stuckStart < 40000, `${Date.now() - stuckStart} ms ${stuck.slice(0, 100)}`);
-  const afterStuck = await U('browser_start_tracing');
-  check('tracing works for others after that', /Trace recording started/.test(afterStuck), afterStuck.slice(0, 100));
-  await U('browser_stop_tracing');
-
-  // Stopping must not slow down with the resources other chats loaded while
-  // tracing (it was quadratic: 37 s at 500).
-  await T('browser_start_tracing');
-  await U('browser_evaluate', { function: '() => Promise.all(Array.from({ length: 2000 }, (_, i) => fetch("/res-" + i).then(r => r.text()))).then(a => a.length)' });
-  for (let i = 0; i < 20; i++)
-    await T('browser_evaluate', { function: `() => { document.body.innerHTML = "<p>${i}</p>".repeat(100000); return 1; }` });
-  const startedStop = Date.now();
-  const stoppedBusy = await T('browser_stop_tracing');
-  const took = Date.now() - startedStop;
-  check('stopping a trace is fast next to a busy chat', /\.zip/.test(stoppedBusy) && took < 5000, `${took} ms`);
+  gateway.shared._creations.clear();
   site.close();
-  check('its desktop title file is forgotten', !gateway._desktopChats.has('local_chat_a'), [...gateway._desktopChats.keys()].join(', '));
 } catch (e) {
   failures++;
   console.log(`FAIL ${e.stack}`);

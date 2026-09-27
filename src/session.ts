@@ -1,21 +1,22 @@
-// One agent session = one MCP connection = one Playwright MCP BrowserBackend
-// sharing the profile's browser context. The stock Context adopts every page in
-// the browser context and opens tabs in the foreground; here each session only
-// sees the tabs it opened (plus popups those tabs open), and opens them in the
-// background.
+// One agent session = one chat (or subagent) = one stock Playwright MCP
+// BrowserBackend on a Playwright connection of its own, made through the
+// proxy (see proxy.ts), which shows it only the session's tabs. Isolation
+// comes from that connection, not from changes to Playwright MCP; what this
+// file adds is the gateway's own behavior around the calls: one call at a
+// time with a timeout, notes for the agent, files in the session's folder, and
+// keeping routes, offline mode and device emulation across reconnects.
 import { AsyncLocalStorage } from 'node:async_hooks';
 import fs from 'node:fs';
 import path from 'node:path';
-import type { BrowserContext, CDPSession, Page, Request, Route } from 'playwright-core';
+import type { Browser, Page, Route } from 'playwright-core';
 import type { SharedBrowser } from './browser.js';
 import type { TabGroups } from './groups.js';
+import type { CdpProxy } from './proxy.js';
 import { touchFolder } from './files.js';
-import { pwTools, verifyContext } from './internals.js';
-import { removeSnippetListeners } from './isolation.js';
-import { callingSession, forgetTracing, isRecording, isTracing, startRecording, stopRecording, stopTracing } from './recording.js';
-import { releaseContextWide } from './scoped.js';
+import { agentCall } from './netguard.js';
+import { playwright, pwTools, verifyContext } from './internals.js';
 import { applyEmulation, type Emulation } from './tools.js';
-import { internalUrlResolved } from './urls.js';
+import { internalUrl } from './urls.js';
 import { loadProfiles } from './profiles.js';
 import { describePasskeyRequests, type PasskeyRequest } from './passkeys.js';
 import type { PermissionRequest } from './permissions.js';
@@ -59,26 +60,25 @@ export type SessionInfo = {
   fallbackTitle?: string;
 };
 
-// What a session needs from the gateway. Both are replaced when the gateway
-// reconnects to the browser, so sessions always look them up.
+// What a session needs from the gateway. The browser connection is replaced
+// when the gateway reconnects, so sessions always look it up.
 export type SessionHost = {
   readonly shared: SharedBrowser;
   readonly groups: TabGroups | undefined;
+  readonly proxy: CdpProxy;
   // Creates (or finds again) the session's files folder.
   filesFolder(session: AgentSession): string;
   onSessionStarted(session: AgentSession): void;
   onTabsChanged(): void;
   // Permission requests of the session's pages the agent should hear about.
   permissionNotes(session: AgentSession): string | undefined;
-  // A forked chat's first start: copies of the original chat's tabs, adopted
-  // by the session; resolves to a note for the agent, if there were any.
+  // A forked chat's first start: copies of the original chat's tabs, owned by
+  // the session; resolves to a note for the agent, if there were any.
   copyForkedTabs(session: AgentSession): Promise<string | undefined>;
-  // The gateway's own address (its status page is not for agents).
-  readonly baseUrl: string;
-  // The browser's DevTools endpoint.
-  readonly cdpEndpoint: string;
   // The tabs of the session's subagents, listed in its browser_tabs results.
   subagentTabs(session: AgentSession): string | undefined;
+  // Ports of addresses agents may not open (see urls.ts).
+  internalPorts(): string[];
 };
 
 export type SavedNetworkState = {
@@ -92,7 +92,8 @@ export type SavedNetworkState = {
 
 let knownPorts: { at: number; ports: string[] } | undefined;
 
-function profilePorts() {
+// Every profile's gateway and DevTools ports (other profiles may run too).
+export function profilePorts() {
   if (!knownPorts || Date.now() - knownPorts.at > 10_000) {
     let ports: string[] = [];
     try {
@@ -104,7 +105,7 @@ function profilePorts() {
 }
 
 // The handler browser_route builds from its parameters (as upstream), for
-// routes restored after a gateway restart.
+// routes brought back after a reconnect or restart.
 function routeHandler(params: any) {
   return async (route: Route) => {
     if (params.body !== undefined || params.status !== undefined) {
@@ -120,15 +121,15 @@ function routeHandler(params: any) {
   };
 }
 
+// Things a dropped connection or a restart ends, with what the agent is told.
+const lostOnReconnect: Record<string, string> = {
+  video: '### Video\nThe video recording stopped: the browser connection dropped and was restored. Start it again if you still need it.',
+  recording: '### Recording\nThe action recording stopped: the browser connection dropped and was restored. Start it again if you still need it.',
+  tracing: '### Tracing\nTracing stopped: the browser connection dropped and was restored. Start it again if you still need it.',
+};
+
 export class AgentSession {
   readonly info: SessionInfo;
-  readonly owned = new Set<Page>();
-  // Target ids of the owned tabs. Unlike `owned` they survive a dropped browser
-  // connection, so the tabs can be found again after reconnecting.
-  readonly targets = new Set<string>();
-  // Target id of the current tab when the session was last detached or restored.
-  currentTarget: string | undefined;
-  backend: any;
   lastActivity = Date.now();
   subagentCount = 0;
   permissionRequests: PermissionRequest[] = [];
@@ -140,6 +141,10 @@ export class AgentSession {
   startedAt = 0;
   // Everything this session saves goes here (see files.ts); set on start.
   filesDir: string | undefined;
+  // Target id of the current tab, remembered across reconnects and restarts.
+  currentTarget: string | undefined;
+  backend: any;
+  private _browser: Browser | undefined;
   private _host: SessionHost;
   private _config: any;
   private _tools: any[];
@@ -148,8 +153,17 @@ export class AgentSession {
   private _notes: string[] = [];
   private _touchedAt = 0;
   private _retentionDays: number;
-  // Tabs found again after a reconnect or restart, adopted by the next backend.
-  private _restored: { pages: Page[]; current?: Page } | undefined;
+  private _targetIds = new WeakMap<Page, string>();
+  // Kept here, not only in the backend, to be set up again on a new one.
+  private _routes: any[] = [];
+  private _lostRoutes = false;
+  offline = false;
+  // Device emulation by tab (target id), see browser_emulate_device.
+  emulation = new Map<string, Emulation>();
+  // What the agent's code may not connect to (see netguard.ts).
+  private _guard = { internalPorts: () => this._host.internalPorts() };
+  // Started by the agent and not stopped yet: ended by a reconnect.
+  private _running = new Set<'video' | 'recording' | 'tracing'>();
 
   constructor(info: SessionInfo, host: SessionHost, config: any, tools: any[], retentionDays = 7) {
     this.info = info;
@@ -157,6 +171,15 @@ export class AgentSession {
     this._retentionDays = retentionDays;
     this._config = config;
     this._tools = tools;
+  }
+
+  // The session's tabs (target ids).
+  get targets(): Set<string> {
+    const targets = new Set<string>();
+    for (const [targetId, owner] of this._host.shared?.owners ?? [])
+      if (owner === this.info.id)
+        targets.add(targetId);
+    return targets;
   }
 
   ensureFilesDir(): string {
@@ -167,140 +190,99 @@ export class AgentSession {
     return this.filesDir;
   }
 
-  private get _shared() {
-    return this._host.shared;
+  get internalPorts() {
+    return this._host.internalPorts();
   }
 
-  private get _groups() {
-    return this._host.groups;
-  }
-
-  async start() {
+  private async _start() {
     const first = !this.started;
     if (first) {
       this.started = true;
       this._host.onSessionStarted(this);
     }
     const filesDir = this.ensureFilesDir();
-    // The session folder is both the output dir and the workspace, so relative
-    // file names land there too, never in the agent's project. Unrestricted
-    // access lets the agent still upload project files by absolute path.
-    const config = { ...this._config, outputDir: filesDir, allowUnrestrictedFileAccess: true };
-    // browser_close ends in backend.dispose(), which calls this; the session's
-    // tabs are closed after the call (see _callTool), not here.
-    // The stock backend listens for its browser context closing and the
-    // browser disconnecting, and never stops: with one backend per session
-    // (and a new one after each browser_close) on a connection that lives for
-    // days, those listeners, and the backends they hold, piled up.
-    const context: any = this._shared.context;
-    const browser: any = context.browser();
-    const before = { close: context.listeners('close'), disconnected: browser?.listeners('disconnected') ?? [] };
-    const backend = new pwTools.BrowserBackend(config, this._shared.context, this._tools, async () => {});
-    const added = {
-      close: context.listeners('close').filter((l: Function) => !before.close.includes(l)),
-      disconnected: (browser?.listeners('disconnected') ?? []).filter((l: Function) => !before.disconnected.includes(l)),
-    };
-    const dispose = backend.dispose.bind(backend);
-    backend.dispose = async () => {
-      for (const listener of added.close)
-        context.off('close', listener as any);
-      for (const listener of added.disconnected)
-        browser?.off('disconnected', listener as any);
-      await dispose();
-    };
-    await backend.initialize({ cwd: filesDir, clientName: this.info.title });
-    verifyContext(backend._context);
-    this._patchContext(backend._context);
-    this.backend = backend;
-    const restored = this._restored;
-    this._restored = undefined;
-    if (restored?.pages.length) {
-      const context = backend._context;
-      await context.ensureBrowserContext();
-      for (const page of restored.pages)
-        this._adopt(context, page);
-      context._currentTab = context._tabs.find((tab: any) => tab.page === restored.current) ?? context._tabs[0];
-    }
+    // A forked chat starts with copies of the original chat's tabs.
     if (first && !this.targets.size) {
       const note = await this._host.copyForkedTabs(this).catch(e => `### Tabs of the original chat\nCould not copy them: ${(e as Error).message}`);
       if (note)
         this._notes.push(note);
     }
-  }
-
-  get gatewayUrl() {
-    return this._host.baseUrl;
-  }
-
-  // Ports of addresses agents may not open (see urls.ts): this gateway's and
-  // its browser's, and those of every other profile (they may run too).
-  get internalPorts() {
-    return [new URL(this._host.baseUrl).port, new URL(this._host.cdpEndpoint).port, ...profilePorts()];
-  }
-
-  // Tabs copied for a forked chat: adopted in order, the last one flagged
-  // current becomes the current tab.
-  async adoptCopies(pages: { page: Page; current: boolean }[]) {
-    const context = this.backend._context;
+    // The session folder is both the output dir and the workspace, so relative
+    // file names land there too, never in the agent's project. Unrestricted
+    // access lets the agent still upload project files by absolute path.
+    const config = { ...this._config, outputDir: filesDir, allowUnrestrictedFileAccess: true };
+    // As upstream connects to a CDP endpoint: traces (and download temp files)
+    // go to the output folder's "traces".
+    // Made inside the agent's network guard (see netguard.ts), so everything
+    // this connection's Playwright does later (route handlers, event
+    // listeners, requests) stays inside it too.
+    const browser: Browser = await agentCall.run(this._guard, () => playwright.chromium.connectOverCDP(this._host.proxy.endpoint(this.info.id),
+        { timeout: 15_000, artifactsDir: path.join(filesDir, 'traces') }));
+    const backend = new pwTools.BrowserBackend(config, browser.contexts()[0], this._tools, async () => {});
+    await backend.initialize({ cwd: filesDir, clientName: this.info.title });
+    const context = backend._context;
+    verifyContext(context);
+    context._agentSession = this;
+    this._patchContext(context);
+    this._browser = browser;
+    this.backend = backend;
     await context.ensureBrowserContext();
-    for (const { page } of pages) {
-      this._adopt(context, page);
-      await this._groups?.addPage(this, page).catch(() => {});
+    // Set up again what the agent had before a reconnect or restart.
+    for (const params of this._routes)
+      await context.addRoute({ ...params, handler: routeHandler(params) }).catch(() => {});
+    if (this.offline)
+      await browser.contexts()[0].setOffline(true).catch(() => {});
+    for (const tab of context.tabs()) {
+      const targetId = await this.targetIdOf(tab.page).catch(() => undefined);
+      const settings = targetId && this.emulation.get(targetId);
+      if (settings)
+        await applyEmulation(tab.page, settings).catch(() => {});
+      if (targetId && targetId === this.currentTarget)
+        context._currentTab = tab;
     }
-    const current = pages.find(p => p.current)?.page ?? pages[0]?.page;
-    context._currentTab = context._tabs.find((tab: any) => tab.page === current) ?? context._currentTab;
   }
 
-  // The browser connection dropped: the backend and its pages are dead, but
-  // the tabs are still open in the browser (see `targets`).
+  // The target id of one of the session's pages.
+  async targetIdOf(page: Page): Promise<string> {
+    let id = this._targetIds.get(page);
+    if (id)
+      return id;
+    const cdp = await page.context().newCDPSession(page);
+    try {
+      id = (await cdp.send('Target.getTargetInfo')).targetInfo.targetId as string;
+    } finally {
+      await cdp.detach().catch(() => {});
+    }
+    this._targetIds.set(page, id);
+    return id;
+  }
+
+  // The browser connection dropped (every DevTools client goes together): the
+  // backend is dead, the tabs are still open, and the next call reconnects.
   detach() {
+    this._retire();
+  }
+
+  // What the old backend had that a new one must know, and what ended with it.
+  private _retire() {
     const backend = this.backend;
-    // Listeners snippets left on the old connection's objects never fire
-    // again; they only hold that connection in memory.
-    removeSnippetListeners(this);
-    // What lived in the old connection is gone; the agent is told.
-    if (backend?._context?._video)
-      this._notes.push('### Video\nThe video recording stopped: the browser connection dropped and was restored. Start it again if you still need it.');
-    if (isRecording(this, this._shared.context)) {
-      void stopRecording(this, this._shared.context).catch(() => {});
-      this._notes.push('### Recording\nThe action recording stopped: the browser connection dropped and was restored. Start it again if you still need it.');
-    }
-    if (isTracing(this)) {
-      forgetTracing(this);
-      void stopTracing(this, this._shared.context, true).catch(() => {});
-      this._notes.push('### Tracing\nTracing stopped: the browser connection dropped and was restored. Start it again if you still need it.');
-    }
+    if (!backend)
+      return;
     this.backend = undefined;
-    this.owned.clear();
-    this._restored = undefined;
-    void backend?.dispose().catch(() => {});
-  }
-
-  // Hands the session its tabs again after a reconnect or a gateway restart.
-  restore(pages: Map<string, Page>) {
-    const found: Page[] = [];
-    for (const targetId of [...this.targets]) {
-      const page = pages.get(targetId);
-      if (!page) {
-        this.targets.delete(targetId);
-        continue;
-      }
-      found.push(page);
-      this.owned.add(page);
-      page.once('close', () => this.owned.delete(page));
-    }
-    if (found.length) {
-      // The agent was told where its files are before.
-      this.started = true;
-      this._filesNoted = true;
-    }
-    this._restored = { pages: found, current: this.currentTarget ? pages.get(this.currentTarget) : undefined };
-  }
-
-  // For the saved state: the current tab's target id.
-  currentTargetId(): string | undefined {
-    const page = this.backend?._context?.currentTab()?.page;
-    return (page && this._shared.cachedTargetId(page)) ?? this.currentTarget;
+    const browser = this._browser;
+    this._browser = undefined;
+    const context = backend._context;
+    this._routes = (context?.routes() ?? []).map(({ handler, ...params }: any) => params);
+    // Routes added from code (browser_run_code_unsafe) are not in the list.
+    const codeRoutes = ((browser?.contexts()[0] as any)?._routes?.length ?? 0) > this._routes.length;
+    this._lostRoutes ||= codeRoutes;
+    if (codeRoutes)
+      this._notes.push('### Routes\nThe browser connection was restored: routes you added from code (browser_run_code_unsafe) are gone; routes added with browser_route, offline mode and device emulation were kept.');
+    for (const what of this._running)
+      this._notes.push(lostOnReconnect[what]);
+    this._running.clear();
+    void backend.dispose().catch(() => {});
+    void browser?.close().catch(() => {});
   }
 
   // Calls of one session run one at a time: the stock Context has a single
@@ -312,20 +294,23 @@ export class AgentSession {
     const { timeout, ...args } = rawArgs ?? {};
     const seconds = callTimeoutSeconds(name, args, timeout);
     const queued = Date.now();
-    const previous = this._running;
+    const previous = this._current;
     const run = this._queue.then(async () => {
       signal?.throwIfAborted();
       const waited = Date.now() - queued;
-      this._running = { name, since: Date.now() };
+      this._current = { name, since: Date.now() };
       const result = await this._callWithTimeout(name, args, seconds, signal);
       if (waited >= queueNoteMs && previous)
         result.content?.push({ type: 'text', text: `### Queue\nThis call waited ${Math.round(waited / 1000)} s for your ` +
           `previous call (${previous.name}) to finish: calls of one chat run one at a time.` });
       return result;
     });
-    this._queue = run.catch(() => {}).finally(() => this._running = undefined);
+    this._queue = run.catch(() => {}).finally(() => this._current = undefined);
     return await run;
   }
+
+  private _queue: Promise<unknown> = Promise.resolve();
+  private _current: { name: string; since: number } | undefined;
 
   private async _callWithTimeout(name: string, args: any, seconds: number, signal?: AbortSignal) {
     let timer: NodeJS.Timeout | undefined;
@@ -333,7 +318,7 @@ export class AgentSession {
     // An abandoned call that finishes later must not take the notes meant for
     // the agent's next result.
     const state = { abandoned: false as boolean };
-    const call = callingSession.run(this, () => callState.run(state, () => this._callTool(name, args, signal, state)));
+    const call = agentCall.run(this._guard, () => callState.run(state, () => this._callTool(name, args, signal, state)));
     call.catch(() => {});
     const timedOut = new Promise<any>(resolve => {
       timer = setTimeout(() => {
@@ -366,230 +351,50 @@ export class AgentSession {
     }
   }
 
-  // Routes and offline mode of this session. They live here, not on the stock
-  // Context (replaced after a reconnect), and are registered on the shared
-  // browser context with an owner check: context-level routes reach a new
-  // tab before its first load (popups included), while requests of other
-  // chats' pages fall through to their own routes.
-  routes: any[] = [];
-  offline = false;
-  // Device emulation by tab (target id), see browser_emulate_device.
-  emulation = new Map<string, Emulation>();
-  private _registered = new Map<any, { context: BrowserContext; handler: (route: Route, request: Request) => Promise<void> }>();
-  private _offlineRoute: { context: BrowserContext; handler: (route: Route, request: Request) => Promise<void> } | undefined;
-  private _networkSessions = new Map<Page, Promise<CDPSession>>();
-
-  // A page of this session: one of its tabs, or a popup opened by one.
-  async ownsPage(page: Page | null | undefined, depth = 0): Promise<boolean> {
-    if (!page)
-      return false;
-    if (this.owned.has(page))
-      return true;
-    if (depth >= 3)
-      return false;
-    return await this.ownsPage(await page.opener().catch(() => null), depth + 1);
-  }
-
-  async ownsRequest(request: Request): Promise<boolean> {
-    // Service worker requests have no frame.
-    if (request.serviceWorker())
-      return false;
-    try {
-      return await this.ownsPage(request.frame().page());
-    } catch {
-      // A popup's first request comes before Playwright knows its page: its
-      // opener (as Chrome reports it) tells whose it is.
-      if (!request.isNavigationRequest())
-        return false;
-      const opener = await this._shared.popupOpener();
-      return !!opener && this.targets.has(opener);
-    }
-  }
-
-  async addRoute(entry: any) {
-    this.routes.push(entry);
-    await this._registerRoute(entry);
-    this._host.onTabsChanged();
-  }
-
-  async removeRoutes(pattern?: string) {
-    const removed = this.routes.filter(route => !pattern || route.pattern === pattern);
-    for (const route of removed)
-      await this._unregisterRoute(route);
-    this.routes = this.routes.filter(route => !removed.includes(route));
-    this._host.onTabsChanged();
-    return removed.length;
-  }
-
-  private async _registerRoute(entry: any) {
-    const context = this._shared.context;
-    const handler = async (route: Route, request: Request) => {
-      if (await this.ownsRequest(request))
-        return await entry.handler(route, request);
-      await route.fallback();
-    };
-    await context.route(entry.pattern, handler);
-    this._registered.set(entry, { context, handler });
-  }
-
-  private async _unregisterRoute(entry: any) {
-    const registered = this._registered.get(entry);
-    this._registered.delete(entry);
-    await registered?.context.unroute(entry.pattern, registered.handler).catch(() => {});
-  }
-
-  async setOffline(offline: boolean) {
-    this.offline = offline;
-    this._host.onTabsChanged();
-    await this._syncOfflineRoute();
-    for (const page of this.owned)
-      await this._emulateOffline(page, offline).catch(() => {});
-  }
-
-  // Requests fail at once (even a new tab's first load); the per-page network
-  // emulation also makes navigator.onLine report it.
-  private async _syncOfflineRoute() {
-    if (this.offline && !this._offlineRoute) {
-      const context = this._shared.context;
-      const handler = async (route: Route, request: Request) => {
-        if (await this.ownsRequest(request))
-          return await route.abort('internetdisconnected');
-        await route.fallback();
-      };
-      await context.route('**', handler);
-      this._offlineRoute = { context, handler };
-    } else if (!this.offline && this._offlineRoute) {
-      const { context, handler } = this._offlineRoute;
-      this._offlineRoute = undefined;
-      await context.unroute('**', handler).catch(() => {});
-    }
-  }
-
-  async _emulateOffline(page: Page, offline: boolean) {
-    let cdp = this._networkSessions.get(page);
-    if (!cdp) {
-      if (!offline)
-        return;
-      cdp = page.context().newCDPSession(page).then(async session => {
-        await session.send('Network.enable');
-        return session;
-      });
-      this._networkSessions.set(page, cdp);
-      page.once('close', () => this._networkSessions.delete(page));
-    }
-    await (await cdp).send('Network.emulateNetworkConditions', { offline, latency: 0, downloadThroughput: -1, uploadThroughput: -1 });
-  }
-
-  // After a reconnect the shared browser context is a new one: register the
-  // session's routes and network state on it again.
-  async reapplyNetworkState() {
-    this._registered.clear();
-    this._offlineRoute = undefined;
-    this._networkSessions.clear();
-    for (const entry of this.routes)
-      await this._registerRoute(entry).catch(() => {});
-    await this._syncOfflineRoute().catch(() => {});
-    for (const page of this.owned) {
-      if (this.offline)
-        await this._emulateOffline(page, true).catch(() => {});
-      const targetId = this._shared.cachedTargetId(page);
-      const settings = targetId && this.emulation.get(targetId);
-      if (settings)
-        await applyEmulation(page, settings).catch(() => {});
-    }
-    for (const targetId of [...this.emulation.keys()]) {
-      if (!this.targets.has(targetId))
-        this.emulation.delete(targetId);
-    }
-  }
-
-  // What survives a gateway restart: offline mode, routes made with
-  // browser_route (routes from code cannot be saved) and device emulation.
-  savedState(): SavedNetworkState {
-    return {
-      offline: this.offline,
-      routes: this.routes.filter(route => !route.fromCode).map(({ handler, ...params }) => params),
-      emulation: [...this.emulation].filter(([id]) => this.targets.has(id)),
-      lostRoutes: this.routes.some(route => route.fromCode),
-      tracing: isTracing(this),
-      recording: isRecording(this, this._shared.context),
-    };
-  }
-
-  restoreSavedState(saved: SavedNetworkState | undefined) {
-    if (!saved)
-      return;
-    this.offline = saved.offline;
-    this.routes = saved.routes.map(params => ({ ...params, handler: routeHandler(params) }));
-    this.emulation = new Map(saved.emulation);
-    if (saved.tracing)
-      this._notes.push('### Tracing\nTracing stopped: the browser gateway restarted. Start it again if you still need it.');
-    if (saved.recording)
-      this._notes.push('### Recording\nThe action recording stopped: the browser gateway restarted. Start it again if you still need it.');
-    if (saved.lostRoutes)
-      this._notes.push('### Routes\nThe browser gateway restarted: routes you added from code (browser_run_code_unsafe) are gone; routes added with browser_route, offline mode and device emulation were kept.');
-  }
-
-  private async _clearNetworkState() {
-    for (const entry of [...this._registered.keys()])
-      await this._unregisterRoute(entry);
-    this.routes = [];
-    this.offline = false;
-    await this._syncOfflineRoute().catch(() => {});
-  }
-
-  // Tabs opened by this session's pages, for page.waitForEvent('popup') in
-  // browser_run_code_unsafe (such tabs have no opener, see popups.ts).
-  private _popupListeners = new Set<(opener: Page, popup: Page) => void>();
-  openers = new WeakMap<Page, Page>();
-
-  onPopup(listener: (opener: Page, popup: Page) => void) {
-    this._popupListeners.add(listener);
-    return () => this._popupListeners.delete(listener);
-  }
-
-  private _popupOpened(opener: Page, popup: Page) {
-    this.openers.set(popup, opener);
-    for (const listener of this._popupListeners)
-      listener(opener, popup);
-  }
-
-  // Tabs this session adopted, for context "page" events in the isolated view.
-  private _adoptListeners = new Set<(page: Page) => void>();
-
-  onAdopt(listener: (page: Page) => void) {
-    this._adoptListeners.add(listener);
-    return () => this._adoptListeners.delete(listener);
-  }
-
-  private _queue: Promise<unknown> = Promise.resolve();
-  private _running: { name: string; since: number } | undefined;
-
   private async _callTool(name: string, rawArgs: any, signal?: AbortSignal, state: { abandoned: boolean } = { abandoned: false }) {
     this.lastActivity = Date.now();
+    if (this.backend && (this.backend._disconnected || !this._browser?.isConnected()))
+      this._retire();
     if (!this.backend)
-      await this.start();
+      await this._start();
+    const backend = this.backend;
     const { tab, ...args } = rawArgs ?? {};
     if (tab !== undefined) {
-      const context = this.backend._context;
+      const context = backend._context;
       await context.ensureBrowserContext();
       const target = await this._findTab(context, String(tab));
       if (!target)
-        return { content: [{ type: 'text', text: `### Error\nTab "${tab}" not found. Call browser_tabs to list your tabs.` }], isError: true };
+        return errorResult(`Tab "${tab}" not found. Call browser_tabs to list your tabs.`);
       context._currentTab = target;
     }
     if (Date.now() - this._touchedAt > 5 * 60 * 1000) {
       touchFolder(this.ensureFilesDir());
       this._touchedAt = Date.now();
     }
-    const result = await this.backend.callTool(name, args, signal);
+    const browser = this._browser;
+    const result = await backend.callTool(name, args, signal);
+    const disconnected = !browser?.isConnected() || !!backend._disconnected;
+    // The agent's own code closed its browser context (context.close()):
+    // like browser_close, its tabs go.
+    const closedByCode = disconnected && this._host.proxy.closedByClient(this.info.id);
+    // The connection dropped while the call ran: the stock backend disposed
+    // itself, the tabs are still open, and the gateway may repeat the call.
+    const cut = disconnected && !closedByCode;
+    if (cut) {
+      Object.defineProperty(result, 'cutOff', { value: true });
+      if (this.backend === backend)
+        this._retire();
+    }
+    // browser_close means "close my tabs" (the stock backend only forgets
+    // them); the next call gets a fresh backend.
+    const closed = this.backend === backend && (closedByCode || !cut && name === 'browser_close' && backend._disposed);
+    if (!result.isError)
+      this._track(name);
     if (state.abandoned) {
-      if (this.backend?._disposed)
+      if (closed)
         await this._afterClose();
       return result;
     }
-    // Tell the agent once where its files go; paths in later results are
-    // relative to this folder.
     // Saved files are named by absolute path: given "./shot.png", agents went
     // looking for it with `find /`, which scans other apps' data and makes
     // macOS ask the user for access.
@@ -612,13 +417,16 @@ export class AgentSession {
     const passkeys = describePasskeyRequests(this.passkeyRequests.splice(0));
     if (passkeys)
       result.content.push({ type: 'text', text: passkeys });
-    // Remembered for a dropped connection, when the pages are already gone.
-    this.currentTarget = this.currentTargetId();
-    // browser_close disposes the backend and means "close my tabs": the
-    // stock Context only forgets them. The next call gets a fresh backend.
-    if (this.backend._disposed) {
+    if (closed) {
       await this._afterClose();
-    } else if (name === 'browser_tabs' && !result.isError) {
+      return result;
+    }
+    if (cut)
+      return result;
+    const current = this.currentPage();
+    this.currentTarget = current ? await this.targetIdOf(current).catch(() => this.currentTarget) : undefined;
+    this._host.onTabsChanged();
+    if (name === 'browser_tabs' && !result.isError) {
       result.content.push({ type: 'text', text: await this._tabIds() });
       const subagents = this._host.subagentTabs(this);
       if (subagents)
@@ -627,19 +435,34 @@ export class AgentSession {
     return result;
   }
 
+  // What the agent started (and has not stopped) that a reconnect would end.
+  private _track(name: string) {
+    const match = name.match(/^browser_(start|stop)_(video|recording|tracing)$/);
+    if (match)
+      match[1] === 'start' ? this._running.add(match[2] as any) : this._running.delete(match[2] as any);
+    if (name === 'browser_route' || name === 'browser_unroute')
+      this._routes = (this.backend?._context?.routes() ?? []).map(({ handler, ...params }: any) => params);
+  }
+
   // browser_close disposed the backend: "close my browser" means the tabs,
   // routes and offline mode go too, as with upstream's own browser.
   private async _afterClose() {
+    const browser = this._browser;
     this.backend = undefined;
-    for (const page of [...this.owned])
-      await page.close().catch(() => {});
-    await this._clearNetworkState();
-    await releaseContextWide(this, this._shared.context).catch(() => {});
+    this._browser = undefined;
+    this._routes = [];
+    this._lostRoutes = false;
+    this.offline = false;
+    this.emulation.clear();
+    this._running.clear();
+    for (const targetId of this.targets)
+      await this._host.shared.closeTarget(targetId);
+    await browser?.close().catch(() => {});
   }
 
   private async _findTab(context: any, id: string) {
     for (const tab of context._tabs) {
-      if ((await this._shared.targetId(tab.page)).startsWith(id.toUpperCase()))
+      if ((await this.targetIdOf(tab.page)).startsWith(id.toUpperCase()))
         return tab;
     }
     return undefined;
@@ -650,169 +473,96 @@ export class AgentSession {
     const context = this.backend._context;
     const lines = [];
     for (const [index, tab] of context._tabs.entries()) {
-      const id = (await this._shared.targetId(tab.page)).slice(0, 8);
+      const id = (await this.targetIdOf(tab.page)).slice(0, 8);
       lines.push(`- ${index}: ${id}${tab === context._currentTab ? ' (current)' : ''}`);
     }
     return `### Tab ids\n${lines.join('\n')}\nPass "tab": "<id>" to any tool to act on that tab.`;
-  }
-
-  // A link this session's page wanted to open in a new tab (see popups.ts):
-  // becomes one of our tabs, in the background, without changing the current tab.
-  // It opens blank and navigates once it is ours, so the session's routes
-  // and offline mode already apply to its first load.
-  async openInBackground(url: string, opener?: Page) {
-    // Called by page script: only web addresses, and none of ours.
-    if (!/^https?:/i.test(url) || await internalUrlResolved(url, this.internalPorts).catch(() => 'unknown'))
-      return;
-    if (!this.backend)
-      await this.start();
-    const context = this.backend._context;
-    await context.ensureBrowserContext();
-    const page = await this._shared.newBackgroundPage();
-    if (!await this._ownNewPage(page))
-      return;
-    this._adopt(context, page);
-    await this._groups?.addPage(this, page).catch(() => {});
-    // Told as a popup once it is on its way to the URL, as a real popup is.
-    await page.goto(url, { referer: opener?.url(), waitUntil: 'commit' }).catch(() => {});
-    if (opener)
-      this._popupOpened(opener, page);
-  }
-
-  // A frame of this session that ended up on the DevTools port or the
-  // gateway (a redirect, a page's script or link, the popup binding) is sent
-  // away at once; the tools already refuse to go there.
-  async _leaveInternal(frame: any) {
-    const url: string = frame.url();
-    const reason = await internalUrlResolved(url, this.internalPorts).catch(() => undefined);
-    if (!reason)
-      return;
-    console.error(`${this.info.title}: left ${url} (${reason})`);
-    this._notes.push(`### Navigation blocked\nA tab of yours was sent to ${url}; it was taken back to about:blank: ${reason}.`);
-    await frame.goto('about:blank').catch(() => {});
-  }
-
-  // A background tab no session owns, closed when fn is done.
-  async withScratchPage<T>(fn: (page: Page) => Promise<T>): Promise<T> {
-    const page = await this._shared.newBackgroundPage();
-    try {
-      return await fn(page);
-    } finally {
-      await page.close().catch(() => {});
-    }
-  }
-
-  // A new tab of this session in the background; the current tab stays.
-  async openTab(): Promise<Page> {
-    if (!this.backend)
-      await this.start();
-    const context = this.backend._context;
-    await context.ensureBrowserContext();
-    const page = await this._shared.newBackgroundPage();
-    if (!await this._ownNewPage(page))
-      throw new Error('This browser session has ended.');
-    this._adopt(context, page);
-    await this._groups?.addPage(this, page).catch(() => {});
-    return page;
   }
 
   currentPage(): Page | undefined {
     return this.backend?._context?.currentTab()?.page;
   }
 
-  // Set once the session has ended: a tab still being opened for it is then
-  // closed as soon as it exists, instead of staying behind unowned.
+  // Cookies of any site, for the cookie tools when the agent names a domain
+  // (the session's own connection sees only its sites' cookies, see proxy.ts).
+  async allCookies(): Promise<any[]> {
+    const { cookies } = await this._host.shared.cdp.send('Storage.getCookies');
+    return cookies.map((c: any) => ({ name: c.name, value: c.value, domain: c.domain, path: c.path, expires: c.expires,
+      httpOnly: c.httpOnly, secure: c.secure, sameSite: c.sameSite ?? 'Lax' }));
+  }
+
+  // Deletes cookies of any site (an expired copy replaces each).
+  async deleteCookies(cookies: { name: string; domain: string; path: string }[]) {
+    if (cookies.length)
+      await this._host.shared.cdp.send('Storage.setCookies', { cookies: cookies.map(c => ({ name: c.name, value: '', domain: c.domain, path: c.path, expires: 1 })) });
+  }
+
+  // Told to the agent in its next result.
+  note(text: string) {
+    this._notes.push(text);
+  }
+
+  // A link one of this session's pages opens in a new tab (see popups.ts):
+  // a background tab of this session, with that page as its opener. It opens
+  // blank and goes to the link once the session's Playwright has set it up
+  // (see SharedBrowser.createTarget).
+  async openInBackground(url: string, openerTargetId: string) {
+    if (!/^https?:/i.test(url) || internalUrl(url, this.internalPorts))
+      return;
+    await this._host.shared.createTarget({ owner: this.info.id, opener: openerTargetId, navigateTo: url });
+  }
+
+  // Set once the session has ended.
   private _disposed = false;
 
-  async _ownNewPage(page: Page) {
-    if (!this._disposed)
-      return true;
-    await page.close().catch(() => {});
-    return false;
+  get disposed() {
+    return this._disposed;
   }
 
   async dispose({ closeTabs }: { closeTabs: boolean }) {
     this._disposed = true;
-    const backend = this.backend;
-    this.backend = undefined;
-    const pages = [...this.owned, ...this._restored?.pages ?? []];
-    this._restored = undefined;
+    this._retire();
+    this._notes = [];
     if (closeTabs) {
-      for (const page of pages)
-        await page.close().catch(() => {});
+      for (const targetId of this.targets)
+        await this._host.shared?.closeTarget(targetId);
     }
-    await this._clearNetworkState().catch(() => {});
-    removeSnippetListeners(this);
-    await releaseContextWide(this, this._shared.context).catch(() => {});
-    await backend?.dispose().catch(() => {});
+    this._host.proxy?.forget(this.info.id);
   }
 
-  private _adopt(context: any, page: Page) {
-    if (!this.owned.has(page)) {
-      this.owned.add(page);
-      page.once('close', () => this.owned.delete(page));
-    }
-    const targetId = this._shared.cachedTargetId(page);
-    if (targetId) {
-      this.targets.add(targetId);
-    } else {
-      void this._shared.targetId(page).then(id => {
-        this.targets.add(id);
-        this._host.onTabsChanged();
-      }, () => {});
-    }
-    this._host.onTabsChanged();
-    if (!context._tabs.some((tab: any) => tab.page === page))
-      context._onPageCreated(page);
-    for (const listener of this._adoptListeners)
-      listener(page);
+  // What survives a gateway restart: offline mode, routes made with
+  // browser_route (routes from code cannot be saved) and device emulation.
+  savedState(): SavedNetworkState {
+    const routes = this.backend ? (this.backend._context?.routes() ?? []).map(({ handler, ...params }: any) => params) : this._routes;
+    const targets = this.targets;
+    return {
+      offline: this.offline,
+      routes,
+      emulation: [...this.emulation].filter(([id]) => targets.has(id)),
+      lostRoutes: this._lostRoutes || ((this._browser?.contexts()[0] as any)?._routes?.length ?? 0) > routes.length,
+      tracing: this._running.has('tracing'),
+      recording: this._running.has('recording'),
+    };
+  }
+
+  restoreSavedState(saved: SavedNetworkState | undefined) {
+    if (!saved)
+      return;
+    this.offline = saved.offline;
+    this._routes = saved.routes;
+    this.emulation = new Map(saved.emulation);
+    if (saved.tracing)
+      this._notes.push('### Tracing\nTracing stopped: the browser gateway restarted. Start it again if you still need it.');
+    if (saved.recording)
+      this._notes.push('### Recording\nThe action recording stopped: the browser gateway restarted. Start it again if you still need it.');
+    if (saved.lostRoutes)
+      this._notes.push('### Routes\nThe browser gateway restarted: routes you added from code (browser_run_code_unsafe) are gone; routes added with browser_route, offline mode and device emulation were kept.');
+    // The agent was told where its files are before.
+    this.started = true;
+    this._filesNoted = true;
   }
 
   private _patchContext(context: any) {
-    const session = this;
-    const shared = this._shared;
-
-    context._initializeBrowserContext = async function() {
-      const browserContext = this._rawBrowserContext;
-      // Popups opened by one of our tabs belong to us too.
-      const onPage = async (page: Page) => {
-        if (session.owned.has(page) || await shared.isGatewayCreated(page).catch(() => true))
-          return;
-        const opener = await page.opener().catch(() => null);
-        if (opener && session.owned.has(opener)) {
-          session._adopt(this, page);
-          session._popupOpened(opener, page);
-          await session._groups?.addPage(session, page).catch(() => {});
-        }
-      };
-      browserContext.on('page', onPage);
-      this._disposables.push({ dispose: async () => browserContext.off('page', onPage) });
-      return browserContext;
-    };
-
-    context.newTab = async function() {
-      await this.ensureBrowserContext();
-      const page = await shared.newBackgroundPage();
-      if (!await session._ownNewPage(page))
-        throw new Error('This browser session has ended.');
-      session._adopt(this, page);
-      await session._groups?.addPage(session, page).catch(() => {});
-      this._currentTab = this._tabs.find((tab: any) => tab.page === page);
-      return this._currentTab;
-    };
-
-    // The stock versions of the following act on every page of the shared
-    // browser context; here they act on this session's tabs only.
-    context._agentSession = session;
-
-    const upstreamStartRecording = context.startRecording.bind(context);
-    context.startRecording = async function() {
-      await startRecording(session, this, upstreamStartRecording);
-    };
-    context.stopRecording = async function() {
-      return await stopRecording(session, this);
-    };
-
     // A call given up at its timeout keeps running; whatever it does, it no
     // longer changes which tab is current (the agent has moved on, maybe to
     // another tab). Tabs closing still move it, from outside any call.
@@ -826,59 +576,22 @@ export class AgentSession {
       },
     });
 
-    context.routes = () => session.routes;
-    context.addRoute = async function(entry: any) {
-      await this.ensureBrowserContext();
-      await session.addRoute(entry);
-    };
-    context.removeRoute = async (pattern?: string) => await session.removeRoutes(pattern);
-
-    context.startVideoRecording = async function(fileName: string, params: any) {
-      if (this._video)
-        throw new Error('Video recording has already been started.');
-      this._video = { params, fileName, fileNames: [] };
-      for (const tab of this._tabs)
-        await this._startPageVideo(tab.page);
-    };
-
-    context.stopVideoRecording = async function() {
-      if (!this._video)
-        return [];
-      const video = this._video;
-      this._video = undefined;
-      for (const page of session.owned)
-        await page.screencast.stop().catch(() => {});
-      return [...video.fileNames];
-    };
-
     // Each stock Context listens for unhandled rejections process-wide and
     // hands every one to its agent: with many contexts in one process, one
-    // chat's failed download showed up as an error in every other chat's next
-    // result, and once no context was left (a dropped connection) the next one
-    // killed the gateway. The gateway logs them instead (see gateway.ts).
+    // chat's failed download showed up in every other chat's next result.
+    // The gateway logs them instead (see gateway.ts).
     process.off('unhandledRejection', context._onUnhandledRejection);
 
-    // New tabs of the session: tab headers that cannot hang, and offline
-    // mode for navigator.onLine (routes are context-level, see addRoute).
+    // Tab headers that cannot hang (see patchTabHeader).
     const onPageCreated = context._onPageCreated.bind(context);
     context._onPageCreated = function(page: Page) {
       onPageCreated(page);
-      page.on('framenavigated', frame => void session._leaveInternal(frame));
       const tab = this._tabs.find((tab: any) => tab.page === page);
       if (tab)
         patchTabHeader(tab);
-      if (session.offline)
-        void session._emulateOffline(page, true).catch(() => {});
     };
-
-    // Stock selectTab calls page.bringToFront(), which raises the window.
-    context.selectTab = async function(index: number) {
-      const tab = this._tabs[index];
-      if (!tab)
-        throw new Error(`Tab ${index} not found`);
-      this._currentTab = tab;
-      return tab;
-    };
+    for (const tab of context._tabs)
+      patchTabHeader(tab);
   }
 }
 
@@ -888,6 +601,9 @@ export class AgentSession {
 const headerTimeoutMs = 2000;
 
 function patchTabHeader(tab: any) {
+  if (tab.__headerPatched)
+    return;
+  tab.__headerPatched = true;
   const original = tab.headerSnapshot.bind(tab);
   tab.headerSnapshot = async () => {
     let timer: NodeJS.Timeout | undefined;

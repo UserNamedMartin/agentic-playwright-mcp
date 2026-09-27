@@ -209,7 +209,8 @@ try {
   const code = await A.call('browser_run_code_unsafe', { code: 'async page => page.context().pages().map(p => p.url()).join(" ")' });
   works('browser_run_code_unsafe', code);
   expect('browser_run_code_unsafe', 'context().pages() lists only A\'s tabs', !code.text.includes('who=B') && code.text.includes('who=A'), code.text);
-  expect('browser_run_code_unsafe', 'context().browser() is not reachable', /null/.test(await runCode(A, 'async page => String(page.context().browser())')), '');
+  const viaBrowser = await runCode(A, 'async page => page.context().browser().contexts().flatMap(c => c.pages()).map(p => p.url()).join(" ")');
+  expect('browser_run_code_unsafe', 'context().browser() holds only A\'s tabs', viaBrowser.includes('who=A') && !viaBrowser.includes('who=B'), viaBrowser);
   await B.eval('() => { document.cookie = "b_run=1; path=/"; return 1; }');
   await runCode(A, 'async page => { await page.context().clearCookies(); return "cleared"; }');
   expect('browser_run_code_unsafe', 'context().clearCookies() leaves B\'s cookies', (await B.eval('() => document.cookie')).includes('b_run'), 'B lost its cookie');
@@ -223,8 +224,11 @@ try {
   const runOffline = await B.eval(`() => fetch('/probe-run-off').then(r => r.text(), () => 'FAILED')`);
   expect('browser_run_code_unsafe', 'context().setOffline() does not reach B', runOffline === 'REAL', `B: ${runOffline}`);
   await runCode(A, 'async page => { await page.context().setOffline(false); return 1; }');
-  const refusedInit = await runCode(A, 'async page => { await page.context().addInitScript("1"); return "ran"; }');
-  expect('browser_run_code_unsafe', 'context-wide addInitScript refused with a hint', /not available here[\s\S]*page\.addInitScript/.test(refusedInit), refusedInit);
+  // Context-wide page setup is A's own: its new pages get it, B's do not.
+  const initInA = await runCode(A, `async page => { await page.context().addInitScript("window.__aInit = 1"); await page.context().setExtraHTTPHeaders({ "x-only-a": "1" }); const p = await page.context().newPage(); await p.goto(${JSON.stringify(urlA + '&run=init')}); const got = await p.evaluate(() => window.__aInit); await p.close(); return "init " + got; }`);
+  expect('browser_run_code_unsafe', 'context().addInitScript() reaches A\'s new pages', /init 1/.test(initInA), initInA, 'BROKEN');
+  await B.call('browser_navigate', { url: urlB });
+  expect('browser_run_code_unsafe', 'context().addInitScript() does not reach B', (await B.eval('() => String(window.__aInit)')) === 'undefined', 'B got A\'s init script');
   const newPage = await runCode(A, `async page => { const p = await page.context().newPage(); await p.goto(${JSON.stringify(urlA + '&run=new')}); return page.context().pages().length; }`);
   const tabsAfterNew = await A.call('browser_tabs', { action: 'list' });
   expect('browser_run_code_unsafe', 'context().newPage() is one of A\'s tabs', tabsAfterNew.text.includes('run=new'), `${newPage} / ${tabsAfterNew.text}`, 'BROKEN');
@@ -244,8 +248,9 @@ try {
   await A.call('browser_tabs', { action: 'select', index: 0 });
   const D = await chat('chat-D');
   await D.call('browser_navigate', { url: `${urlA}&d=1` });
-  await runCode(D, 'async page => { await page.context().close(); return 1; }');
+  const dClose = await runCode(D, 'async page => { await page.context().close(); return 1; }');
   await sleep(500);
+  expect('browser_run_code_unsafe', 'context().close() answers as the code returned', /### Result\n1/.test(dClose) && !/dropped/.test(dClose), dClose, 'BROKEN');
   expect('browser_run_code_unsafe', 'context().close() closes only its own tabs', (await B.eval('() => location.href')).includes('who=B') && !(await cdpPages()).some(p => p.url.includes('d=1')), 'B\'s tab or D\'s tab state wrong');
 
   // Tabs: only A's own.
@@ -366,22 +371,16 @@ try {
   const stopA = await A.call('browser_stop_tracing');
   works('browser_stop_tracing', stopA, 'A stops its own trace');
   expect('browser_stop_tracing', 'A\'s trace saved in A\'s folder', !stopA.text.includes('chat-B'), stopA.text);
-  // Read with Playwright's own trace loader (npx playwright trace ...).
-  const zipText = result => {
-    const file = result.text.match(/(\/\S+\.zip)/)?.[1];
-    if (!file || !fs.existsSync(file))
-      return '';
-    const cwd = fs.mkdtempSync(path.join(home, 'trace-'));
-    const pw = path.resolve(path.dirname(cli), '..', 'node_modules', 'playwright-core', 'cli.js');
-    const run = (...args) => execFileSync(process.execPath, [pw, 'trace', ...args], { cwd, encoding: 'utf8' });
-    run('open', file);
-    return ['actions', 'console', 'requests'].map(command => run(command)).join('\n');
-  };
-  const traceA = zipText(stopA);
-  const traceBText = zipText(stopB);
-  expect('browser_stop_tracing', 'A\'s trace loads with A\'s actions and console', /Evaluate/.test(traceA) && traceA.includes('A-TRACED'), traceA.slice(0, 300), 'BROKEN');
-  const zipEntries = result => execFileSync('unzip', ['-l', result.text.match(/(\/\S+\.zip)/)?.[1] ?? '/nonexistent'], { encoding: 'utf8' });
-  expect('browser_stop_tracing', 'A\'s trace has its screenshots', /screencast\//.test(zipEntries(stopA)), zipEntries(stopA), 'BROKEN');
+  // The stock trace: an action log and a network log in the chat's folder.
+  const traceText = result => ['trace', 'network'].map(ext => {
+    const file = result.text.match(new RegExp(`(/\\S+\\.${ext})`))?.[1];
+    return file && fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
+  }).join('\n');
+  const traceA = traceText(stopA);
+  const traceBText = traceText(stopB);
+  expect('browser_stop_tracing', 'A\'s trace has A\'s actions and console', /evaluateExpression/.test(traceA) && traceA.includes('A-TRACED'), traceA.slice(0, 300), 'BROKEN');
+  const screencast = path.join(path.dirname(stopA.text.match(/(\/\S+\.trace)/)?.[1] ?? '/nonexistent/x'), 'screencast');
+  expect('browser_stop_tracing', 'A\'s trace has its screenshots', fs.existsSync(screencast) && fs.readdirSync(screencast).length > 0, screencast, 'BROKEN');
   expect('browser_stop_tracing', 'A\'s trace has nothing of B', !traceA.includes('who=B') && !traceA.includes('B-TRACED'), 'B found in A\'s trace');
   expect('browser_stop_tracing', 'B\'s trace has nothing of A', traceBText.length > 0 && !traceBText.includes('who=A') && !traceBText.includes('A-TRACED'), 'A found in B\'s trace');
 

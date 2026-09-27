@@ -131,16 +131,17 @@ try {
 
   // A stall after the connection is made: the given-up attempt's connections
   // (its DevTools connection and second, idle one) must be closed too.
-  swallow = { method: 'Page.addScriptToEvaluateOnNewDocument', remaining: 1 };
+  swallow = { method: 'Browser.setDownloadBehavior', remaining: 1 };
   swallowed.length = 0;
   for (const s of sockets)
     s.close();
   await sleep(1000);
   const again = await call('browser_evaluate', { function: '() => location.pathname' }, 75);
-  check('a stall after connecting is given up too', swallowed.length === 1 && !again.isError, `${again.ms} ms ${again.text}`);
+  check('a stall after connecting is given up too', swallowed.length === 1 && !again.isError && (gatewayLog.match(/gave up on a stalled attempt/g) ?? []).length >= 2, `${again.ms} ms ${again.text}`);
   await sleep(3000);
+  // The gateway's two, and chat-A's own (its Playwright's, see proxy.ts).
   const connections = sockets.size / 2;
-  check('no connections left over from the given-up attempt', connections <= 2, `${connections} DevTools connections open`);
+  check('no connections left over from the given-up attempt', connections <= 3, `${connections} DevTools connections open`);
 } catch (e) {
   failures++;
   console.log(`FAIL ${e.stack}`);

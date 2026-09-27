@@ -9,32 +9,38 @@
 // drops (it does when a Mac's display turns off) the gateway reconnects and
 // hands every session its tabs again, and sessions with tabs are saved to a
 // state file so a restarted gateway finds them too.
+//
+// Each session's Playwright reaches the browser through the proxy (proxy.ts),
+// which shows it only its own tabs; the gateway itself sees the whole browser
+// through one raw DevTools connection (browser.ts). Who owns which tab is kept
+// here (`owners`), by target id.
 import fs from 'node:fs';
 import http from 'node:http';
+import os from 'node:os';
 import path from 'node:path';
-import type { Browser, Page } from 'playwright-core';
 import crypto from 'node:crypto';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { CallToolRequestSchema, ListResourcesRequestSchema, ListToolsRequestSchema, ReadResourceRequestSchema, isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
-import { SharedBrowser } from './browser.js';
+import { type PageCall, SharedBrowser } from './browser.js';
+import type { CdpConnection } from './cdp.js';
 import { TabGroups } from './groups.js';
-import { applyBrowserConfig } from './config.js';
 import { linkToken, readLinkSecret } from './linktoken.js';
-import { removeStaleTraceDirs } from './recording.js';
+import { CdpProxy, type ProxyHost } from './proxy.js';
 import { scopeTools } from './scoped.js';
-import { type SavedNetworkState, AgentSession, defaultCallTimeoutSeconds, errorResult, type SessionHost, type SessionInfo } from './session.js';
+import { type SavedNetworkState, AgentSession, defaultCallTimeoutSeconds, errorResult, profilePorts, type SessionHost, type SessionInfo } from './session.js';
 import { pwTools, z, verifyInternals } from './internals.js';
+import { installNetGuard } from './netguard.js';
 import { extraTools } from './tools.js';
 import { renderDashboard } from './dashboard.js';
-import { openInBackgroundBinding, popupInterceptScript } from './popups.js';
+import { popupInterceptScript } from './popups.js';
 import { TranscriptIndex } from './subagents.js';
 import { cleanFolders, sessionFolder, subagentFolder } from './files.js';
 import { baseIcon, renderDockIcon } from './docktile.js';
 import { appMimeType, openTabWindowTool, tabLinkHtml, tabLinkResource, tabLinkResourceUri, tabLinkTool } from './apps.js';
 import { DesktopChatFile } from './titles.js';
-import { passkeyBinding, passkeyScript, type PasskeyRequest } from './passkeys.js';
-import { describeRequests, holdMs, permissionBinding, permissionScript, permissionTypes, type PermissionRequest } from './permissions.js';
+import { passkeyScript, type PasskeyRequest } from './passkeys.js';
+import { describeRequests, holdMs, permissionScript, permissionTypes, type PermissionRequest } from './permissions.js';
 
 export type GatewayOptions = {
   profile: string;
@@ -75,11 +81,14 @@ type SavedSession = {
   network?: SavedNetworkState;
 };
 
-export class Gateway implements SessionHost {
+export class Gateway implements SessionHost, ProxyHost {
   readonly options: GatewayOptions;
   readonly sessions = new Map<string, AgentSession>();
+  // Who owns which tab: session key by target id. Kept across reconnects.
+  readonly owners = new Map<string, string>();
   shared!: SharedBrowser;
   groups: TabGroups | undefined;
+  proxy!: CdpProxy;
   private _homeTargetId: string | undefined;
   private _stopping = false;
   private _transports = new Map<string, Transport>();
@@ -87,6 +96,8 @@ export class Gateway implements SessionHost {
   private _config: any;
   private _tools: any[] = [];
   private _server: http.Server | undefined;
+  private _ipcServer: http.Server | undefined;
+  private _socketPath = '';
   private _sweeper: NodeJS.Timeout | undefined;
   // Resolves once the browser is connected; tool calls wait for it while the
   // gateway reconnects.
@@ -94,8 +105,8 @@ export class Gateway implements SessionHost {
   // Counts dropped browser connections, to tell which calls one cut off.
   private _connection = 0;
   // The connection an attach attempt is setting up, and the ones given up.
-  private _attaching: Browser | undefined;
-  private _abandoned = new WeakSet<Browser>();
+  private _attaching: CdpConnection | undefined;
+  private _abandoned = new WeakSet<CdpConnection>();
   private _desktopChats = new Map<string, DesktopChatFile>();
   private _saveTimer: NodeJS.Timeout | undefined;
   private _permissions: PermissionDecision[] = [];
@@ -126,18 +137,27 @@ export class Gateway implements SessionHost {
     return `${this.baseUrl}/`;
   }
 
-  private _homePage: Page | undefined;
   private _homeTimer: NodeJS.Timeout | undefined;
 
   private _renderHome() {
-    const page = this._homePage;
-    if (!page || page.isClosed())
-      return;
-    void page.setContent(renderDashboard(this), { timeout: 5000 }).catch(() => {});
+    if (this._homeTargetId && this.shared?.info(this._homeTargetId))
+      void this.shared.setContent(this._homeTargetId, renderDashboard(this)).catch(() => {});
+  }
+
+  // ProxyHost: a session's tab was sent to an internal address and taken back.
+  onNavigationBlocked(key: string, url: string, reason: string) {
+    this.sessions.get(key)?.note(`### Navigation blocked\nA tab of yours was sent to ${url}; it was taken back to about:blank: ${reason}.`);
+  }
+
+  // Ports agents may not reach: this gateway's, its browser's, and every
+  // other profile's (see urls.ts).
+  internalPorts(): string[] {
+    return [String(this.options.port), new URL(this.options.cdpEndpoint).port, ...profilePorts()];
   }
 
   async start() {
     verifyInternals();
+    installNetGuard();
     // Playwright leaves some promises unhandled (a download whose page went
     // away when the browser connection dropped). Upstream every agent's
     // context catches them; the gateway serves many agents and only logs
@@ -160,13 +180,27 @@ export class Gateway implements SessionHost {
     // connection and outlives it.
     this._tools = scopeTools([...pwTools.filteredTools(this._config), ...extraTools(this)])
         .filter(tool => tool.schema.name !== 'browser_annotate');
+    // The browser saves every download here first (see proxy.ts).
+    const downloadsDir = path.join(path.dirname(this.options.filesDir), 'downloads');
+    fs.rmSync(downloadsDir, { recursive: true, force: true });
+    fs.mkdirSync(downloadsDir, { recursive: true });
+    // Sessions' Playwright connections come in over a socket file (see proxy.ts).
+    this._socketPath = path.join(os.tmpdir(), `agentic-playwright-${process.pid}.sock`);
+    fs.rmSync(this._socketPath, { force: true });
+    this.proxy = new CdpProxy(this, this._socketPath, downloadsDir);
+    this._ipcServer = http.createServer((req, res) => res.writeHead(404).end());
+    this._ipcServer.on('upgrade', (req, socket, head) => {
+      if (!this.proxy.handleUpgrade(req, socket, head))
+        socket.destroy();
+    });
+    await new Promise<void>(resolve => this._ipcServer!.listen(this._socketPath, resolve));
+    fs.chmodSync(this._socketPath, 0o600);
     this._server = http.createServer((req, res) => void this._handle(req, res).catch(e => {
       console.error(e);
       if (!res.headersSent)
         res.writeHead(500).end(String(e));
     }));
     await new Promise<void>(resolve => this._server!.listen(this.options.port, this.options.host ?? '127.0.0.1', resolve));
-    removeStaleTraceDirs();
     const saved = this._loadState();
     this._permissions = this._loadPermissions();
     this._ready = this._attachBounded(saved);
@@ -174,7 +208,7 @@ export class Gateway implements SessionHost {
     this._attached = true;
     this._sweeper = setInterval(() => void this._sweep(), 15_000);
     this._sweeper.unref();
-    const restored = [...this.sessions.values()].filter(s => s.owned.size);
+    const restored = [...this.sessions.values()].filter(s => s.targets.size);
     console.error(`[${this.options.profile}] gateway on ${this.baseUrl}/mcp, browser ${this.options.cdpEndpoint}, ` +
       `tab groups ${this.groups ? 'on' : 'off'}${restored.length ? `; restored ${restored.length} session(s) with their tabs` : ''}`);
   }
@@ -193,37 +227,61 @@ export class Gateway implements SessionHost {
       for (const session of this.sessions.values())
         await this._closeSession(session);
     }
+    this.proxy?.closeAll();
     this._server?.close();
-    // Over CDP this only disconnects; the supervisor closes the browser.
-    await this.shared?.browser.close().catch(() => {});
+    this._ipcServer?.close();
+    fs.rmSync(this._socketPath, { force: true });
+    // Only disconnects; the supervisor closes the browser.
+    this.shared?.dispose();
   }
 
   // Connects to the browser and sets everything up on it. Runs at startup
   // and again after the connection drops.
   private async _attach(saved?: SavedSession[]) {
-    const shared = await SharedBrowser.connect(this.options.cdpEndpoint, targetId => this._onTargetDestroyed(targetId),
-        connecting => this._attaching = connecting);
-    shared.browser.on('disconnected', () => this._onDisconnected(shared));
+    let shared: SharedBrowser;
+    shared = await SharedBrowser.connect(this.options.cdpEndpoint, this.owners, {
+      onOwnedTarget: (owner, targetId) => this._onOwnedTarget(owner, targetId),
+      onTargetDestroyed: targetId => this._onTargetDestroyed(targetId),
+      onTargetChanged: () => {},
+      onPageCall: (targetId, call) => this._onPageCall(targetId, call),
+      isOwnerAlive: owner => !!this.sessions.get(owner) && !this.sessions.get(owner)!.disposed,
+      onDownloadEvent: message => void this.proxy.onDownloadEvent(message).catch(() => {}),
+      onDisconnected: () => this._onDisconnected(shared),
+    }, [popupInterceptScript, permissionScript, passkeyScript], connecting => this._attaching = connecting);
     this.shared = shared;
+    await shared.setDownloadBehavior(this.proxy.downloadsDir);
     const groups = new TabGroups(shared);
     this.groups = await groups.init() ? groups : undefined;
-    await shared.context.exposeBinding(openInBackgroundBinding, async ({ page }: { page: Page }, url: string) => {
-      const owner = [...this.sessions.values()].find(session => session.owned.has(page));
-      await owner?.openInBackground(url, page);
-    });
-    await shared.context.addInitScript({ content: popupInterceptScript });
-    await shared.context.exposeBinding(permissionBinding, async ({ page, frame }: { page: Page; frame: any }, request: any) =>
-      await this._onPermissionRequest(page, frame.url(), request));
-    await shared.context.addInitScript({ content: permissionScript });
-    await shared.context.exposeBinding(passkeyBinding, async ({ page, frame }: { page: Page; frame: any }, request: any) =>
-      await this._onPasskeyRequest(page, frame.url(), request));
-    await shared.context.addInitScript({ content: passkeyScript });
-    await applyBrowserConfig(shared.context, this._config, this.baseUrl);
     for (const decision of this._permissions)
       await shared.setPermission(decision).catch(() => {});
     await this._setUpTabs(saved);
     this._dockAppliedAt = 0;
     await this._applyDockTile();
+  }
+
+  // A tab became a session's (it opened it, its page opened it, a fork copy).
+  private _onOwnedTarget(owner: string, targetId: string) {
+    const session = this.sessions.get(owner);
+    if (session)
+      void this.groups?.addTarget(session, targetId).catch(() => {});
+    this.proxy.onOwnedTarget(owner, targetId);
+    this.onTabsChanged();
+  }
+
+  // A page script asks the gateway (see browser.ts bridgeScript).
+  private async _onPageCall(targetId: string, call: PageCall): Promise<unknown> {
+    switch (call.kind) {
+      case 'open': {
+        const owner = this.sessions.get(this.owners.get(targetId) ?? '');
+        await owner?.openInBackground(String(call.payload ?? ''), targetId);
+        return null;
+      }
+      case 'permission':
+        return await this._onPermissionRequest(targetId, call.url, call.payload);
+      case 'passkey':
+        return await this._onPasskeyRequest(targetId, call.url, call.payload);
+    }
+    return null;
   }
 
   // Most setup calls have no timeout of their own: a browser that takes the
@@ -243,10 +301,10 @@ export class Gateway implements SessionHost {
       if (connection) {
         this._abandoned.add(connection);
         console.error(`gave up on a stalled attempt to set up the browser connection: ${(e as Error).message}`);
-        await connection.close().catch(() => {});
         // Its SharedBrowser, if it got that far: canary socket, focus guard.
-        if (this.shared?.browser === connection)
+        if (this.shared?.cdp === connection)
           this.shared.dispose();
+        connection.close();
       }
       throw e;
     } finally {
@@ -259,12 +317,13 @@ export class Gateway implements SessionHost {
   // off), so reconnect and keep every session's tabs. If it is really gone,
   // exit and let the supervisor start a new one.
   private _onDisconnected(shared: SharedBrowser) {
-    if (this._stopping || shared !== this.shared || this._abandoned.has(shared.browser))
+    if (this._stopping || shared !== this.shared || this._abandoned.has(shared.cdp))
       return;
     console.error('browser connection lost; reconnecting');
     // Whether the browser dropped every DevTools client or only ours.
     setTimeout(() => console.error(`the gateway's second DevTools connection is ${shared.canaryState()}`), 1000).unref();
     this._connection++;
+    this.proxy.closeAll();
     for (const session of this.sessions.values())
       session.detach();
     shared.dispose();
@@ -278,7 +337,7 @@ export class Gateway implements SessionHost {
     while (Date.now() < deadline && !this._stopping) {
       try {
         await this._attachBounded();
-        const tabs = [...this.sessions.values()].reduce((n, s) => n + s.targets.size, 0);
+        const tabs = this.owners.size;
         console.error(`reconnected to the browser; ${tabs} agent tab(s) kept`);
         return;
       } catch (e) {
@@ -298,15 +357,9 @@ export class Gateway implements SessionHost {
   // (or a window Chrome restored) and is closed. One window keeps every
   // session's tabs, and so its tab group, together.
   private async _setUpTabs(saved?: SavedSession[]) {
-    const pages = this.shared.context.pages();
-    const byTarget = new Map<string, Page>();
-    for (const page of pages) {
-      const id = await this.shared.targetId(page).catch(() => undefined);
-      if (id)
-        byTarget.set(id, page);
-    }
+    const pages = new Map(this.shared.pages().map(info => [info.targetId, info]));
     for (const entry of saved ?? []) {
-      if (!entry.targets.some(id => byTarget.has(id)))
+      if (!entry.targets.some(id => pages.has(id)))
         continue;
       if (entry.info.pid !== undefined && !isAlive(entry.info.pid))
         continue;
@@ -320,54 +373,50 @@ export class Gateway implements SessionHost {
       }
       session.filesDir = entry.filesDir;
       session.startedAt = entry.startedAt;
-      entry.targets.forEach(id => session.targets.add(id));
+      for (const id of entry.targets) {
+        if (pages.has(id))
+          this.owners.set(id, entry.info.id);
+      }
       session.currentTarget = entry.current;
       session.lastActivity = entry.lastActivity;
       session.restoreSavedState(entry.network);
     }
-    const kept = new Set<string>();
-    for (const session of this.sessions.values()) {
-      session.restore(byTarget);
-      session.targets.forEach(id => kept.add(id));
-      await session.reapplyNetworkState();
+    // Tabs that closed while the gateway was away.
+    for (const [targetId, owner] of [...this.owners]) {
+      if (!pages.has(targetId) || !this.sessions.has(owner))
+        this.owners.delete(targetId);
     }
     // The home tab is never a chat's tab (a chat's page may well be at the
-    // gateway's address): the status page with its key, else one from
-    // before the key, else any tab no chat owns.
-    const unowned = [...byTarget].filter(([id]) => !kept.has(id));
-    const homeId = unowned.find(([, page]) => page.url().startsWith(this.baseUrl))?.[0]
-      ?? unowned[0]?.[0];
-    // With --no-startup-window there may be no window yet.
-    const home = homeId ? byTarget.get(homeId)! : await this.shared.newBackgroundPage(this.statusUrl, true);
-    for (const [id, page] of byTarget) {
-      if (page !== home && !kept.has(id))
-        await page.close().catch(() => {});
+    // gateway's address): the status page, else any tab no chat owns.
+    const unowned = [...pages.values()].filter(info => !this.owners.has(info.targetId));
+    const homeId = unowned.find(info => info.url.startsWith(this.baseUrl))?.targetId ?? unowned[0]?.targetId
+      // With --no-startup-window there may be no window yet.
+      ?? await this.shared.createTarget({ url: this.statusUrl, newWindow: true });
+    for (const info of unowned) {
+      if (info.targetId !== homeId)
+        await this.shared.closeTarget(info.targetId);
     }
-    await this._adoptHome(home);
-    await this.shared.startFocusGuard(this._homeTargetId!);
+    await this._adoptHome(homeId);
     this._saveState();
   }
 
-  private async _adoptHome(home: Page) {
-    if (home.url() !== this.statusUrl)
-      await home.goto(this.statusUrl).catch(() => {});
-    this._homePage = home;
+  private async _adoptHome(homeId: string) {
+    this._homeTargetId = homeId;
+    this.shared.setHomeTarget(homeId);
+    if (this.shared.info(homeId)?.url !== this.statusUrl)
+      await this.shared.navigate(homeId, this.statusUrl).catch(() => {});
     this._renderHome();
     clearInterval(this._homeTimer);
     this._homeTimer = setInterval(() => this._renderHome(), 5000);
     this._homeTimer.unref();
-    await this.groups?.pin(home).catch(() => {});
-    this._homeTargetId = await this.shared.targetId(home);
-    this.shared.setHomeTarget(this._homeTargetId);
+    await this.groups?.pin(homeId).catch(() => {});
+    await this.shared.startFocusGuard(homeId);
     await this.shared.hideApp();
   }
 
   // A tab really closed (not just a dropped connection).
   private _onTargetDestroyed(targetId: string) {
-    let changed = false;
-    for (const session of this.sessions.values())
-      changed = session.targets.delete(targetId) || changed;
-    if (changed)
+    if (this.owners.delete(targetId))
       this.onTabsChanged();
     // Closing the window (red button) closes every tab in it; put a fresh,
     // hidden window back so agents have somewhere to open tabs.
@@ -375,9 +424,9 @@ export class Gateway implements SessionHost {
       console.error('browser window was closed; creating a new hidden one');
       this._homeTargetId = undefined;
       const shared = this.shared;
-      void shared.newBackgroundPage(this.statusUrl, true).then(async page => {
+      void shared.createTarget({ url: this.statusUrl, newWindow: true }).then(async id => {
         if (shared === this.shared)
-          await this._adoptHome(page);
+          await this._adoptHome(id);
       }).catch(e => console.error(e));
     }
   }
@@ -423,7 +472,7 @@ export class Gateway implements SessionHost {
       lastActivity: s.lastActivity,
       startedAt: s.startedAt,
       targets: [...s.targets],
-      current: s.currentTargetId(),
+      current: s.currentTarget,
       network: s.savedState(),
     }));
     try {
@@ -448,12 +497,12 @@ export class Gateway implements SessionHost {
 
   // A page asks for a permission (see permissions.ts). Resolving the returned
   // promise lets the page go on to ask the browser.
-  private async _onPermissionRequest(page: Page, frameUrl: string, raw: any) {
-    const owner = [...this.sessions.values()].find(session => session.owned.has(page));
+  private async _onPermissionRequest(targetId: string, frameUrl: string, raw: any) {
+    const owner = this.sessions.get(this.owners.get(targetId) ?? '');
     const permissions = Array.isArray(raw?.permissions) ? raw.permissions.filter((p: unknown) => typeof p === 'string' && p in permissionTypes) : [];
     if (!owner || !permissions.length)
       return;
-    const origin = safeOrigin(page.url());
+    const origin = safeOrigin(this.shared.info(targetId)?.url ?? '') || safeOrigin(frameUrl);
     const frameOrigin = safeOrigin(frameUrl) || origin;
     const decided = (name: string) => this._permissions.find(d => d.type === permissionTypes[name][0] && d.origin === origin && d.embeddedOrigin === frameOrigin)?.setting;
     // Decided before: the browser answers by itself.
@@ -462,8 +511,8 @@ export class Gateway implements SessionHost {
     const refusedBefore = permissions.some((name: string) => decided(name) === 'denied');
     const hold = !!raw.hold && !refusedBefore;
     const request: PermissionRequest = {
-      page,
-      tab: (await this.shared.targetId(page).catch(() => '')).slice(0, 8),
+      targetId,
+      tab: targetId.slice(0, 8),
       origin,
       frameOrigin,
       permissions,
@@ -503,24 +552,27 @@ export class Gateway implements SessionHost {
         (s.info.desktopChat === forkedFrom || s.info.id === forkedFrom));
     if (!original?.targets.size)
       return undefined;
-    const current = original.currentTargetId();
-    const copies: { page: Page; current: boolean }[] = [];
+    const current = original.currentTarget;
+    const copies: { targetId: string; current: boolean }[] = [];
     const failed: string[] = [];
     for (const targetId of original.targets) {
       try {
-        // A browser started before the extension could duplicate tabs keeps
-        // the old extension until it restarts: open the same URL then.
-        const page = this.groups
-          ? await this.shared.createdPage(this.groups.duplicate(targetId)).catch(() => this._copyByUrl(targetId))
-          : await this._copyByUrl(targetId);
-        copies.push({ page, current: targetId === current });
+        // Owned by the fork before the copy may run, so the original chat
+        // never takes it for a popup of its tab. A browser started before the
+        // extension could duplicate tabs keeps the old extension until it
+        // restarts: open the same URL then.
+        const copy = this.groups
+          ? await this.shared.claimCreation(this.groups.duplicate(targetId), session.info.id).catch(() => this._copyByUrl(targetId, session))
+          : await this._copyByUrl(targetId, session);
+        copies.push({ targetId: copy, current: targetId === current });
+        await this.groups?.addTarget(session, copy).catch(() => {});
       } catch (e) {
         failed.push(`${targetId.slice(0, 8)} (${(e as Error).message})`);
       }
     }
-    await session.adoptCopies(copies);
+    session.currentTarget = copies.find(c => c.current)?.targetId ?? copies[0]?.targetId;
     console.error(`fork ${session.info.title}: copied ${copies.length} tab(s) of ${original.info.title}${failed.length ? `, failed: ${failed.join(', ')}` : ''}`);
-    const ids = await Promise.all(copies.map(async c => (await this.shared.targetId(c.page)).slice(0, 8) + (c.current ? ' (current)' : '')));
+    const ids = copies.map(c => c.targetId.slice(0, 8) + (c.current ? ' (current)' : ''));
     return `### Tabs of the original chat\nThis chat is a fork of "${original.info.title}". Its tabs were copied into your ` +
       `group: ${ids.join(', ') || 'none'}${failed.length ? `; could not copy ${failed.join(', ')}` : ''}. The original tabs stay ` +
       'with that chat. The copies are fresh loads of the same pages (history kept): what a page held only in memory is ' +
@@ -530,11 +582,11 @@ export class Gateway implements SessionHost {
 
   // Without the extension's "Duplicate": open the same URL (no history or
   // sessionStorage).
-  private async _copyByUrl(targetId: string): Promise<Page> {
-    const page = await this.shared.pageByTargetId(targetId);
-    if (!page)
+  private async _copyByUrl(targetId: string, session: AgentSession): Promise<string> {
+    const info = this.shared.info(targetId);
+    if (!info)
       throw new Error('tab not found');
-    return await this.shared.newBackgroundPage(page.url());
+    return await this.shared.createTarget({ url: info.url, owner: session.info.id });
   }
 
   private _desktopChatFile(desktopChat: string) {
@@ -546,15 +598,16 @@ export class Gateway implements SessionHost {
 
   // A page asks for a passkey (see passkeys.ts): 'cancel' when nobody can see
   // the browser to answer the prompt, else 'proceed'.
-  private async _onPasskeyRequest(page: Page, frameUrl: string, raw: any): Promise<'cancel' | 'proceed'> {
-    const owner = [...this.sessions.values()].find(session => session.owned.has(page));
+  private async _onPasskeyRequest(targetId: string, frameUrl: string, raw: any): Promise<'cancel' | 'proceed'> {
+    const owner = this.sessions.get(this.owners.get(targetId) ?? '');
     const kind = raw?.kind === 'create' ? 'create' : 'get';
-    const visible = await this.shared.userCanSee(page).catch(() => false);
+    const visible = await this.shared.userCanSee(targetId).catch(() => false);
+    const pageOrigin = safeOrigin(this.shared.info(targetId)?.url ?? '');
     const request: PasskeyRequest = {
-      page,
-      tab: (await this.shared.targetId(page).catch(() => '')).slice(0, 8),
-      origin: safeOrigin(page.url()),
-      frameOrigin: safeOrigin(frameUrl) || safeOrigin(page.url()),
+      targetId,
+      tab: targetId.slice(0, 8),
+      origin: pageOrigin || safeOrigin(frameUrl),
+      frameOrigin: safeOrigin(frameUrl) || pageOrigin,
       kind,
       cancelled: !visible,
     };
@@ -576,7 +629,7 @@ export class Gateway implements SessionHost {
 
   // browser_permission: sets the permissions for a site and answers the
   // session's matching requests.
-  async answerPermissions(session: AgentSession, decision: 'allow' | 'deny', names: string[] | undefined, origin: string | undefined, currentPage: Page | undefined) {
+  async answerPermissions(session: AgentSession, decision: 'allow' | 'deny', names: string[] | undefined, origin: string | undefined, currentUrl: string | undefined) {
     const unknown = (names ?? []).filter(name => !(name in permissionTypes));
     if (unknown.length)
       throw new Error(`Unknown permission ${unknown.join(', ')}. Known: ${Object.keys(permissionTypes).join(', ')}`);
@@ -584,7 +637,7 @@ export class Gateway implements SessionHost {
         .filter(r => (!names || r.permissions.some(p => names.includes(p))) && (!origin || r.origin === origin || r.frameOrigin === origin));
     const targets = matching.map(r => ({ origin: r.origin, frameOrigin: r.frameOrigin, permissions: names ? r.permissions.filter(p => names.includes(p)) : r.permissions }));
     if (!targets.length) {
-      const pageOrigin = origin ?? safeOrigin(currentPage?.url() ?? '');
+      const pageOrigin = origin ?? safeOrigin(currentUrl ?? '');
       if (!names?.length || !pageOrigin)
         throw new Error('No permission request to answer. To set a permission ahead of time, pass permissions (and origin, or open the site first).');
       targets.push({ origin: pageOrigin, frameOrigin: pageOrigin, permissions: names });
@@ -711,10 +764,7 @@ export class Gateway implements SessionHost {
     // makes the gateway "same origin" with it; browser_run_code_unsafe runs
     // code in this process. Browsers send that name as Host, and an Origin
     // header with requests pages make; MCP clients send neither.
-    const port = this.options.port;
-    const localHosts = [`127.0.0.1:${port}`, `localhost:${port}`, `[::1]:${port}`, `${this.options.host ?? '127.0.0.1'}:${port}`];
-    if (!localHosts.includes(String(req.headers.host ?? '').toLowerCase()) ||
-        (url.pathname === '/mcp' && req.headers.origin !== undefined)) {
+    if (!this._isLocalRequest(req) || (url.pathname === '/mcp' && req.headers.origin !== undefined)) {
       console.error(`refused a request for ${url.pathname} (host ${req.headers.host ?? '-'}, origin ${req.headers.origin ?? '-'})`);
       res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' }).end('Only local MCP clients may use this address.');
       return;
@@ -732,6 +782,12 @@ export class Gateway implements SessionHost {
       return;
     }
     res.writeHead(404).end('Not found');
+  }
+
+  private _isLocalRequest(req: http.IncomingMessage) {
+    const port = this.options.port;
+    const localHosts = [`127.0.0.1:${port}`, `localhost:${port}`, `[::1]:${port}`, `${this.options.host ?? '127.0.0.1'}:${port}`];
+    return localHosts.includes(String(req.headers.host ?? '').toLowerCase());
   }
 
   private async _handleMcp(req: http.IncomingMessage, res: http.ServerResponse) {
@@ -861,7 +917,10 @@ export class Gateway implements SessionHost {
         if (generation === this._connection)
           throw e;
       }
-      if (generation === this._connection)
+      // The session's own connection may notice a drop before the gateway's.
+      if (result?.cutOff && generation === this._connection)
+        await this._droppedOrNot(generation);
+      if (generation === this._connection && !result?.cutOff)
         return result;
       await this._ready;
       if (attempt === 0 && isSafeToRepeat(this._tools, name, args)) {
@@ -871,6 +930,13 @@ export class Gateway implements SessionHost {
       return errorResult('The connection to the browser dropped while this call ran and has been restored; your tabs ' +
         'are still open. The action may or may not have taken effect: check the page (browser_snapshot) before repeating it.');
     }
+  }
+
+  // A session's connection closed during a call: give the gateway's own
+  // connection a moment to tell whether the browser dropped them all.
+  private async _droppedOrNot(generation: number) {
+    for (let i = 0; i < 40 && generation === this._connection; i++)
+      await new Promise(r => setTimeout(r, 50));
   }
 
   // Claude Code subagents are recognized from the chat's transcripts, so they
@@ -896,7 +962,7 @@ export class Gateway implements SessionHost {
     const tab = index === undefined ? context?.currentTab() : context?.tabs()[Number(index)];
     if (!tab)
       return errorResult('No such tab. Open a page first (browser_navigate), then call this again.');
-    const targetId = await this.shared.targetId(tab.page);
+    const targetId = await session.targetIdOf(tab.page);
     const url = tab.page.url();
     const title = await tab.page.title().catch(() => '');
     const link = `${this.baseUrl}/focus?target=${targetId}&t=${linkToken(this._linkSecret, `target:${targetId}`)}`;
@@ -916,11 +982,12 @@ export class Gateway implements SessionHost {
       return undefined;
     const lines: string[] = [];
     for (const child of this.sessions.values()) {
-      if (!child.info.id.startsWith(`${session.info.id}#`) || !child.owned.size)
+      const targets = child.info.id.startsWith(`${session.info.id}#`) ? child.targets : new Set<string>();
+      if (!targets.size)
         continue;
       lines.push(`- ${child.info.label ?? child.info.id.split('#')[1]}:`);
-      for (const page of child.owned)
-        lines.push(`  - ${page.url()}`);
+      for (const targetId of targets)
+        lines.push(`  - ${this.shared.info(targetId)?.url ?? '(closed)'}`);
     }
     return lines.length ? `### Your subagents' tabs\n${lines.join('\n')}` : undefined;
   }
@@ -930,7 +997,7 @@ export class Gateway implements SessionHost {
     const root = session.info.id.split('#')[0];
     const ours = [...this.sessions.values()].some(s => s.info.id.split('#')[0] === root &&
         [...s.targets].some(id => id === targetId));
-    if (!targetId || !ours || !await this.shared.pageByTargetId(targetId))
+    if (!targetId || !ours || !this.shared.info(targetId))
       return errorResult('That tab is closed.');
     await this.shared.focusTab(targetId);
     return { content: [{ type: 'text' as const, text: 'Opened.' }] };
@@ -1019,10 +1086,9 @@ export class Gateway implements SessionHost {
     try {
       if (!this._dockImage) {
         const icon = baseIcon(executablePath, dockIconCache);
-        const worker = await this.groups?.extensionWorker();
-        if (!icon || !worker)
+        if (!icon || !this.groups)
           return;
-        this._dockImage = await renderDockIcon(worker, icon, badge, badgeColor ?? '#d93025');
+        this._dockImage = await renderDockIcon(this.shared, icon, badge, badgeColor ?? '#d93025');
       }
       await this.shared.setDockTile(this._dockImage);
       this._dockAppliedAt = Date.now();
@@ -1073,6 +1139,10 @@ export class Gateway implements SessionHost {
       }
     }
     await session.dispose({ closeTabs: !this.options.keepTabsOnExit });
+    for (const [targetId, owner] of [...this.owners]) {
+      if (owner === session.info.id)
+        this.owners.delete(targetId);
+    }
     await this.groups?.forget(session);
     this.onTabsChanged();
   }

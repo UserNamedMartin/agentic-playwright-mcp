@@ -1,14 +1,12 @@
-// Cookie and storage tools scoped to the calling session. Upstream they act on
-// the whole browser context, which it owns alone; here the context is shared,
-// so "clear all cookies" or "export storage state" would reach every other chat
-// and the user's own logins. They act on the sites of the session's own tabs
-// instead; list and delete still reach another site when the agent names its
-// domain explicitly.
+// Cookie and storage tools scoped to the calling session. Everything else a
+// session's Playwright sees is its own (see proxy.ts), but cookies and site
+// storage are the browser's, shared by every chat and the user's logins on
+// purpose: "clear all cookies" or "export storage state" would reach all of
+// them. These tools act on the sites of the session's own tabs instead; list
+// and delete still reach another site when the agent names its domain.
 import fs from 'node:fs';
 import type { BrowserContext, Cookie } from 'playwright-core';
 import { z } from './internals.js';
-import { isolatedView } from './isolation.js';
-import { startTracing, stopRecording, stopTracing } from './recording.js';
 import { refuseInternalUrl } from './urls.js';
 
 // Sites (http and https URLs) of the session's open tabs.
@@ -35,10 +33,10 @@ function domainMatches(cookie: Cookie, domain: string) {
   return actual === wanted || actual.endsWith(`.${wanted}`);
 }
 
-async function removeCookies(browserContext: BrowserContext, cookies: Cookie[]) {
-  for (const c of cookies)
-    await browserContext.clearCookies({ name: c.name, domain: c.domain, path: c.path });
-}
+// Any site's cookies go through the gateway's own connection: the session's
+// sees only its sites' (see proxy.ts).
+const allCookies = async (context: any): Promise<Cookie[]> => await context._agentSession.allCookies();
+const removeCookies = async (context: any, cookies: Cookie[]) => await context._agentSession.deleteCookies(cookies);
 
 // Cookies and local storage of the sites open in the session's tabs. Read
 // from those tabs: browserContext.storageState() would visit every origin the
@@ -69,8 +67,8 @@ export async function scopedStorageState(context: any) {
 export async function applyStorageState(context: any, state: any) {
   const browserContext: BrowserContext = await context.ensureBrowserContext();
   const cookies: Cookie[] = state.cookies ?? [];
-  for (const domain of new Set(cookies.map(c => c.domain)))
-    await browserContext.clearCookies({ domain });
+  const domains = new Set(cookies.map(c => c.domain));
+  await removeCookies(context, (await allCookies(context)).filter(c => domains.has(c.domain)));
   if (cookies.length)
     await browserContext.addCookies(cookies);
   const origins: { origin: string; localStorage: { name: string; value: string }[] }[] = state.origins ?? [];
@@ -85,24 +83,21 @@ export async function applyStorageState(context: any, state: any) {
       await tab.page.evaluate(write, items);
       continue;
     }
-    await context._agentSession.withScratchPage(async (page: any) => {
+    // A scratch tab of the session's own, closed right after.
+    const page = await browserContext.newPage();
+    try {
       await page.route(`${origin}/**`, (route: any) => route.fulfill({ contentType: 'text/html', body: '<html></html>' }));
       await page.goto(`${origin}/`);
       await page.evaluate(write, items);
-    });
+    } finally {
+      await page.close().catch(() => {});
+    }
   }
   return { cookies: cookies.length, origins: origins.length };
 }
 
-// Called when a session ends or closes its browser: it stops recording and
-// tracing (see recording.ts).
-export async function releaseContextWide(session: any, context: any) {
-  if (!context)
-    return;
-  await stopRecording(session, context).catch(() => {});
-  await stopTracing(session, context, true).catch(() => {});
-}
-
+// The proxy refuses internal addresses anyway (see proxy.ts); checked first
+// here so that "open a new tab at <address>" leaves no empty tab behind.
 const guardedUrl = (context: any, url: unknown) => {
   if (typeof url === 'string')
     refuseInternalUrl(url, context._agentSession.internalPorts);
@@ -121,45 +116,19 @@ const replacements: Record<string, { description?: string; inputSchema?: any; ha
       await original(context, params, response);
     },
   },
+  // Offline mode is the session's own (per tab of its connection); it is
+  // remembered to set it again on a new connection.
   browser_network_state_set: {
-    description: 'Take your tabs offline or back online. Other chats share this browser and are not affected.',
-    handle: async (context, params, response) => {
-      await context._agentSession.setOffline(params.state === 'offline');
-      response.addTextResult(`Network is now ${params.state} in your tabs`);
-      response.addCode(`await page.context().setOffline(${params.state === 'offline'});`);
-    },
-  },
-  browser_start_tracing: {
-    description: 'Start trace recording of your tabs (actions, snapshots, screenshots, console, network).',
-    handle: async (context, params, response) => {
-      await startTracing(context._agentSession, context);
-      response.addTextResult('Trace recording started. Only your own tabs are recorded; call browser_stop_tracing to get the trace.');
-    },
-  },
-  browser_stop_tracing: {
-    description: 'Stop trace recording and save the trace of your tabs.',
-    handle: async (context, params, response) => {
-      const zip = await stopTracing(context._agentSession, context);
-      const file = await response.resolveClientOutputFile({ prefix: 'trace', ext: 'zip' }, 'Trace');
-      await response.addFileResult(file, zip);
-      response.addTextResult('Trace recording stopped. Open the trace with: npx playwright show-trace <file>');
-    },
-  },
-  // Stock start_recording also brings the tab to the front, which raises the
-  // window over whatever the user is doing.
-  browser_start_recording: {
-    handle: async (context, params, response) => {
-      await context.ensureTab();
-      await context.startRecording();
-      response.addTextResult('Recording started. Call browser_stop_recording to retrieve the recorded actions.');
+    handle: async (context, params, response, original) => {
+      await original(context, params, response);
+      context._agentSession.offline = params.state === 'offline';
     },
   },
   browser_cookie_list: {
     description: 'List the cookies of the sites open in your tabs (or of "domain", if given). Other chats share this browser, so other sites are left out by default.',
     handle: async (context, params, response) => {
-      const browserContext: BrowserContext = await context.ensureBrowserContext();
       let cookies = params.domain
-        ? (await browserContext.cookies()).filter(c => domainMatches(c, params.domain))
+        ? (await allCookies(context)).filter(c => domainMatches(c, params.domain))
         : await ownCookies(context);
       if (params.path)
         cookies = cookies.filter(c => c.path.startsWith(params.path));
@@ -184,12 +153,11 @@ const replacements: Record<string, { description?: string; inputSchema?: any; ha
       domain: z.string().optional().describe('Delete it on this domain instead of the sites of your tabs.'),
     }),
     handle: async (context, params, response) => {
-      const browserContext: BrowserContext = await context.ensureBrowserContext();
       const candidates = params.domain
-        ? (await browserContext.cookies()).filter(c => domainMatches(c, params.domain))
+        ? (await allCookies(context)).filter(c => domainMatches(c, params.domain))
         : await ownCookies(context);
       const matching = candidates.filter(c => c.name === params.name);
-      await removeCookies(browserContext, matching);
+      await removeCookies(context, matching);
       response.addTextResult(matching.length
         ? `Deleted ${matching.map(c => `${c.name} (domain: ${c.domain})`).join(', ')}`
         : `Cookie '${params.name}' not found. ${scopeNote}`);
@@ -199,9 +167,8 @@ const replacements: Record<string, { description?: string; inputSchema?: any; ha
   browser_cookie_clear: {
     description: 'Clear the cookies of the sites open in your tabs. Other chats share this browser, so other sites (and the user\'s logins there) are left alone.',
     handle: async (context, params, response) => {
-      const browserContext: BrowserContext = await context.ensureBrowserContext();
       const cookies = await ownCookies(context);
-      await removeCookies(browserContext, cookies);
+      await removeCookies(context, cookies);
       const sites = [...new Set(ownUrls(context).map(u => new URL(u).hostname))];
       response.addTextResult(sites.length
         ? `Cleared ${cookies.length} cookie(s) of ${sites.join(', ')}`
@@ -226,9 +193,6 @@ const replacements: Record<string, { description?: string; inputSchema?: any; ha
       response.addTextResult(`Storage state restored from ${params.filename}: ${cookies} cookie(s), local storage of ${origins} origin(s)`);
       response.addCode(`await page.context().setStorageState(${JSON.stringify(params.filename)});`);
     },
-  },
-  browser_run_code_unsafe: {
-    handle: async (context, params, response, original) => await original(isolatedView(context), params, response),
   },
 };
 

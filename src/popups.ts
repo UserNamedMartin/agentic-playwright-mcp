@@ -1,14 +1,13 @@
 // Links that open a new tab (target="_blank", named targets, Cmd/Ctrl-click)
 // would make Chrome open a foreground tab and raise its window. A page script
-// cancels such clicks and asks the gateway to open the URL as a background tab
-// of the session that owns the page. It runs last (window, bubble phase) and
+// cancels such clicks and asks the gateway (through the page bridge, see
+// browser.ts) to open the URL as a background tab of the session that owns the
+// page, with that page as its opener. It runs last (window, bubble phase) and
 // skips clicks the site already handled, so sites that open windows from their
 // own click handlers keep working. Clicks a page's script makes count only
-// with a user action, as for Chrome's popup blocker. Browsers open target=_blank links without
-// an opener anyway, so nothing is lost; links that ask for rel="opener" and
-// window.open() calls (sign-in popups rely on the opener) are left alone.
-export const openInBackgroundBinding = '__agenticOpenInBackground';
-
+// with a user action, as for Chrome's popup blocker. Links that ask for
+// rel="opener" and window.open() calls (sign-in popups rely on the opener) are
+// left alone.
 export const popupInterceptScript = `(() => {
   if (window.__agenticPopupIntercept)
     return;
@@ -26,9 +25,9 @@ export const popupInterceptScript = `(() => {
       return;
     const target = (anchor.getAttribute('target') || '').toLowerCase();
     const newTab = (target && !['_self', '_parent', '_top'].includes(target)) || event.metaKey || event.ctrlKey;
-    if (!newTab || typeof window.${openInBackgroundBinding} !== 'function')
+    if (!newTab || !window.__agenticBridge)
       return;
     event.preventDefault();
-    window.${openInBackgroundBinding}(anchor.href);
+    window.__agenticBridge.call('open', anchor.href);
   });
 })();`;

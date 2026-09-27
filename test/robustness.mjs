@@ -165,11 +165,9 @@ try {
   const width = await A('browser_evaluate', { function: '() => innerWidth' });
   check('device emulation survives a dropped connection', /500/.test(width.text), width.text);
   await sleep(1000);
-  const traceDirs = fs.readdirSync(tmp).filter(name => name.startsWith('agentic-trace-'));
-  check('a trace cut off by the drop leaves no files behind', traceDirs.length === 0, traceDirs.join(', '));
   const retrace = await A('browser_start_tracing');
   const stopped = await A('browser_stop_tracing');
-  check('tracing works again after the drop', !retrace.isError && !stopped.isError && /\.zip/.test(stopped.text), `${retrace.text.slice(0, 100)} / ${stopped.text.slice(0, 100)}`);
+  check('tracing works again after the drop', !retrace.isError && !stopped.isError && /\.trace\b/.test(stopped.text), `${retrace.text.slice(0, 100)} / ${stopped.text.slice(0, 100)}`);
   await A('browser_network_state_set', { state: 'offline' });
   sockets.forEach(s => s.destroy());
   await sleep(6000);
@@ -254,8 +252,6 @@ try {
   check('offline mode survives a gateway restart', /"offline"/.test(restarted.text), restarted.text);
   check('the agent is told routes from code are gone', /### Routes/.test(tabsAfterRestart.text + restarted.text), restarted.text);
   check('the agent is told tracing and recording stopped with the restart', /### Tracing/.test(tabsAfterRestart.text) && /### Recording/.test(tabsAfterRestart.text), tabsAfterRestart.text.slice(-400));
-  const staleDirs = fs.readdirSync(tmp).filter(name => name.startsWith('agentic-trace-'));
-  check('no trace dir left from before the restart', staleDirs.length === 0, staleDirs.join(', '));
   await A2('browser_network_state_set', { state: 'online' });
   const mockedAgain = await A2('browser_evaluate', { function: '() => fetch("/mocked").then(r => r.text())' });
   check('browser_route routes survive a gateway restart', mockedAgain.text.includes('MOCKED'), mockedAgain.text);

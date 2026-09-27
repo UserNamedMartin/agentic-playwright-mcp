@@ -4,16 +4,13 @@
 // - the browser runs with --deny-permission-prompts, so no prompt is ever shown
 //   (and nothing hangs): a request without a decision is refused;
 // - a page script tells the gateway about each request before the browser sees
-//   it; the agent reads about it in its next tool result and answers with
+//   it (through the page bridge, see browser.ts); the agent reads about it in its next tool result and answers with
 //   browser_permission, which sets the permission for that site;
 // - requests that can wait (camera, microphone, location, notifications,
 //   MIDI) are held until the agent answers, for up to holdMs, so the page then
 //   simply gets its answer. The others need the user's click to still be fresh,
 //   so they go ahead at once (refused unless allowed before) and the agent
 //   repeats the action after allowing.
-import type { Page } from 'playwright-core';
-
-export const permissionBinding = '__agenticPermission';
 // AGENTIC_PERMISSION_HOLD_MS shortens it for tests.
 export const holdMs = Number(process.env.AGENTIC_PERMISSION_HOLD_MS) || 2 * 60 * 1000;
 
@@ -35,7 +32,7 @@ export const permissionTypes: Record<string, string[]> = {
 };
 
 export type PermissionRequest = {
-  page: Page;
+  targetId: string;
   tab: string;
   // The page (top-level) origin and the requesting frame's origin.
   origin: string;
@@ -73,14 +70,13 @@ export const permissionScript = `(() => {
   if (window.__agenticPermissionHooks)
     return;
   window.__agenticPermissionHooks = true;
-  const binding = ${JSON.stringify(permissionBinding)};
   // Reported synchronously, so the agent usually reads about it in the result
   // of the very call (a click) that caused it. The gateway knows which
   // permissions were decided and answers those at once.
   const ask = (permissions, api, hold) => {
-    if (typeof window[binding] !== 'function')
+    if (!window.__agenticBridge)
       return Promise.resolve();
-    return window[binding]({ permissions, api, hold }).catch(() => {});
+    return window.__agenticBridge.call('permission', { permissions, api, hold }).catch(() => {});
   };
   // kind: 'hold' (wait for the answer, API returns a promise), 'callback' (wait,
   // API returns nothing), 'report' (tell the gateway and go ahead).

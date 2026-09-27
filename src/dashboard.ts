@@ -1,13 +1,14 @@
-// Status page served at the gateway root. It is also the browser's pinned home
-// tab, so opening the window shows who is working in it.
+// The status page, written into the browser's pinned home tab (see
+// Gateway._renderHome), so opening the window shows who is working in it.
 import { escapeHtml, type Gateway } from './gateway.js';
 
 export function renderDashboard(gateway: Gateway) {
   const sessions = [...gateway.sessions.values()].filter(session => session.started);
   const rows = sessions.map(session => {
-    const tabs = [...session.owned].map(page => `<li>${escapeHtml(page.url())}</li>`).join('');
+    const targets = session.targets;
+    const tabs = [...targets].map(id => `<li>${escapeHtml(gateway.shared?.info(id)?.url ?? '')}</li>`).join('');
     const idle = Math.round((Date.now() - session.lastActivity) / 1000);
-    return `<tr><td>${escapeHtml(session.info.title)}</td><td>${session.owned.size}<ul>${tabs}</ul></td><td>${idle}s ago</td></tr>`;
+    return `<tr><td>${escapeHtml(session.info.title)}</td><td>${targets.size}<ul>${tabs}</ul></td><td>${idle}s ago</td></tr>`;
   }).join('');
   return `<!doctype html>
 <meta charset="utf-8">

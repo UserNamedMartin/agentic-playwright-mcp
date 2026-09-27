@@ -8,7 +8,7 @@
 // This covers what agents do through the browser tools; any local process can
 // still reach the DevTools port directly (see README, "Things to know").
 
-function isLoopback(hostname: string) {
+export function isLoopback(hostname: string) {
   const host = hostname.replace(/^\[|\]$/g, '').replace(/\.$/, '').toLowerCase();
   if (host === 'localhost' || host.endsWith('.localhost'))
     return true;

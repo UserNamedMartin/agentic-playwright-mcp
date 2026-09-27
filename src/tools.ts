@@ -50,7 +50,7 @@ export function extraTools(gateway: Gateway) {
       const tab = params.index === undefined ? await context.ensureTab() : context.tabs()[params.index];
       if (!tab)
         throw new Error(`Tab ${params.index} not found`);
-      await gateway.shared.focusTab(await gateway.shared.targetId(tab.page));
+      await gateway.shared.focusTab(await context._agentSession.targetIdOf(tab.page));
       response.addTextResult('The window is now in front on this tab.');
     },
   };
@@ -79,7 +79,7 @@ export function extraTools(gateway: Gateway) {
       const tab = await context.ensureTab();
       const page: Page = tab.page;
       const session = context._agentSession;
-      const targetId = await gateway.shared.targetId(page);
+      const targetId = await session.targetIdOf(page);
       if (params.reset) {
         await applyEmulation(page, undefined);
         session.emulation.delete(targetId);
@@ -128,10 +128,7 @@ export function extraTools(gateway: Gateway) {
       type: 'action',
     },
     handle: async (context: any, params: { decision: 'allow' | 'deny'; permissions?: string[]; origin?: string }, response: any) => {
-      const session = [...gateway.sessions.values()].find(s => s.backend?._context === context);
-      if (!session)
-        throw new Error('No browser session for this call.');
-      response.addTextResult(await gateway.answerPermissions(session, params.decision, params.permissions, params.origin, context.currentTab()?.page));
+      response.addTextResult(await gateway.answerPermissions(context._agentSession, params.decision, params.permissions, params.origin, context.currentTab()?.page.url()));
     },
   };
 

@@ -3,7 +3,7 @@
 // browser nobody sees it, so the request used to hang until the site gave up
 // ("the request timed out") and the agent never learned why; the page's other
 // buttons often do nothing meanwhile. Instead a page script asks the gateway
-// first:
+// first (through the page bridge, see browser.ts):
 // - nobody can see the browser (hidden, minimized or headless): the request is
 //   cancelled at once, as if the prompt was dismissed (NotAllowedError), so the
 //   site offers its other ways to sign in right away;
@@ -12,12 +12,9 @@
 // Either way the agent reads about it in its next tool result. Passive requests
 // (mediation "conditional", passkey autofill) are left alone: they wait for a
 // click in an autofill list and never block the page.
-import type { Page } from 'playwright-core';
-
-export const passkeyBinding = '__agenticPasskey';
 
 export type PasskeyRequest = {
-  page: Page;
+  targetId: string;
   tab: string;
   origin: string;
   frameOrigin: string;
@@ -50,16 +47,15 @@ export const passkeyScript = `(() => {
   if (window.__agenticPasskeyHooks)
     return;
   window.__agenticPasskeyHooks = true;
-  const binding = ${JSON.stringify(passkeyBinding)};
   const proto = window.CredentialsContainer && CredentialsContainer.prototype;
   for (const kind of ['get', 'create']) {
     const original = proto && proto[kind];
     if (typeof original !== 'function')
       continue;
     const wrapped = function(options, ...rest) {
-      if (!options || !options.publicKey || options.mediation === 'conditional' || typeof window[binding] !== 'function')
+      if (!options || !options.publicKey || options.mediation === 'conditional' || !window.__agenticBridge)
         return original.call(this, options, ...rest);
-      return window[binding]({ kind }).catch(() => 'proceed').then(answer => answer === 'cancel'
+      return window.__agenticBridge.call('passkey', { kind }).catch(() => 'proceed').then(answer => answer === 'cancel'
         ? Promise.reject(new DOMException('Passkeys cannot be used in this browser: nobody can see its prompt.', 'NotAllowedError'))
         : original.call(this, options, ...rest));
     };

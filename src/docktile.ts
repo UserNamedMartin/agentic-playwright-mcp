@@ -6,7 +6,7 @@
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import type { Worker } from 'playwright-core';
+import type { SharedBrowser } from './browser.js';
 
 export const defaultBadgeColors = ['#d93025', '#1a73e8', '#188038', '#e37400', '#9334e6', '#007b83'];
 
@@ -37,9 +37,14 @@ export function baseIcon(executablePath: string, cacheFile: string): string | un
   }
 }
 
-// Draws the icon with the label tag; returns base64 PNG.
-export async function renderDockIcon(worker: Worker, icon: string, label: string, color: string): Promise<string> {
-  return await worker.evaluate(async ([icon, label, color]) => {
+// Draws the icon with the label tag in the extension's service worker;
+// returns base64 PNG.
+export async function renderDockIcon(shared: SharedBrowser, icon: string, label: string, color: string): Promise<string> {
+  return await shared.extensionEvaluate<string>(`(${draw.toString()})(${JSON.stringify([icon, label, color])})`);
+}
+
+async function draw([icon, label, color]: [string, string, string]): Promise<string> {
+  {
     const size = 512;
     const bytes = Uint8Array.from(atob(icon), c => c.charCodeAt(0));
     const bitmap = await createImageBitmap(new Blob([bytes], { type: 'image/png' }));
@@ -72,5 +77,5 @@ export async function renderDockIcon(worker: Worker, icon: string, label: string
     for (let i = 0; i < buffer.length; i += 0x8000)
       binary += String.fromCharCode(...buffer.subarray(i, i + 0x8000));
     return btoa(binary);
-  }, [icon, label, color] as const);
+  }
 }

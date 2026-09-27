@@ -223,9 +223,9 @@ try {
   await sleep(1000);
   const afterFrame = await A.call('browser_snapshot');
   check('an iframe on the DevTools port is undone', !afterFrame.text.includes('webSocketDebuggerUrl'), afterFrame.text.slice(0, 160));
-  await A.call('browser_evaluate', { function: `() => { window.__agenticOpenInBackground('http://127.0.0.1:${cdpPort}/json/list'); return 1; }` });
+  await A.call('browser_evaluate', { function: `() => { window.__agenticBridge.call('open', 'http://127.0.0.1:${cdpPort}/json/list'); return 1; }` });
   await sleep(1000);
-  check('the popup binding does not open the DevTools port', !(await targets()).some(t => t.url.includes(`:${cdpPort}/json`)), 'a tab is at the DevTools port');
+  check('the page bridge does not open the DevTools port', !(await targets()).some(t => t.url.includes(`:${cdpPort}/json`)), 'a tab is at the DevTools port');
   await A.call('browser_navigate', { url: urlA });
   await A.call('browser_navigate', { url: urlA });
   const viaRedirects = await A.code(`async page => {
@@ -265,46 +265,66 @@ try {
       urls((await (await (await page.evaluateHandle(() => ({ el: document.body }))).getProperties()).get('el').asElement().ownerFrame()).page().context()),
       String(page.context().browser()),
       page.context().serviceWorkers().length + ' workers',
-      JSON.stringify(await page.request.storageState()),
-      JSON.stringify(await page.context().request.storageState()),
-      JSON.stringify(await page.context().storageState()),
+      // (A's tabs were sent to internal addresses above: saving their storage
+      // state visits that origin again, which is refused.)
+      await page.request.storageState().then(JSON.stringify, e => 'storageState: ' + e.message.slice(0, 60)),
+      await page.context().storageState().then(JSON.stringify, e => 'storageState: ' + e.message.slice(0, 60)),
     ].join(' | ');
   }`);
   check('run_code: pages, frames, locators, handles lead only to A\'s tabs', paths.includes('who=A') && !paths.includes('who=B'), paths);
+  const bState = await B.code('async page => JSON.stringify(await page.context().storageState())');
+  check('run_code: storageState holds only the chat\'s own sites', bState.includes('b_secret') && !bState.includes('127.0.0.1:' + port), bState.slice(0, 300));
 
   // run_code: context-wide APIs.
   await B.call('browser_evaluate', { function: `() => { document.cookie = "b_keep=${SECRET}; path=/"; return 1; }` });
   const bCreateBefore = (await B.call('browser_evaluate', { function: '() => String(navigator.credentials.create)' })).text.split('### Ran')[0];
+  const bTargetId = (await targets()).find(t => t.url.includes('who=B'))?.id ?? 'none';
   const wide = await A.code(`async page => {
     const out = [];
     const cdp = await page.context().newCDPSession(page);
     for (const [method, params] of [['Target.getTargets', {}], ['Network.getAllCookies', {}], ['Storage.getCookies', {}], ['Browser.getVersion', {}]])
       out.push(await cdp.send(method, params).then(r => method + ' GOT ' + JSON.stringify(r).slice(0, 300), e => method + ' refused'));
     out.push(await cdp.send('Runtime.evaluate', { expression: '1+1' }).then(r => 'own runtime ' + r.result.value, e => 'own runtime refused'));
-    out.push(await Promise.resolve().then(() => page.context().credentials.install({})).then(() => 'credentials installed', e => 'credentials refused'));
+    // Through a tab's own session, other tabs stay out of reach.
+    const other = '${bTargetId}';
+    for (const [method, params] of [['Target.attachToTarget', { targetId: other, flatten: true }], ['Target.getTargetInfo', { targetId: other }], ['Target.closeTarget', { targetId: other }]])
+      out.push(await cdp.send(method, params).then(r => method + ' on B GOT ' + JSON.stringify(r).slice(0, 80), e => method + ' on B refused'));
+    out.push(await cdp.detach().then(() => 'detach ok', e => 'detach failed ' + e.message.slice(0, 60)));
+    await page.context().grantPermissions(['geolocation']);
+    out.push(await Promise.resolve().then(() => page.context().credentials.install({})).then(() => 'credentials installed', e => 'credentials refused ' + e.message.slice(0, 60)));
     await page.request.dispose();
     await page.context().clearCookies({ domain: /./ });
     return out.join(' | ');
   }`);
   check('run_code: CDP session only reaches its own tab', /Target.getTargets refused/.test(wide) && /getAllCookies refused/.test(wide) && /Storage.getCookies refused/.test(wide) && /own runtime 2/.test(wide), wide);
+  const wideResult = wide.split('### Ran')[0];
+  check('run_code: a tab\'s CDP session cannot attach to, read or close another chat\'s tab', (wideResult.match(/on B refused/g) ?? []).length === 3 && !/on B GOT/.test(wideResult), wideResult);
+  check('run_code: a CDP session detaches', /detach ok/.test(wideResult), wideResult);
+  const bGeo = await B.call('browser_evaluate', { function: '() => navigator.permissions.query({ name: "geolocation" }).then(p => p.state)' });
+  check('run_code: grantPermissions without an origin reaches only A\'s sites', !/granted/.test(bGeo.text.split('### Ran')[0]), bGeo.text.slice(0, 120));
   await B.call('browser_navigate', { url: `${urlB}&after-credentials=1` });
   const bCreate = (await B.call('browser_evaluate', { function: '() => String(navigator.credentials.create)' })).text.split('### Ran')[0];
-  check('run_code: context.credentials cannot replace B\'s passkey API', /credentials refused/.test(wide) && bCreate === bCreateBefore, `${wide} / B before: ${bCreateBefore.slice(0, 80)} after: ${bCreate.slice(0, 80)}`);
+  check('run_code: A\'s context.credentials leaves B\'s passkey API alone', bCreate === bCreateBefore, `${wide} / B before: ${bCreateBefore.slice(0, 80)} after: ${bCreate.slice(0, 80)}`);
   const bRequest = await B.code(`async page => (await page.request.get('${urlB.replace('?who', 'api?who')}')).status()`);
   check('run_code: A\'s page.request.dispose() leaves B\'s working', /200/.test(bRequest), bRequest);
   check('run_code: clearCookies with a domain pattern leaves B\'s cookies', (await B.call('browser_evaluate', { function: '() => document.cookie' })).text.includes('b_keep'), 'B lost its cookie');
 
-  // run_code: shared recorder mode, debugger, download behavior.
+  // run_code: locator picking and pausing are A's own (its connection's
+  // recorder and debugger); download behavior and service workers are the
+  // browser's.
   const shared = await A.code(`async page => {
     const out = [];
-    for (const name of ['pickLocator', 'cancelPickLocator', 'pause'])
-      out.push(await page[name]().then(() => name + ' RAN', e => /not available here/.test(e.message) ? name + ' refused' : name + ' other ' + e.message.slice(0, 40)));
+    const picking = page.pickLocator().then(() => 'picked', e => 'pick ended');
+    await page.waitForTimeout(500);
+    await page.cancelPickLocator();
+    out.push(await picking);
+    out.push(await page.pause().then(() => 'pause returned', e => 'pause ' + e.message.slice(0, 40)));
     const cdp = await page.context().newCDPSession(page);
     for (const method of ['Page.setDownloadBehavior', 'ServiceWorker.stopAllWorkers'])
       out.push(await cdp.send(method, method.startsWith('Page') ? { behavior: 'deny' } : {}).then(() => method + ' RAN', () => method + ' refused'));
     return out.join(' | ');
-  }`).then(t => t.split('### Ran')[0]);
-  check('run_code: shared recorder mode, debugger and download behavior refused', (shared.match(/refused/g) ?? []).length === 5, shared);
+  }`, 60).then(t => t.split('### Ran')[0]);
+  check('run_code: download behavior and service workers refused, picking and pause end', (shared.match(/refused/g) ?? []).length === 2 && /pick ended/.test(shared) && /pause returned/.test(shared), shared);
 
   // run_code: objects handed to callbacks and option predicates.
   const handedIn = await A.code(`async page => {
@@ -446,23 +466,20 @@ try {
   check('B\'s recording kept going after A stopped', !recordedB.isError, recordedB.text);
   const traced = await A.call('browser_stop_tracing');
   await B.call('browser_stop_tracing');
-  const traceFile = traced.text.match(/(\/\S+\.zip)/)?.[1];
-  let traceText = '';
-  if (traceFile) {
-    const cwd = fs.mkdtempSync(path.join(home, 'trace-'));
-    const pw = (...args) => execFileSync(process.execPath, [pwCli, 'trace', ...args], { cwd, encoding: 'utf8' });
-    pw('open', traceFile);
-    traceText = ['actions', 'console', 'requests'].map(c => pw(c)).join('\n');
-    A.received.push(traceText);
-  }
-  check('A\'s trace loads', traceText.length > 0, traced.text);
+  // The stock trace: an action log and a network log in A's folder.
+  const traceText = ['trace', 'network'].map(ext => {
+    const file = traced.text.match(new RegExp(`(/\\S+\\.${ext})`))?.[1];
+    return file && fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
+  }).join('\n');
+  A.received.push(traceText);
+  check('A\'s trace has A\'s click', /click/i.test(traceText), traced.text);
 
   // Every text A got, and every file A saved.
   const files = [];
   const walk = dir => fs.existsSync(dir) && fs.readdirSync(dir, { withFileTypes: true }).forEach(e =>
     e.isDirectory() ? walk(path.join(dir, e.name)) : files.push(path.join(dir, e.name)));
   walk(path.join(home, 'profiles', 'test', 'files', 'chat-A'));
-  const textFiles = files.filter(f => /\.(json|md|yml|yaml|txt|log|js|ts|html)$/.test(f));
+  const textFiles = files.filter(f => /\.(json|md|yml|yaml|txt|log|js|ts|html|trace|network)$/.test(f));
   const leakedIn = [...A.received.map((t, i) => [`result ${i}`, t]), ...textFiles.map(f => [f, fs.readFileSync(f, 'utf8')])]
       .filter(([, text]) => text.includes(SECRET) || text.includes('who=B'))
       .map(([where, text]) => `${where}: …${text.slice(Math.max(0, text.search(new RegExp(`${SECRET}|who=B`)) - 80), text.search(new RegExp(`${SECRET}|who=B`)) + 40)}…`);

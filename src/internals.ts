@@ -6,13 +6,12 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 
 export const pwTools = require('playwright-core/lib/coreBundle').tools;
-export const { z, ws, yauzl, yazl } = require('playwright-core/lib/utilsBundle');
+export const { z, ws, wsServer, yauzl, yazl } = require('playwright-core/lib/utilsBundle');
 export const playwright = require('playwright-core');
 
-// Methods of the MCP `Context` class that session.ts overrides or calls.
+// Methods of the MCP `Context` class that session.ts and scoped.ts use.
 const contextMethods = [
-  'newTab', 'selectTab', 'ensureTab', 'closeTab', 'dispose',
-  'ensureBrowserContext', '_initializeBrowserContext', '_onPageCreated', '_onPageClosed',
+  'ensureTab', 'ensureBrowserContext', '_onPageCreated', 'tabs', 'currentTab', 'routes', 'addRoute', 'dispose',
 ];
 
 export function verifyInternals() {
@@ -20,8 +19,8 @@ export function verifyInternals() {
     if (!pwTools[name])
       throw new Error(`playwright-core internals changed: tools.${name} is missing`);
   }
-  if (typeof ws !== 'function')
-    throw new Error('playwright-core internals changed: utilsBundle.ws is missing');
+  if (typeof ws !== 'function' || typeof wsServer !== 'function')
+    throw new Error('playwright-core internals changed: utilsBundle.ws / wsServer is missing');
   if (typeof z?.toJSONSchema !== 'function')
     throw new Error('playwright-core internals changed: zod toJSONSchema is missing');
 }
