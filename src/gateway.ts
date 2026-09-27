@@ -35,7 +35,7 @@ import { extraTools } from './tools.js';
 import { renderDashboard } from './dashboard.js';
 import { popupInterceptScript } from './popups.js';
 import { TranscriptIndex } from './subagents.js';
-import { cleanFolders, sessionFolder, subagentFolder } from './files.js';
+import { cleanFolders, cleanOldEntries, sessionFolder, subagentFolder } from './files.js';
 import { baseIcon, renderDockIcon } from './docktile.js';
 import { appMimeType, openTabWindowTool, tabLinkHtml, tabLinkResource, tabLinkResourceUri, tabLinkTool } from './apps.js';
 import { DesktopChatFile } from './titles.js';
@@ -54,6 +54,9 @@ export type GatewayOptions = {
   filesDir: string;
   // Chat folders unused this long are deleted.
   filesRetentionDays?: number;
+  // Where the browser saves downloads by itself (see launcher.ts); what is
+  // there is deleted after the same time.
+  browserDownloadsDir?: string;
   // Dock icon label (up to 3 characters) and its tag color; see docktile.ts.
   badge?: string;
   badgeColor?: string;
@@ -1118,6 +1121,10 @@ export class Gateway implements SessionHost, ProxyHost {
       const inUse = new Set([...this.sessions.values()].map(s => s.filesDir).filter((dir): dir is string => !!dir));
       for (const name of cleanFolders(this.options.filesDir, this._retentionDays * 24 * 60 * 60 * 1000, inUse))
         console.error(`files: deleted ${name} (unused for ${this._retentionDays} days)`);
+      if (this.options.browserDownloadsDir) {
+        for (const name of cleanOldEntries(this.options.browserDownloadsDir, this._retentionDays * 24 * 60 * 60 * 1000))
+          console.error(`browser downloads: deleted ${name} (unused for ${this._retentionDays} days)`);
+      }
     }
     const idleTimeout = this.options.idleTimeoutMs ?? 24 * 60 * 60 * 1000;
     for (const session of [...this.sessions.values()]) {

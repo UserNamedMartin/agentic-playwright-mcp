@@ -5,7 +5,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import path from 'node:path';
 import { Gateway } from './gateway.js';
-import { cdpEndpoint, closeBrowser, startBrowser } from './launcher.js';
+import { cdpEndpoint, closeBrowser, downloadFallbackDir, startBrowser } from './launcher.js';
 import { homeDir, profileBadge, type Profile } from './profiles.js';
 
 const execFileAsync = promisify(execFile);
@@ -30,6 +30,7 @@ export async function runProfile(profile: Profile, options: Options) {
       keepTabsOnExit: options.keepTabsOnExit,
       filesDir: profile.filesDir ?? path.join(homeDir, 'profiles', profile.name, 'files'),
       filesRetentionDays: profile.filesRetentionDays,
+      browserDownloadsDir: downloadFallbackDir(profile),
       ...profileBadge(profile),
       executablePath: profile.executablePath,
       dockIconCache: path.join(homeDir, 'profiles', profile.name, 'dock-icon-base.png'),

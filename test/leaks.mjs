@@ -99,9 +99,10 @@ for (let i = 0; i < 50; i++) {
     break;
   await sleep(200);
 }
+const strayDir = path.join(home, 'browser-downloads');
 const gateway = new Gateway({
   profile: 'test', cdpEndpoint: `http://127.0.0.1:${cdpPort}`, port: gatewayPort,
-  filesDir: path.join(home, 'files'), stateFile: path.join(home, 'sessions.json'),
+  filesDir: path.join(home, 'files'), stateFile: path.join(home, 'sessions.json'), browserDownloadsDir: strayDir,
 });
 const originalError = console.error;
 console.error = () => {};
@@ -142,9 +143,18 @@ try {
   const known = gateway.shared.pages().filter(p => !open.has(p.targetId));
   check('closed tabs are forgotten', remembered.length === 0 && known.length === 0, `${remembered.length} owned, ${known.length} known`);
   check('a chat\'s desktop title file is looked up', gateway._desktopChats.has('local_chat_a'));
+  // Downloads the browser saved by itself go after a week without use.
+  fs.mkdirSync(strayDir, { recursive: true });
+  const oldFile = path.join(strayDir, 'old.bin');
+  fs.writeFileSync(oldFile, 'x');
+  const weekAgo = new Date(Date.now() - 8 * 24 * 3600_000);
+  fs.utimesSync(oldFile, weekAgo, weekAgo);
+  fs.writeFileSync(path.join(strayDir, 'new.bin'), 'x');
+  gateway._filesSweptAt = 0;
   sleeper.kill();
   await sleep(200);
   await gateway._sweep();
+  check('the browser\'s own downloads go after a week without use', !fs.existsSync(oldFile) && fs.existsSync(path.join(strayDir, 'new.bin')), fs.readdirSync(strayDir).join(', '));
   await sleep(300);
   check('the chat is closed once its process is gone', !gateway.sessions.has('chat-A'));
   check('its proxy client and connection go with it', !gateway.proxy._clients.has('chat-A') && await ipcConnections() === 0, `${await ipcConnections()} connections`);

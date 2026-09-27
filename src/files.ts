@@ -104,3 +104,23 @@ export function cleanFolders(root: string, maxAgeMs: number, inUse: Set<string>)
   }
   return removed;
 }
+
+// Deletes what nobody has read or written for maxAgeMs in a folder the
+// browser saves to by itself (see launcher.ts downloadFallbackDir).
+export function cleanOldEntries(dir: string, maxAgeMs: number): string[] {
+  let names: string[];
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return [];
+  }
+  const removed = [];
+  for (const name of names) {
+    const entry = path.join(dir, name);
+    if (Date.now() - lastUse(entry) > maxAgeMs) {
+      fs.rmSync(entry, { recursive: true, force: true });
+      removed.push(name);
+    }
+  }
+  return removed;
+}
