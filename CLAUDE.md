@@ -4,35 +4,38 @@ Read README.md first for what the project does. This file is about changing it.
 
 ## Layout
 
-- `src/gateway.ts` — HTTP MCP server for one profile; sessions, subagent
-  routing, tab links, cleanup sweeps.
-- `src/session.ts` — one agent session = one Playwright MCP `BrowserBackend`
-  with a patched `Context` (own tabs only, background tabs, no bringToFront).
-- `src/browser.ts` — the shared browser over CDP: background tabs, window
-  state, focus guard, `focusTab`.
+- `src/gateway.ts` — HTTP MCP server for one profile; sessions, who owns which
+  tab (`owners`), subagent routing, tab links, forks, permission and passkey
+  requests, cleanup sweeps.
+- `src/proxy.ts` — the isolation: every session's Playwright connects to the
+  browser through its own DevTools endpoint here (a socket file, not a TCP
+  port) and sees only its own tabs. The few browser-level commands are listed;
+  anything else browser-wide is refused.
+- `src/browser.ts` — the gateway's own raw DevTools connection: every tab and
+  its owner, holding new tabs until their owner's Playwright has set them up,
+  the gateway's page scripts (one binding, `bridgeScript`), background tabs,
+  window state, focus guard, `focusTab`, the companion extension.
+- `src/cdp.ts` — a raw CDP connection (used by browser.ts and proxy.ts).
+- `src/session.ts` — one agent session = one stock Playwright MCP
+  `BrowserBackend` on its own Playwright connection through the proxy; one
+  call at a time with a timeout, notes, files, routes/offline/emulation kept
+  across reconnects and restarts.
+- `src/netguard.ts` — sockets opened on an agent's behalf (its calls and its
+  Playwright connection) cannot reach the DevTools or gateway ports.
 - `src/internals.ts` — the only place that touches playwright-core internals.
 - `src/subagents.ts` — Claude Code subagent detection from transcripts.
 - `src/files.ts` — per-chat file folders and their weekly cleanup.
 - `src/apps.ts` — MCP Apps tab-link widget; `src/tools.ts` — extra tools
   (show_tab, emulate_device with per-tab settings kept by the session,
   permission).
-- `src/scoped.ts` — replacements of stock tools that would act on the whole
-  shared context: cookies/storage scoped to the session's sites, network
-  state, tracing/recording entry points, run_code (through isolation.ts),
-  navigate/tabs URL checks.
-- `src/isolation.ts` — the membrane `browser_run_code_unsafe` gets: every
-  Playwright object reachable from `page` is wrapped; context views show only
-  the session's tabs and events; context-wide members are scoped or refused.
-- `src/recording.ts` — recorder and tracing shared by sessions: one recorder
-  / one trace for all, each session gets only its own (trace cut into chunks,
-  filtered by calls tagged per session with AsyncLocalStorage and by page).
+- `src/scoped.ts` — cookie and storage-state tools act on the sites of the
+  session's own tabs (the cookie jar is shared on purpose: logins); navigate /
+  tabs refuse internal addresses before opening anything.
 - `src/urls.ts` — addresses agents may not reach: every profile's DevTools
   and gateway ports on any loopback name (chrome:// stays open).
 - `src/linktoken.ts` — tab links (/focus) are HMAC-signed.
-- `src/config.ts` — Playwright MCP config file / env options applied once to
-  the shared context.
-- `src/permissions.ts` — permission requests: page hooks, notices, names.
-- `src/passkeys.ts` — passkey (WebAuthn) requests: page hook, notice.
+- `src/permissions.ts`, `src/passkeys.ts`, `src/popups.ts` — page scripts
+  (through the bridge in browser.ts) and the notes agents get.
 - `src/identity.ts` — `headersHelper` output (who is connecting).
 - `src/titles.ts` — current chat titles and forks (Claude desktop chat
   files); CLI `/rename` titles come from `subagents.ts`.
@@ -45,27 +48,43 @@ Read README.md first for what the project does. This file is about changing it.
 
 ## Rules
 
-- `playwright-core` is pinned exactly. Upgrading means re-checking every
-  internal name used in `internals.ts`, `session.ts` and `gateway.ts`
-  (`BrowserBackend`, `Context` methods, `_tabs`, `_currentTab`, tool shapes).
+- Isolation lives in `proxy.ts`, at the protocol level, and nowhere else.
+  Each session runs Playwright MCP unchanged; do not patch Playwright to hide
+  another chat's things (the previous design did, and every review round found
+  another way around it). If a session can see or change something of another
+  chat, find the protocol command or event that carried it and handle it in
+  the proxy. Browser-level commands are an allowlist: a new one Playwright
+  starts sending is refused until someone decides what it means for other
+  chats.
+- `playwright-core` is pinned exactly. Upgrading means re-checking the names in
+  `internals.ts` and the few internals session.ts uses (`Context._tabs`,
+  `_currentTab`, `_onPageCreated`, `routes()`/`addRoute`, the backend's
+  `_disconnected`/`_disposed`), and running every self-contained test.
   `verifyInternals()`/`verifyContext()` must keep failing loudly on mismatch.
+- The gateway's own connection is raw CDP, never Playwright: two Playwrights
+  attached to one page answer each other's page bindings (checked: the chat's
+  Playwright answered the gateway's binding with "not exposed").
+- A new tab is held (waiting for the debugger) until its owner's Playwright
+  has set it up; tabs the gateway opens for a page (links) open blank and go
+  to their address once released (`createTarget({ navigateTo })`), since a tab
+  created with its address starts loading before anyone can attach routes.
 - Out of sight means window minimized AND app hidden: hidden apps leave no
   window thumbnail in the Dock, minimized windows keep new tabs from showing the
   app, and a hidden app's window cannot be un-minimized (unhide first).
-- Never let agent work steal focus: new tabs via `SharedBrowser.newBackgroundPage`,
-  never `context.newPage()` or `page.bringToFront()`. Only explicit user
-  requests (`focusTab`) may raise the window.
+- Never let agent work steal focus: the proxy creates every tab in the
+  background and answers Page.bringToFront / Target.activateTarget itself.
+  Only explicit user requests (`focusTab`) may raise the window.
 - macOS: never talk to "System Events" from the gateway (it runs as a launchd
   service and blocks on an Automation permission prompt). Use `lsappinfo` and
   the link-handler applet (`agentic-browser://raise/<pid>`); background
   processes cannot activate other apps themselves.
 - Never rewrite `~/Applications/Agentic Browser Links.app` unless its script
   changed: macOS App Management protection flags it.
-- Tabs belong to sessions by CDP target id (`AgentSession.targets`), not by
-  `Page`: pages also emit "close" when the browser connection drops, only
-  `Target.targetDestroyed` means a tab really closed. The gateway must survive
-  a dropped connection (it reconnects) and a restart (`sessions.json`) without
-  closing anyone's tabs.
+- Tabs belong to sessions by CDP target id (`Gateway.owners`). The gateway
+  must survive a dropped connection (it reconnects; sessions reconnect on their
+  next call) and a restart (`sessions.json`) without closing anyone's tabs.
+  A session's backend disposing itself because its connection dropped is not
+  `browser_close` (see `AgentSession._callTool`).
 - Tests must not change `HOME`: on macOS the browser then looks for its
   keychain there and the system shows the user a "Keychain Not Found" dialog.
   Point the gateway at fake files with variables such as
@@ -90,7 +109,7 @@ checked by hand. Anything upstream assumes about owning the whole browser
 context (routes, tracing, video, cookies, storage, network state, process-wide
 listeners) needs a two-session check in `matrix.mjs`.
 
-## Isolation model (read before touching sessions or tools)
+## Isolation model (read before touching sessions, the proxy or tools)
 
 Goal set by the user: every agent works as if it had the browser to itself
 (no accidental seeing or affecting other chats), with all upstream Playwright
@@ -98,36 +117,43 @@ MCP functionality. It is not a security boundary against deliberately
 malicious code (run_code runs in the gateway process; any local process can
 reach the DevTools port).
 
-How it holds, and what is decided on purpose:
-- Tabs belong to sessions; popups by opener (Chrome's target events for a
-  popup's first request, see `browser.ts` popupOpener).
-- Routes and offline mode are context-level routes with an owner check
-  (reach popups' first load). Cost, accepted: while any session has one,
-  Playwright disables the HTTP cache browser-wide.
-- Cookie / storage tools act on the sites of the session's own tabs; an
-  explicit `domain` reaches another site.
-- Tracing and the recorder run once for everyone; each session gets only its
-  own. While anyone traces, Playwright writes every tab's data to a temp dir
-  (`agentic-trace-<pid>-*`, removed at stop / next start).
+How it holds:
+- Each session's Playwright has its own connection, through the proxy, which
+  attaches it only to the session's tabs. So everything Playwright scopes to
+  its browser context is the session's by construction: pages, events, routes
+  and offline mode (per tab in Chromium, including popups' first loads), init
+  scripts, bindings, extra headers, geolocation, clock, the recorder, tracing,
+  video, timeouts, CDP sessions.
+- Tabs belong to sessions by target id: tabs a session creates, popups by
+  opener (Chrome reports it even for noopener), link tabs the gateway opens
+  (told to Playwright with their opener), fork copies.
+- Shared on purpose, as a browser is: the cookie jar and site storage (logins),
+  site permissions, chrome:// pages (the skill tells agents they act on the
+  whole browser). The proxy shows a session only the cookies of its own sites
+  (Storage.getCookies filtered, "clear all" clears its sites' only); the cookie
+  tools can reach another site when the agent names its domain.
+- Refused as browser-wide: other targets, browser contexts, window bounds,
+  resetting permissions, the browser's cache and all-cookie commands, service
+  workers, downloads behavior (each download is moved to its session's
+  folder), and every browser-level command not on the proxy's list.
+- The DevTools port and the gateway's pages: the proxy refuses navigations
+  there and takes frames that land there (redirects, scripts) back to
+  about:blank; netguard.ts refuses sockets opened on an agent's behalf. A
+  context whose tabs were sent to such an address cannot save its storage
+  state from run_code afterwards (Playwright would visit that origin again).
 - The status page is written into the pinned home tab over DevTools, never
-  served over HTTP; `/` shows a note. Tab links are signed.
-- Every frame of a session that lands on a DevTools/gateway port (redirect,
-  script, binding) is sent to about:blank (`session.ts` _leaveInternal);
-  run_code requests follow redirects hop by hop with the same check.
-- chrome:// pages are open to agents on purpose (the skill tells them they
-  act on the whole browser). `browser_annotate` is removed; `vision` and
-  `pdf` capabilities are on, `config` off (it prints secrets).
+  served over HTTP; `/` shows a note. Tab links are signed. The gateway answers
+  only local MCP clients (no foreign Host, no Origin).
 - A call given up at its timeout cannot change the current tab (callState
   AsyncLocalStorage guard on `context._currentTab`).
 - Routes (from browser_route), offline and emulation survive reconnects and
   restarts (`sessions.json`); video/trace/recording/code routes are reported
   as lost.
 
-Review history: five rounds of independent critic agents (commit messages
-from 9fca4ea on record every finding and fix). Round 5's fixes (afdc0a6 ..
-24e505b) were not yet reviewed by a sixth round. Known open: traces over
-512 MB cannot be filtered (one string); a popup's first request gets no
-routes when two chats open popups within ~3 s (safe side).
+History: the first design shared one Playwright connection among all sessions
+and hid other chats by patching Playwright MCP (a membrane around run_code,
+shared recorder and tracing, owner checks on routes). Five review rounds each
+found another 12-14 ways around it; it was replaced by the proxy (2026-09-27).
 
 ## Commits
 
@@ -139,20 +165,19 @@ review round's fixes into one commit.
 ## Calling it done
 
 Green tests only cover what their author thought of. Before a change that
-touches isolation, sessions or the shared browser is called done, an agent
-that did not write it reviews it with the aim of breaking it (see how the
-earlier review rounds were briefed: what changed, what is accepted, confirm
-findings with scratch repros on a throwaway headless gateway). What it finds
-gets a failing test and a fix; report what was checked, not "all covered".
-New leak paths go into `canary.mjs`, which searches everything one chat gets
-for another chat's secret.
+touches isolation, sessions or the shared browser is called done, try to break
+it: scratch repros on a throwaway headless gateway, with two chats. What that
+finds gets a failing test and a fix; report what was checked, not "all
+covered". New leak paths go into `canary.mjs`, which searches everything one
+chat gets for another chat's secret.
 
 ## Checking changes
 
 `npm run build`, then `node test/reconnect.mjs`, `node test/permissions.mjs`,
 `node test/passkeys.mjs`, `node test/forks.mjs`, `node test/hangs.mjs`, `node test/matrix.mjs`, `node test/robustness.mjs`, `node test/reconnect-stall.mjs`, `node test/leaks.mjs`, `node test/config.mjs` and `node test/canary.mjs`
 (self-contained, headless; headless Chrome grants some permissions by itself,
-so check permission changes in a headed profile too)
+so check permission changes in a headed profile too; `APM_PROXY_DEBUG=1` logs
+every command the proxy refuses)
 and a throwaway headless profile with the other scripts in `test/` (see
 test/README.md). Anything that opens windows or moves focus needs
 a headed profile, and on someone's machine, their go-ahead first:

@@ -144,7 +144,9 @@ were yours alone:
   a storage state unless the user asks.
 - **Your own tabs only:** routes, offline mode, video, device emulation,
   tracing and the action recorder see and affect only your tabs (other chats
-  can use them at the same time); so does `browser_run_code_unsafe`'s `page`.
+  can use them at the same time). In `browser_run_code_unsafe`,
+  `page.context()` holds only your tabs, and what you set on it (routes, init
+  scripts, extra headers, geolocation, the clock) reaches only your tabs.
   Tabs your pages open (target=_blank links, window.open) are yours, open in
   the background, and arrive as `page.waitForEvent('popup')` in code. Your
   `browser_tabs` list also shows your subagents' tabs.

@@ -32,7 +32,8 @@ Stock Playwright MCP is built for one agent at a time:
 - **A real browser**: your installed Chrome, Brave, Edge or Chromium, headed,
   so sites treat it like any other browser.
 - **Isolation**: each session sees and controls only the tabs it opened, plus
-  popups those tabs open.
+  popups those tabs open, and everything Playwright MCP does is the session's
+  own (routes, scripts, recordings, traces); see "Things to know".
 - **Tab groups**: each session's tabs sit in a named, colored tab group,
   created when the chat first uses the browser. The group is titled after the
   chat and follows renames (Claude desktop app chats, and `/rename` in the
@@ -205,18 +206,26 @@ the gateway created). Change the location or the retention with `filesDir` and
  chat C ─┘   (one process)      └───────────────────────────────────────────┘
 ```
 
-- The gateway connects to the profile's browser over the Chrome DevTools
-  Protocol and creates one Playwright MCP backend per session, all sharing the
-  browser's default context (cookies, storage, logins).
-- Per session it changes three things in the stock backend: which pages it
-  adopts (only its own), how it opens tabs (in the background) and how it
-  switches tabs (without bringing the window to the front).
+- Every session runs stock Playwright MCP on a Playwright connection of its
+  own. That connection goes through a DevTools proxy in the gateway, which
+  shows it a browser holding only the session's tabs. So everything Playwright
+  MCP does to "its browser context" (routes, init scripts, tracing, the
+  recorder, video, offline mode, events, `page.context()` in
+  `browser_run_code_unsafe`) is naturally the session's own, and all of
+  Playwright MCP works as upstream.
+- All sessions share the browser's default context (cookies, storage,
+  logins): it is one real browser profile.
+- The gateway itself sees the whole browser through one plain DevTools
+  connection: it knows which tab belongs to which session (popups go to the
+  owner of the tab that opened them), holds a new tab until its owner's
+  Playwright has set it up, opens tabs in the background, and keeps the window
+  out of sight.
 - Claude Code sends each tool call's tool-use id; the gateway looks it up in
   the chat's transcripts to tell subagents apart.
 - A small companion extension, loaded over CDP, manages the tab groups and
   duplicates tabs for forked chats.
-- Page scripts added to every tab report permission and passkey requests to
-  the gateway before the browser sees them.
+- Page scripts added to every tab report permission and passkey requests and
+  new-tab links to the gateway.
 - Chat titles and forks come from the Claude desktop app's chat files.
 - A pinned status tab keeps the window alive and lists the sessions (the
   gateway writes it over DevTools; the gateway's address itself only shows a
@@ -224,37 +233,21 @@ the gateway created). Change the location or the retention with `filesDir` and
 
 ## Things to know
 
-- Sessions share one browser context, and upstream Playwright MCP assumes it
-  owns the whole of it. Here every agent works as if it had the browser to
-  itself:
-  - cookie and storage-state tools act on the sites of the session's own tabs
-    (`src/scoped.ts`);
-  - routes and offline mode are registered on the context with an owner
-    check, so they reach the session's new tabs and popups from their first
-    load and nobody else's (`src/session.ts`); they and device emulation are
-    kept across reconnects and restarts;
-  - the recorder and tracing (which Playwright can only run on a whole
-    context) run once for every session that asked, and each gets only its own
-    tabs' actions, snapshots, console and network (`src/recording.ts`);
-  - `browser_run_code_unsafe` gets a membrane: every object reachable from
-    `page` leads only to the session's tabs and events (`src/isolation.ts`).
-    That keeps agents from reaching each other by accident; it is not a
-    security boundary, since the code runs in the gateway process;
-  - the status page is for the user: the gateway writes it into the
-    browser's pinned home tab over DevTools; over HTTP the gateway's address
-    only shows a note, so no tab, request or redirect can read it; tab links
-    (/focus) act only when signed (`src/linktoken.ts`);
-  - agents cannot open the DevTools port (its /json endpoints list and close
-    every tab) or the gateway's pages, through the tools or through `page`,
-    requests, routes or a CDP session (`src/urls.ts`). The browser's own
-    pages (chrome://...) stay open to them; the skill says they act on the
-    whole browser. A local process can still reach the DevTools port
-    directly: see below.
+- Each agent works as if it had the browser to itself: its tabs, popups,
+  routes, scripts, recordings and traces are its own, and `page.context()` in
+  `browser_run_code_unsafe` holds only its tabs. What a real browser profile
+  shares stays shared: cookies and site storage (logins), site permissions and
+  the browser's own pages (chrome://). Cookie and storage tools act on the
+  sites of the agent's own tabs unless it names another domain. This keeps
+  agents from reaching each other by accident; it is not a security boundary,
+  since the agents' code runs in the gateway process.
   `test/matrix.mjs` checks every tool across two sessions, and
   `test/canary.mjs` searches everything one chat gets for another's secret.
 - Remote debugging gives local processes full control of the profile. The ports
-  listen on localhost only; use a profile dedicated to agents, never your
-  everyday browser profile.
+  listen on localhost only, agents cannot reach them through their tabs or
+  their code, and the gateway answers only local MCP clients (no browser page,
+  including one that reaches it under another host name); use a profile
+  dedicated to agents, never your everyday browser profile.
 - `playwright-core` is pinned to an exact version because the gateway relies on
   internal parts of it; startup fails loudly if they change.
 - A page's own `window.open()` (typically a sign-in popup) can still show the
@@ -262,7 +255,6 @@ the gateway created). Change the location or the retention with `filesDir` and
 - Closing the browser window (red button) closes every agent's tabs in it; the
   gateway puts a new hidden window back. Use the yellow button or Cmd+H instead.
 - The browser's icon stays in the Dock while it runs (it is a normal Chrome).
-- `browser_pdf_save` only works in headless profiles.
 - Permission decisions are per site and shared by every session. The browser
   forgets decisions made over DevTools when the connection closes, so the
   gateway keeps them (in `sessions.json`) and sets them again. Requests the
@@ -323,10 +315,10 @@ npm install
 npm run build
 ```
 
-`test/` holds self-contained pass/fail tests (`reconnect`, `permissions`,
-`passkeys`, `forks`: each starts its own headless browser and gateway;
-`headed` needs a screen and shows a window) and scripts used during
-development against a running gateway; see [test/README.md](test/README.md).
+`test/` holds self-contained pass/fail tests (each starts its own headless
+browser and gateway; `headed` needs a screen and shows a window) and scripts
+used during development against a running gateway; see
+[test/README.md](test/README.md).
 
 ## License
 
