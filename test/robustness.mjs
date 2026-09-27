@@ -137,6 +137,18 @@ try {
   const other = await B('browser_evaluate', { function: '() => 2' });
   check('stuck page: B unaffected', !other.isError && other.ms < 3000, `${other.ms} ms`);
 
+  // Code that never yields (a busy loop in A's snippet) runs in A's own
+  // thread: B is not held up, and A's session is restarted with its tabs.
+  const tabsBeforeLoop = (await A('browser_tabs', { action: 'list' })).text.split('### Tab ids')[1] ?? '';
+  const busy = A('browser_run_code_unsafe', { code: 'async page => { while (true) {} }' }, 60);
+  await sleep(1000);
+  const bDuring = await B('browser_evaluate', { function: '() => 3' });
+  check('a busy loop in one chat\'s code does not hold up another chat', !bDuring.isError && bDuring.ms < 3000, `${bDuring.ms} ms`);
+  const busyResult = await busy;
+  check('the busy chat is told its session was restarted', /session was restarted/.test(busyResult.text) && busyResult.ms < 30000, `${busyResult.ms} ms ${busyResult.text.slice(0, 160)}`);
+  const tabsAfterLoop = await A('browser_tabs', { action: 'list' });
+  check('... and keeps its tabs, working', !tabsAfterLoop.isError && tabsAfterLoop.text.split('### Tab ids')[1] === tabsBeforeLoop, tabsAfterLoop.text.slice(0, 200));
+
   // The browser connection drops while a download runs.
   await A('browser_navigate', { url: url('a2') });
   await A('browser_evaluate', { function: '() => { document.getElementById("slow").click(); return 1; }' });

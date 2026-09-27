@@ -1,28 +1,27 @@
-// One agent session = one chat (or subagent) = one stock Playwright MCP
-// BrowserBackend on a Playwright connection of its own, made through the
-// proxy (see proxy.ts), which shows it only the session's tabs. Isolation
-// comes from that connection, not from changes to Playwright MCP; what this
-// file adds is the gateway's own behavior around the calls: one call at a
-// time with a timeout, notes for the agent, files in the session's folder, and
-// keeping routes, offline mode and device emulation across reconnects.
-import { AsyncLocalStorage } from 'node:async_hooks';
+// One agent session = one chat (or subagent). Its Playwright (a stock
+// Playwright MCP backend on a connection of its own through the proxy, see
+// proxy.ts) runs in a worker thread (worker.ts), so code one agent runs cannot
+// stall the gateway or other chats: a thread that stops answering is ended
+// and started again, and the session's tabs stay. This side adds the
+// gateway's behavior around the calls: one call at a time with a timeout,
+// notes for the agent, files in the session's folder, and routes, offline mode
+// and device emulation kept across new threads, reconnects and restarts.
 import fs from 'node:fs';
 import path from 'node:path';
-import type { Browser, Page, Route } from 'playwright-core';
+import { fileURLToPath } from 'node:url';
+import { Worker } from 'node:worker_threads';
 import type { SharedBrowser } from './browser.js';
 import type { TabGroups } from './groups.js';
 import type { CdpProxy } from './proxy.js';
 import { touchFolder } from './files.js';
-import { agentCall } from './netguard.js';
-import { playwright, pwTools, verifyContext } from './internals.js';
-import { applyEmulation, type Emulation } from './tools.js';
+import type { Emulation } from './tools.js';
 import { internalUrl } from './urls.js';
 import { loadProfiles } from './profiles.js';
 import { describePasskeyRequests, type PasskeyRequest } from './passkeys.js';
 import type { PermissionRequest } from './permissions.js';
+import type { CallOutcome, FromWorker, ToWorker, WorkerStart } from './worker.js';
 
-// The state of the tool call running (given up or not), see _callWithTimeout.
-const callState = new AsyncLocalStorage<{ abandoned: boolean }>();
+const workerFile = path.join(path.dirname(fileURLToPath(import.meta.url)), 'worker.js');
 
 // A tool call is given up after this long unless the agent passes "timeout"
 // (seconds); browser_wait_for gets its own wait time on top.
@@ -79,6 +78,8 @@ export type SessionHost = {
   subagentTabs(session: AgentSession): string | undefined;
   // Ports of addresses agents may not open (see urls.ts).
   internalPorts(): string[];
+  // What the session's tools ask of the gateway (see ToolHost in tools.ts).
+  answerPermissions(session: AgentSession, decision: 'allow' | 'deny', names: string[] | undefined, origin: string | undefined, currentUrl: string | undefined): Promise<string>;
 };
 
 export type SavedNetworkState = {
@@ -104,28 +105,31 @@ export function profilePorts() {
   return knownPorts.ports;
 }
 
-// The handler browser_route builds from its parameters (as upstream), for
-// routes brought back after a reconnect or restart.
-function routeHandler(params: any) {
-  return async (route: Route) => {
-    if (params.body !== undefined || params.status !== undefined) {
-      await route.fulfill({ status: params.status ?? 200, contentType: params.contentType, body: params.body });
-      return;
-    }
-    const headers = { ...route.request().headers() };
-    for (const [key, value] of Object.entries(params.addHeaders ?? {}))
-      headers[key] = value as string;
-    for (const header of params.removeHeaders ?? [])
-      delete headers[header.toLowerCase()];
-    await route.continue({ headers });
-  };
-}
-
 // Things a dropped connection or a restart ends, with what the agent is told.
 const lostOnReconnect: Record<string, string> = {
   video: '### Video\nThe video recording stopped: the browser connection dropped and was restored. Start it again if you still need it.',
   recording: '### Recording\nThe action recording stopped: the browser connection dropped and was restored. Start it again if you still need it.',
   tracing: '### Tracing\nTracing stopped: the browser connection dropped and was restored. Start it again if you still need it.',
+};
+
+// A thread that does not answer a ping for this long while a call runs is
+// stuck (a busy loop in an agent's code) and is ended.
+const stuckMs = 10_000;
+const pingMs = 2_000;
+// A thread with nothing to do for this long is ended (it is started again on
+// the next call); its memory is the session's biggest cost.
+const idleMs = 10 * 60 * 1000;
+
+// A running worker thread and what is waiting on it.
+type Thread = {
+  worker: Worker;
+  ready: Promise<void>;
+  calls: Map<number, (message: FromWorker & { type: 'result' }) => void>;
+  queries: Map<number, (message: FromWorker & { type: 'tab' }) => void>;
+  lastPong: number;
+  ended: boolean;
+  // Ended because it stopped answering (not because the connection dropped).
+  stuck?: boolean;
 };
 
 export class AgentSession {
@@ -141,36 +145,34 @@ export class AgentSession {
   startedAt = 0;
   // Everything this session saves goes here (see files.ts); set on start.
   filesDir: string | undefined;
-  // Target id of the current tab, remembered across reconnects and restarts.
+  // Target id of the current tab, remembered across threads and restarts.
   currentTarget: string | undefined;
-  backend: any;
-  private _browser: Browser | undefined;
+  private _currentUrl: string | undefined;
+  private _thread: Thread | undefined;
   private _host: SessionHost;
   private _config: any;
-  private _tools: any[];
   private _filesNoted = false;
   // Told to the agent in the next tool result.
   private _notes: string[] = [];
   private _touchedAt = 0;
   private _retentionDays: number;
-  private _targetIds = new WeakMap<Page, string>();
-  // Kept here, not only in the backend, to be set up again on a new one.
+  // Kept here, not only in the thread, to be set up again on a new one.
   private _routes: any[] = [];
   private _lostRoutes = false;
+  private _codeRoutes = false;
   offline = false;
   // Device emulation by tab (target id), see browser_emulate_device.
   emulation = new Map<string, Emulation>();
-  // What the agent's code may not connect to (see netguard.ts).
-  private _guard = { internalPorts: () => this._host.internalPorts() };
-  // Started by the agent and not stopped yet: ended by a reconnect.
+  // Started by the agent and not stopped yet: ended with the thread.
   private _running = new Set<'video' | 'recording' | 'tracing'>();
+  private _lastId = 0;
+  private _idleTimer: NodeJS.Timeout | undefined;
 
-  constructor(info: SessionInfo, host: SessionHost, config: any, tools: any[], retentionDays = 7) {
+  constructor(info: SessionInfo, host: SessionHost, config: any, _tools: any[], retentionDays = 7) {
     this.info = info;
     this._host = host;
     this._retentionDays = retentionDays;
     this._config = config;
-    this._tools = tools;
   }
 
   // The session's tabs (target ids).
@@ -194,6 +196,11 @@ export class AgentSession {
     return this._host.internalPorts();
   }
 
+  // Whether the session's Playwright is running (a thread with a connection).
+  get running() {
+    return !!this._thread;
+  }
+
   private async _start() {
     const first = !this.started;
     if (first) {
@@ -207,82 +214,147 @@ export class AgentSession {
       if (note)
         this._notes.push(note);
     }
-    // The session folder is both the output dir and the workspace, so relative
-    // file names land there too, never in the agent's project. Unrestricted
-    // access lets the agent still upload project files by absolute path.
-    const config = { ...this._config, outputDir: filesDir, allowUnrestrictedFileAccess: true };
-    // As upstream connects to a CDP endpoint: traces (and download temp files)
-    // go to the output folder's "traces".
-    // Made inside the agent's network guard (see netguard.ts), so everything
-    // this connection's Playwright does later (route handlers, event
-    // listeners, requests) stays inside it too.
-    const browser: Browser = await agentCall.run(this._guard, () => playwright.chromium.connectOverCDP(this._host.proxy.endpoint(this.info.id),
-        { timeout: 15_000, artifactsDir: path.join(filesDir, 'traces') }));
-    const backend = new pwTools.BrowserBackend(config, browser.contexts()[0], this._tools, async () => {});
-    await backend.initialize({ cwd: filesDir, clientName: this.info.title });
-    const context = backend._context;
-    verifyContext(context);
-    context._agentSession = this;
-    this._patchContext(context);
-    this._browser = browser;
-    this.backend = backend;
-    await context.ensureBrowserContext();
-    // Set up again what the agent had before a reconnect or restart.
-    for (const params of this._routes)
-      await context.addRoute({ ...params, handler: routeHandler(params) }).catch(() => {});
-    if (this.offline)
-      await browser.contexts()[0].setOffline(true).catch(() => {});
-    for (const tab of context.tabs()) {
-      const targetId = await this.targetIdOf(tab.page).catch(() => undefined);
-      const settings = targetId && this.emulation.get(targetId);
-      if (settings)
-        await applyEmulation(tab.page, settings).catch(() => {});
-      if (targetId && targetId === this.currentTarget)
-        context._currentTab = tab;
+    const start: WorkerStart = {
+      endpoint: this._host.proxy.endpoint(this.info.id),
+      config: this._config,
+      filesDir,
+      title: this.info.title,
+      internalPorts: this._host.internalPorts(),
+      routes: this._routes,
+      offline: this.offline,
+      emulation: [...this.emulation],
+      currentTarget: this.currentTarget,
+    };
+    const worker = new Worker(workerFile, { workerData: start, stdout: false, stderr: false });
+    const thread: Thread = { worker, ready: undefined as any, calls: new Map(), queries: new Map(), lastPong: Date.now(), ended: false };
+    thread.ready = new Promise<void>((resolve, reject) => {
+      worker.on('message', (message: FromWorker) => {
+        if (message.type === 'ready')
+          resolve();
+        else if (message.type === 'failed')
+          reject(new Error(message.error));
+        else
+          this._onMessage(thread, message);
+      });
+      worker.on('error', error => {
+        console.error(`${this.info.title}: browser thread failed: ${error.stack ?? error}`);
+        reject(error);
+      });
+      worker.on('exit', () => {
+        this._ended(thread, 'The browser session\'s thread ended.');
+        reject(new Error('The browser session\'s thread ended while starting.'));
+      });
+    });
+    this._thread = thread;
+    try {
+      await thread.ready;
+    } catch (e) {
+      this._endThread(thread);
+      throw e;
     }
   }
 
-  // The target id of one of the session's pages.
-  async targetIdOf(page: Page): Promise<string> {
-    let id = this._targetIds.get(page);
-    if (id)
-      return id;
-    const cdp = await page.context().newCDPSession(page);
-    try {
-      id = (await cdp.send('Target.getTargetInfo')).targetInfo.targetId as string;
-    } finally {
-      await cdp.detach().catch(() => {});
+  private _onMessage(thread: Thread, message: FromWorker) {
+    switch (message.type) {
+      case 'result':
+        thread.calls.get(message.id)?.(message);
+        thread.calls.delete(message.id);
+        return;
+      case 'tab':
+        thread.queries.get(message.id)?.(message);
+        thread.queries.delete(message.id);
+        return;
+      case 'pong':
+        thread.lastPong = Date.now();
+        return;
+      case 'rpc':
+        void this._rpc(message.method, message.args).then(
+            value => thread.worker.postMessage({ type: 'reply', id: message.id, value } satisfies ToWorker),
+            error => thread.worker.postMessage({ type: 'reply', id: message.id, error: String((error as Error).message ?? error) } satisfies ToWorker));
+        return;
     }
-    this._targetIds.set(page, id);
-    return id;
+  }
+
+  // What the session's tools ask of the gateway (see ToolHost in tools.ts).
+  private async _rpc(method: string, args: any[]) {
+    const shared = this._host.shared;
+    switch (method) {
+      case 'allCookies': {
+        const { cookies } = await shared.cdp.send('Storage.getCookies');
+        return cookies.map((c: any) => ({ name: c.name, value: c.value, domain: c.domain, path: c.path, expires: c.expires,
+          httpOnly: c.httpOnly, secure: c.secure, sameSite: c.sameSite ?? 'Lax' }));
+      }
+      case 'deleteCookies': {
+        // An expired copy replaces each.
+        const cookies = args[0] as { name: string; domain: string; path: string }[];
+        if (cookies.length)
+          await shared.cdp.send('Storage.setCookies', { cookies: cookies.map(c => ({ name: c.name, value: '', domain: c.domain, path: c.path, expires: 1 })) });
+        return;
+      }
+      case 'focusTab':
+        if (!this.targets.has(args[0]))
+          throw new Error('That tab is not yours.');
+        return await shared.focusTab(args[0]);
+      case 'answerPermissions':
+        return await this._host.answerPermissions(this, args[0], args[1], args[2], args[3]);
+    }
+    throw new Error(`Unknown request ${method}`);
+  }
+
+  // The thread is gone (ended, crashed, or its connection dropped): what it
+  // was doing is told to the agent, calls still waiting on it get an error.
+  private _ended(thread: Thread, reason: string) {
+    if (thread.ended)
+      return;
+    thread.ended = true;
+    if (this._thread === thread)
+      this._thread = undefined;
+    for (const resolve of thread.calls.values())
+      resolve({ type: 'result', id: 0, error: reason });
+    thread.calls.clear();
+    for (const resolve of thread.queries.values())
+      resolve({ type: 'tab', id: 0 });
+    thread.queries.clear();
+  }
+
+  private _endThread(thread: Thread | undefined) {
+    if (!thread)
+      return;
+    this._ended(thread, 'The browser session\'s thread was ended.');
+    void thread.worker.terminate().catch(() => {});
+  }
+
+  // What ended with a thread that the agent had running.
+  private _retire() {
+    const thread = this._thread;
+    if (!thread)
+      return;
+    if (this._codeRoutes) {
+      this._lostRoutes = true;
+      this._notes.push('### Routes\nThe browser connection was restored: routes you added from code (browser_run_code_unsafe) are gone; routes added with browser_route, offline mode and device emulation were kept.');
+    }
+    this._codeRoutes = false;
+    for (const what of this._running)
+      this._notes.push(lostOnReconnect[what]);
+    this._running.clear();
+    this._endThread(thread);
   }
 
   // The browser connection dropped (every DevTools client goes together): the
-  // backend is dead, the tabs are still open, and the next call reconnects.
+  // tabs are still open, and the next call starts a new thread.
   detach() {
     this._retire();
   }
 
-  // What the old backend had that a new one must know, and what ended with it.
-  private _retire() {
-    const backend = this.backend;
-    if (!backend)
-      return;
-    this.backend = undefined;
-    const browser = this._browser;
-    this._browser = undefined;
-    const context = backend._context;
-    this._routes = (context?.routes() ?? []).map(({ handler, ...params }: any) => params);
-    // Routes added from code (browser_run_code_unsafe) are not in the list.
-    const codeRoutes = ((browser?.contexts()[0] as any)?._routes?.length ?? 0) > this._routes.length;
-    this._lostRoutes ||= codeRoutes;
-    if (codeRoutes)
-      this._notes.push('### Routes\nThe browser connection was restored: routes you added from code (browser_run_code_unsafe) are gone; routes added with browser_route, offline mode and device emulation were kept.');
-    for (const what of this._running)
-      this._notes.push(lostOnReconnect[what]);
-    this._running.clear();
-    void backend.dispose().catch(() => {});
-    void browser?.close().catch(() => {});
+  // The current tab, or the one at an index of browser_tabs' list.
+  async tab(index?: number): Promise<{ targetId: string; url: string; title: string } | undefined> {
+    const thread = this._thread;
+    if (!thread)
+      return undefined;
+    const id = ++this._lastId;
+    const answer = new Promise<FromWorker & { type: 'tab' }>(resolve => thread.queries.set(id, resolve));
+    thread.worker.postMessage({ type: 'tab', id, index } satisfies ToWorker);
+    return (await answer).tab;
   }
 
   // Calls of one session run one at a time: the stock Context has a single
@@ -305,7 +377,10 @@ export class AgentSession {
           `previous call (${previous.name}) to finish: calls of one chat run one at a time.` });
       return result;
     });
-    this._queue = run.catch(() => {}).finally(() => this._current = undefined);
+    this._queue = run.catch(() => {}).finally(() => {
+      this._current = undefined;
+      this._scheduleIdle();
+    });
     return await run;
   }
 
@@ -315,15 +390,17 @@ export class AgentSession {
   private async _callWithTimeout(name: string, args: any, seconds: number, signal?: AbortSignal) {
     let timer: NodeJS.Timeout | undefined;
     let onAbort: (() => void) | undefined;
-    // An abandoned call that finishes later must not take the notes meant for
-    // the agent's next result.
-    const state = { abandoned: false as boolean };
-    const call = agentCall.run(this._guard, () => callState.run(state, () => this._callTool(name, args, signal, state)));
+    const state = { abandoned: false as boolean, id: 0 };
+    const call = this._callTool(name, args, state);
     call.catch(() => {});
+    const giveUp = () => {
+      state.abandoned = true;
+      this._thread?.worker.postMessage({ type: 'abandon', id: state.id } satisfies ToWorker);
+    };
     const timedOut = new Promise<any>(resolve => {
       timer = setTimeout(() => {
-        state.abandoned = true;
-        const url = this.currentPage()?.url();
+        giveUp();
+        const url = this._currentUrl;
         console.error(`${name} from ${this.info.title} gave up after ${seconds} s`);
         resolve(errorResult(`${name} did not finish within ${seconds} s and was given up, so your next calls are not ` +
           'blocked by it. It may still be running in the page (for example an evaluate waiting on a promise that ' +
@@ -334,7 +411,7 @@ export class AgentSession {
     });
     const aborted = new Promise<never>((_, reject) => {
       onAbort = () => {
-        state.abandoned = true;
+        giveUp();
         console.error(`${name} from ${this.info.title} was cancelled by the agent`);
         reject(signal!.reason ?? new Error('cancelled'));
       };
@@ -351,50 +428,93 @@ export class AgentSession {
     }
   }
 
-  private async _callTool(name: string, rawArgs: any, signal?: AbortSignal, state: { abandoned: boolean } = { abandoned: false }) {
-    this.lastActivity = Date.now();
-    if (this.backend && (this.backend._disconnected || !this._browser?.isConnected()))
-      this._retire();
-    if (!this.backend)
-      await this._start();
-    const backend = this.backend;
-    const { tab, ...args } = rawArgs ?? {};
-    if (tab !== undefined) {
-      const context = backend._context;
-      await context.ensureBrowserContext();
-      const target = await this._findTab(context, String(tab));
-      if (!target)
-        return errorResult(`Tab "${tab}" not found. Call browser_tabs to list your tabs.`);
-      context._currentTab = target;
+  // Sends a call to the thread and waits for it, ending the thread if it
+  // stops answering pings (a busy loop in code the agent runs).
+  private async _send(thread: Thread, name: string, args: any, tab: string | undefined, state: { id: number }) {
+    const id = state.id = ++this._lastId;
+    const answer = new Promise<FromWorker & { type: 'result' }>(resolve => thread.calls.set(id, resolve));
+    thread.lastPong = Date.now();
+    let n = 0;
+    const pinger = setInterval(() => {
+      if (Date.now() - thread.lastPong > stuckMs) {
+        console.error(`${this.info.title}: browser thread stopped answering during ${name}; ending it`);
+        thread.stuck = true;
+        this._retire();
+        return;
+      }
+      thread.worker.postMessage({ type: 'ping', n: ++n } satisfies ToWorker);
+    }, pingMs);
+    thread.worker.postMessage({ type: 'call', id, name, args, tab } satisfies ToWorker);
+    try {
+      return await answer;
+    } finally {
+      clearInterval(pinger);
     }
+  }
+
+  private async _callTool(name: string, rawArgs: any, state: { abandoned: boolean; id: number }) {
+    this.lastActivity = Date.now();
+    clearTimeout(this._idleTimer);
+    if (!this._thread)
+      await this._start();
+    const thread = this._thread!;
+    const { tab, ...args } = rawArgs ?? {};
     if (Date.now() - this._touchedAt > 5 * 60 * 1000) {
       touchFolder(this.ensureFilesDir());
       this._touchedAt = Date.now();
     }
-    const browser = this._browser;
-    const result = await backend.callTool(name, args, signal);
-    const disconnected = !browser?.isConnected() || !!backend._disconnected;
+    const message = await this._send(thread, name, args, tab === undefined ? undefined : String(tab), state);
+    if (thread.stuck)
+      return this._finish(errorResult(`${name} never gave the browser session a chance to answer (code that never ` +
+        'yields, such as a busy loop in browser_run_code_unsafe), so the session was restarted. Your tabs are still ' +
+        'open; other chats were not affected.'), state);
+    if (message.error !== undefined || !message.outcome) {
+      const result: any = errorResult(message.error ?? 'No answer from the browser session.');
+      // The thread ended with the connection (the browser dropped them all).
+      if (thread.ended)
+        Object.defineProperty(result, 'cutOff', { value: true });
+      return this._finish(result, state);
+    }
+    const outcome: CallOutcome = message.outcome;
+    const result = outcome.result;
+    this._remember(outcome);
     // The agent's own code closed its browser context (context.close()):
     // like browser_close, its tabs go.
-    const closedByCode = disconnected && this._host.proxy.closedByClient(this.info.id);
+    const closedByCode = outcome.disconnected && this._host.proxy.closedByClient(this.info.id);
     // The connection dropped while the call ran: the stock backend disposed
     // itself, the tabs are still open, and the gateway may repeat the call.
-    const cut = disconnected && !closedByCode;
+    const cut = outcome.disconnected && !closedByCode;
     if (cut) {
       Object.defineProperty(result, 'cutOff', { value: true });
-      if (this.backend === backend)
+      if (this._thread === thread)
         this._retire();
     }
     // browser_close means "close my tabs" (the stock backend only forgets
-    // them); the next call gets a fresh backend.
-    const closed = this.backend === backend && (closedByCode || !cut && name === 'browser_close' && backend._disposed);
+    // them); the next call gets a fresh thread.
+    const closed = this._thread === thread && (closedByCode || !cut && name === 'browser_close' && outcome.disposed);
     if (!result.isError)
       this._track(name);
-    if (state.abandoned) {
-      if (closed)
-        await this._afterClose();
+    if (closed)
+      await this._afterClose();
+    if (state.abandoned)
       return result;
+    this._finish(result, state);
+    if (closed || cut)
+      return result;
+    this._host.onTabsChanged();
+    if (outcome.tabIds) {
+      result.content.push({ type: 'text', text: outcome.tabIds });
+      const subagents = this._host.subagentTabs(this);
+      if (subagents)
+        result.content.push({ type: 'text', text: subagents });
     }
+    return result;
+  }
+
+  // Notes, files, permission and passkey requests go with a result.
+  private _finish(result: any, state: { abandoned: boolean }) {
+    if (state.abandoned)
+      return result;
     // Saved files are named by absolute path: given "./shot.png", agents went
     // looking for it with `find /`, which scans other apps' data and makes
     // macOS ask the user for access.
@@ -417,84 +537,52 @@ export class AgentSession {
     const passkeys = describePasskeyRequests(this.passkeyRequests.splice(0));
     if (passkeys)
       result.content.push({ type: 'text', text: passkeys });
-    if (closed) {
-      await this._afterClose();
-      return result;
-    }
-    if (cut)
-      return result;
-    const current = this.currentPage();
-    this.currentTarget = current ? await this.targetIdOf(current).catch(() => this.currentTarget) : undefined;
-    this._host.onTabsChanged();
-    if (name === 'browser_tabs' && !result.isError) {
-      result.content.push({ type: 'text', text: await this._tabIds() });
-      const subagents = this._host.subagentTabs(this);
-      if (subagents)
-        result.content.push({ type: 'text', text: subagents });
-    }
     return result;
   }
 
-  // What the agent started (and has not stopped) that a reconnect would end.
+  // What the thread reported that a new one must know.
+  private _remember(outcome: CallOutcome) {
+    if (!outcome.disconnected) {
+      this.currentTarget = outcome.currentTarget;
+      this._currentUrl = outcome.currentUrl;
+    }
+    this._routes = outcome.routes;
+    this._codeRoutes = outcome.codeRoutes;
+    this.offline = outcome.offline;
+    this.emulation = new Map(outcome.emulation);
+  }
+
+  // What the agent started (and has not stopped) that a new thread would end.
   private _track(name: string) {
     const match = name.match(/^browser_(start|stop)_(video|recording|tracing)$/);
     if (match)
       match[1] === 'start' ? this._running.add(match[2] as any) : this._running.delete(match[2] as any);
-    if (name === 'browser_route' || name === 'browser_unroute')
-      this._routes = (this.backend?._context?.routes() ?? []).map(({ handler, ...params }: any) => params);
   }
 
-  // browser_close disposed the backend: "close my browser" means the tabs,
-  // routes and offline mode go too, as with upstream's own browser.
+  // Ends the thread when the session has had nothing to do for a while and
+  // nothing running that would end with it.
+  private _scheduleIdle() {
+    clearTimeout(this._idleTimer);
+    this._idleTimer = setTimeout(() => {
+      if (this._thread && !this._current && !this._running.size && !this._codeRoutes && Date.now() - this.lastActivity >= idleMs)
+        this._endThread(this._thread);
+    }, idleMs);
+    this._idleTimer.unref();
+  }
+
+  // browser_close: "close my browser" means the tabs, routes and offline mode
+  // go too, as with upstream's own browser.
   private async _afterClose() {
-    const browser = this._browser;
-    this.backend = undefined;
-    this._browser = undefined;
+    this._endThread(this._thread);
     this._routes = [];
     this._lostRoutes = false;
+    this._codeRoutes = false;
     this.offline = false;
     this.emulation.clear();
     this._running.clear();
+    this.currentTarget = undefined;
     for (const targetId of this.targets)
       await this._host.shared.closeTarget(targetId);
-    await browser?.close().catch(() => {});
-  }
-
-  private async _findTab(context: any, id: string) {
-    for (const tab of context._tabs) {
-      if ((await this.targetIdOf(tab.page)).startsWith(id.toUpperCase()))
-        return tab;
-    }
-    return undefined;
-  }
-
-  // Stable ids for the `tab` parameter; indexes shift when tabs close.
-  private async _tabIds() {
-    const context = this.backend._context;
-    const lines = [];
-    for (const [index, tab] of context._tabs.entries()) {
-      const id = (await this.targetIdOf(tab.page)).slice(0, 8);
-      lines.push(`- ${index}: ${id}${tab === context._currentTab ? ' (current)' : ''}`);
-    }
-    return `### Tab ids\n${lines.join('\n')}\nPass "tab": "<id>" to any tool to act on that tab.`;
-  }
-
-  currentPage(): Page | undefined {
-    return this.backend?._context?.currentTab()?.page;
-  }
-
-  // Cookies of any site, for the cookie tools when the agent names a domain
-  // (the session's own connection sees only its sites' cookies, see proxy.ts).
-  async allCookies(): Promise<any[]> {
-    const { cookies } = await this._host.shared.cdp.send('Storage.getCookies');
-    return cookies.map((c: any) => ({ name: c.name, value: c.value, domain: c.domain, path: c.path, expires: c.expires,
-      httpOnly: c.httpOnly, secure: c.secure, sameSite: c.sameSite ?? 'Lax' }));
-  }
-
-  // Deletes cookies of any site (an expired copy replaces each).
-  async deleteCookies(cookies: { name: string; domain: string; path: string }[]) {
-    if (cookies.length)
-      await this._host.shared.cdp.send('Storage.setCookies', { cookies: cookies.map(c => ({ name: c.name, value: '', domain: c.domain, path: c.path, expires: 1 })) });
   }
 
   // Told to the agent in its next result.
@@ -521,7 +609,8 @@ export class AgentSession {
 
   async dispose({ closeTabs }: { closeTabs: boolean }) {
     this._disposed = true;
-    this._retire();
+    clearTimeout(this._idleTimer);
+    this._endThread(this._thread);
     this._notes = [];
     if (closeTabs) {
       for (const targetId of this.targets)
@@ -533,13 +622,12 @@ export class AgentSession {
   // What survives a gateway restart: offline mode, routes made with
   // browser_route (routes from code cannot be saved) and device emulation.
   savedState(): SavedNetworkState {
-    const routes = this.backend ? (this.backend._context?.routes() ?? []).map(({ handler, ...params }: any) => params) : this._routes;
     const targets = this.targets;
     return {
       offline: this.offline,
-      routes,
+      routes: this._routes,
       emulation: [...this.emulation].filter(([id]) => targets.has(id)),
-      lostRoutes: this._lostRoutes || ((this._browser?.contexts()[0] as any)?._routes?.length ?? 0) > routes.length,
+      lostRoutes: this._lostRoutes || this._codeRoutes,
       tracing: this._running.has('tracing'),
       recording: this._running.has('recording'),
     };
@@ -561,65 +649,6 @@ export class AgentSession {
     this.started = true;
     this._filesNoted = true;
   }
-
-  private _patchContext(context: any) {
-    // A call given up at its timeout keeps running; whatever it does, it no
-    // longer changes which tab is current (the agent has moved on, maybe to
-    // another tab). Tabs closing still move it, from outside any call.
-    let currentTab = context._currentTab;
-    Object.defineProperty(context, '_currentTab', {
-      configurable: true,
-      get: () => currentTab,
-      set: (tab: any) => {
-        if (!callState.getStore()?.abandoned)
-          currentTab = tab;
-      },
-    });
-
-    // Each stock Context listens for unhandled rejections process-wide and
-    // hands every one to its agent: with many contexts in one process, one
-    // chat's failed download showed up in every other chat's next result.
-    // The gateway logs them instead (see gateway.ts).
-    process.off('unhandledRejection', context._onUnhandledRejection);
-
-    // Tab headers that cannot hang (see patchTabHeader).
-    const onPageCreated = context._onPageCreated.bind(context);
-    context._onPageCreated = function(page: Page) {
-      onPageCreated(page);
-      const tab = this._tabs.find((tab: any) => tab.page === page);
-      if (tab)
-        patchTabHeader(tab);
-    };
-    for (const tab of context._tabs)
-      patchTabHeader(tab);
-  }
-}
-
-// Every result lists the session's tabs with their titles; a page whose
-// renderer is busy (an endless loop) never answers page.title(), which made
-// every later call of the session hang too. Give up on the title after a while.
-const headerTimeoutMs = 2000;
-
-function patchTabHeader(tab: any) {
-  if (tab.__headerPatched)
-    return;
-  tab.__headerPatched = true;
-  const original = tab.headerSnapshot.bind(tab);
-  tab.headerSnapshot = async () => {
-    let timer: NodeJS.Timeout | undefined;
-    const slow = new Promise<undefined>(resolve => timer = setTimeout(() => resolve(undefined), headerTimeoutMs));
-    const header = await Promise.race([original(), slow]);
-    clearTimeout(timer);
-    return header ?? {
-      title: '(not responding: the page is busy; close this tab if it stays stuck)',
-      url: tab.page.url(),
-      current: tab.isCurrentTab(),
-      crashed: false,
-      mainDocumentStatus: tab._mainDocumentStatus,
-      console: { total: 0, errors: 0, warnings: 0 },
-      changed: true,
-    };
-  };
 }
 
 // Relative file paths in a result ("./shot.png", "shots/a.png", "../x.pdf")

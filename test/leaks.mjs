@@ -178,7 +178,7 @@ try {
   await gateway._closeSession(sessionQ);
   await Promise.all([running, queued]);
   await sleep(800);
-  check('a call queued when its chat ends leaves no tab and no backend', !sessionQ.backend && (await pagesNow()).length <= pagesBeforeQ - 1, `backend ${!!sessionQ.backend}, ${pagesBeforeQ} -> ${(await pagesNow()).length} pages`);
+  check('a call queued when its chat ends leaves no tab and no backend', !sessionQ.running && (await pagesNow()).length <= pagesBeforeQ - 1, `running ${sessionQ.running}, ${pagesBeforeQ} -> ${(await pagesNow()).length} pages`);
 
   // A dropped connection: what the chat had running is not saved as still
   // running, and it comes back.

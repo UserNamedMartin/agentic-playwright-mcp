@@ -1,9 +1,24 @@
 // Tools added on top of the stock Playwright MCP set. Same shape as Playwright's
 // own tool definitions: { capability, schema, handle(context, params, response) }.
+// They run next to the session's backend (see worker.ts) and reach the
+// gateway through the context's ToolHost.
 import type { CDPSession, Page } from 'playwright-core';
-import type { Gateway } from './gateway.js';
 import { playwright, z } from './internals.js';
 import { permissionTypes } from './permissions.js';
+
+// What the session's tools need from outside the backend (context._agentSession).
+export type ToolHost = {
+  targetIdOf(page: Page): Promise<string>;
+  // Device emulation by tab (target id), kept to set again on a new connection.
+  emulation: Map<string, Emulation>;
+  offline: boolean;
+  internalPorts: string[];
+  // Cookies of any site, through the gateway's own connection.
+  allCookies(): Promise<any[]>;
+  deleteCookies(cookies: { name: string; domain: string; path: string }[]): Promise<void>;
+  focusTab(targetId: string): Promise<void>;
+  answerPermissions(decision: 'allow' | 'deny', names: string[] | undefined, origin: string | undefined, currentUrl: string | undefined): Promise<string>;
+};
 
 // Emulation overrides only last while the CDP session that set them stays
 // attached, so keep one per page.
@@ -32,7 +47,7 @@ export async function applyEmulation(page: Page, settings: Emulation | undefined
     await cdp.send('Emulation.setUserAgentOverride', { userAgent: settings.userAgent });
 }
 
-export function extraTools(gateway: Gateway) {
+export function extraTools() {
   const showTab = {
     capability: 'core-tabs',
     schema: {
@@ -50,7 +65,8 @@ export function extraTools(gateway: Gateway) {
       const tab = params.index === undefined ? await context.ensureTab() : context.tabs()[params.index];
       if (!tab)
         throw new Error(`Tab ${params.index} not found`);
-      await gateway.shared.focusTab(await context._agentSession.targetIdOf(tab.page));
+      const host: ToolHost = context._agentSession;
+      await host.focusTab(await host.targetIdOf(tab.page));
       response.addTextResult('The window is now in front on this tab.');
     },
   };
@@ -128,7 +144,8 @@ export function extraTools(gateway: Gateway) {
       type: 'action',
     },
     handle: async (context: any, params: { decision: 'allow' | 'deny'; permissions?: string[]; origin?: string }, response: any) => {
-      response.addTextResult(await gateway.answerPermissions(context._agentSession, params.decision, params.permissions, params.origin, context.currentTab()?.page.url()));
+      const host: ToolHost = context._agentSession;
+      response.addTextResult(await host.answerPermissions(params.decision, params.permissions, params.origin, context.currentTab()?.page.url()));
     },
   };
 

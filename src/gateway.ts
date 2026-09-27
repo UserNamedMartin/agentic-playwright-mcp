@@ -178,7 +178,7 @@ export class Gateway implements SessionHost, ProxyHost {
     // browser_annotate opens the Playwright Dashboard, a separate visible
     // browser waiting for the user, which does not see this gateway's
     // connection and outlives it.
-    this._tools = scopeTools([...pwTools.filteredTools(this._config), ...extraTools(this)])
+    this._tools = scopeTools([...pwTools.filteredTools(this._config), ...extraTools()])
         .filter(tool => tool.schema.name !== 'browser_annotate');
     // The browser saves every download here first (see proxy.ts).
     const downloadsDir = path.join(path.dirname(this.options.filesDir), 'downloads');
@@ -958,13 +958,15 @@ export class Gateway implements SessionHost, ProxyHost {
   }
 
   private async _tabLink(session: AgentSession, index: unknown) {
-    const context = session.backend?._context;
-    const tab = index === undefined ? context?.currentTab() : context?.tabs()[Number(index)];
+    // From the session's Playwright; while its thread sleeps, the current tab
+    // it remembered.
+    const remembered = index === undefined && session.currentTarget && session.targets.has(session.currentTarget)
+      ? this.shared.info(session.currentTarget) : undefined;
+    const tab = await session.tab(index === undefined ? undefined : Number(index))
+      ?? (remembered && { targetId: remembered.targetId, url: remembered.url, title: remembered.title });
     if (!tab)
       return errorResult('No such tab. Open a page first (browser_navigate), then call this again.');
-    const targetId = await session.targetIdOf(tab.page);
-    const url = tab.page.url();
-    const title = await tab.page.title().catch(() => '');
+    const { targetId, url, title } = tab;
     const link = `${this.baseUrl}/focus?target=${targetId}&t=${linkToken(this._linkSecret, `target:${targetId}`)}`;
     // Claude Code shows the model structuredContent instead of the text, so the
     // link and what to do with it are in both.
