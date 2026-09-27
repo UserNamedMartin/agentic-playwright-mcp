@@ -123,8 +123,8 @@ listeners) needs a two-session check in `matrix.mjs`.
 Goal set by the user: every agent works as if it had the browser to itself
 (no accidental seeing or affecting other chats), with all upstream Playwright
 MCP functionality. It is not a security boundary against deliberately
-malicious code (run_code runs in the gateway process; any local process can
-reach the DevTools port).
+malicious code (run_code runs in a thread of the gateway process; any local
+process can reach the DevTools port).
 
 How it holds:
 - Each session's Playwright has its own connection, through the proxy, which

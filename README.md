@@ -34,6 +34,9 @@ Stock Playwright MCP is built for one agent at a time:
 - **Isolation**: each session sees and controls only the tabs it opened, plus
   popups those tabs open, and everything Playwright MCP does is the session's
   own (routes, scripts, recordings, traces); see "Things to know".
+- **One agent cannot stall the others**: each session runs in a thread of its
+  own; code stuck in a busy loop gets only that session restarted, with its
+  tabs kept.
 - **Tab groups**: each session's tabs sit in a named, colored tab group,
   created when the chat first uses the browser. The group is titled after the
   chat and follows renames (Claude desktop app chats, and `/rename` in the
@@ -69,7 +72,7 @@ Stock Playwright MCP is built for one agent at a time:
 - **Per-tab device emulation**: `browser_emulate_device` emulates a phone in
   one tab without affecting other agents.
 - **Dock badges** (macOS): each profile's browser icon carries a short label
-  (up to 3 characters, e.g. `CR`, `10C`) in a colored tag, so several agent
+  (up to 3 characters, e.g. `WRK`, `P`) in a colored tag, so several agent
   browsers are easy to tell apart.
 - **Files stay out of your projects**: screenshots, snapshots, downloads,
   videos and traces go to a per-chat folder, deleted after a week without use.
