@@ -42,7 +42,10 @@ awaits a promise the page may never resolve or a long polling loop; poll in
 short calls instead. Every call is given up after 120 seconds (plus the wait of
 `browser_wait_for`) and a cancelled call is dropped at once, so a stuck call
 no longer blocks the next ones, but it may still be running in the page. Pass
-`"timeout"` (seconds) only for a call that really needs longer.
+`"timeout"` (seconds) only for a call that really needs longer. Code that never
+yields (a busy loop in `browser_run_code_unsafe`) gets your browser session
+restarted after about 10 seconds: your tabs stay, a recording, trace or video
+and routes added from code end.
 
 ## Tabs do not live forever
 

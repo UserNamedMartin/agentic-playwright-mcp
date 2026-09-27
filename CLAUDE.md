@@ -16,18 +16,22 @@ Read README.md first for what the project does. This file is about changing it.
   the gateway's page scripts (one binding, `bridgeScript`), background tabs,
   window state, focus guard, `focusTab`, the companion extension.
 - `src/cdp.ts` — a raw CDP connection (used by browser.ts and proxy.ts).
-- `src/session.ts` — one agent session = one stock Playwright MCP
-  `BrowserBackend` on its own Playwright connection through the proxy; one
-  call at a time with a timeout, notes, files, routes/offline/emulation kept
-  across reconnects and restarts.
-- `src/netguard.ts` — sockets opened on an agent's behalf (its calls and its
-  Playwright connection) cannot reach the DevTools or gateway ports.
+- `src/session.ts` — one agent session: one call at a time with a timeout,
+  notes, files, routes/offline/emulation kept across new threads, reconnects
+  and restarts; starts, pings and ends the session's worker thread.
+- `src/worker.ts` — the session's worker thread: a stock Playwright MCP
+  `BrowserBackend` on its own Playwright connection through the proxy, and
+  the session's tools. A thread that stops answering (a busy loop in
+  run_code) is ended and started again; one idle for 10 minutes is ended.
+- `src/netguard.ts` — sockets opened on an agent's behalf (everything in its
+  worker thread) cannot reach the DevTools or gateway ports.
 - `src/internals.ts` — the only place that touches playwright-core internals.
 - `src/subagents.ts` — Claude Code subagent detection from transcripts.
 - `src/files.ts` — per-chat file folders and their weekly cleanup.
 - `src/apps.ts` — MCP Apps tab-link widget; `src/tools.ts` — extra tools
   (show_tab, emulate_device with per-tab settings kept by the session,
-  permission).
+  permission); they reach the gateway through `ToolHost` (messages to the
+  main thread).
 - `src/scoped.ts` — cookie and storage-state tools act on the sites of the
   session's own tabs (the cookie jar is shared on purpose: logins); navigate /
   tabs refuse internal addresses before opening anything.
@@ -56,8 +60,12 @@ Read README.md first for what the project does. This file is about changing it.
   the proxy. Browser-level commands are an allowlist: a new one Playwright
   starts sending is refused until someone decides what it means for other
   chats.
+- Agents' code never runs in the main thread: everything of a session's
+  Playwright lives in its worker (worker.ts), so one agent cannot stall the
+  gateway or other chats. Keep it that way; what the tools need from the
+  gateway goes through `ToolHost` messages.
 - `playwright-core` is pinned exactly. Upgrading means re-checking the names in
-  `internals.ts` and the few internals session.ts uses (`Context._tabs`,
+  `internals.ts` and the few internals worker.ts uses (`Context._tabs`,
   `_currentTab`, `_onPageCreated`, `routes()`/`addRoute`, the backend's
   `_disconnected`/`_disposed`), and running every self-contained test.
   `verifyInternals()`/`verifyContext()` must keep failing loudly on mismatch.
@@ -84,7 +92,8 @@ Read README.md first for what the project does. This file is about changing it.
   must survive a dropped connection (it reconnects; sessions reconnect on their
   next call) and a restart (`sessions.json`) without closing anyone's tabs.
   A session's backend disposing itself because its connection dropped is not
-  `browser_close` (see `AgentSession._callTool`).
+  `browser_close`, and a context the agent's code closed is (see
+  `AgentSession._callTool`).
 - Tests must not change `HOME`: on macOS the browser then looks for its
   keychain there and the system shows the user a "Keychain Not Found" dialog.
   Point the gateway at fake files with variables such as

@@ -206,8 +206,9 @@ the gateway created). Change the location or the retention with `filesDir` and
  chat C ─┘   (one process)      └───────────────────────────────────────────┘
 ```
 
-- Every session runs stock Playwright MCP on a Playwright connection of its
-  own. That connection goes through a DevTools proxy in the gateway, which
+- Every session runs stock Playwright MCP, in a worker thread of its own (so
+  one agent's code cannot stall the others: a thread that stops answering is
+  restarted, tabs kept), on a Playwright connection of its own. That connection goes through a DevTools proxy in the gateway, which
   shows it a browser holding only the session's tabs. So everything Playwright
   MCP does to "its browser context" (routes, init scripts, tracing, the
   recorder, video, offline mode, events, `page.context()` in
@@ -248,6 +249,10 @@ the gateway created). Change the location or the retention with `filesDir` and
   their code, and the gateway answers only local MCP clients (no browser page,
   including one that reaches it under another host name); use a profile
   dedicated to agents, never your everyday browser profile.
+- Each chat that uses the browser costs about 60 MB of memory while its thread
+  runs; a thread idle for 10 minutes is ended and started again on the chat's
+  next call (about half a second), with its tabs, routes, offline mode and
+  device emulation. Recordings, traces and videos keep their thread running.
 - `playwright-core` is pinned to an exact version because the gateway relies on
   internal parts of it; startup fails loudly if they change.
 - A page's own `window.open()` (typically a sign-in popup) can still show the
