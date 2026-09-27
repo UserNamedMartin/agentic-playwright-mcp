@@ -275,7 +275,7 @@ export class SharedBrowser {
       return;
     }
     this._sessionPage.set(params.sessionId, info.targetId);
-    await this._installScripts(params.sessionId);
+    await this._installScripts(params.sessionId, params.targetInfo);
     // A tab being created (by an agent, a link, a fork) gets its owner when
     // the creation answers; a popup belongs to whoever owns its opener.
     await this._creationsSettled();
@@ -301,12 +301,12 @@ export class SharedBrowser {
     const pageTarget = this._sessionPage.get(parentSession);
     if (params.targetInfo?.type === 'iframe' && pageTarget) {
       this._sessionPage.set(params.sessionId, pageTarget);
-      await this._installScripts(params.sessionId);
+      await this._installScripts(params.sessionId, params.targetInfo);
     }
     await this.cdp.send('Runtime.runIfWaitingForDebugger', {}, params.sessionId).catch(() => {});
   }
 
-  private async _installScripts(session: string) {
+  private async _installScripts(session: string, info: { type: string; targetId: string; url: string }) {
     // (The binding and the scripts need the Runtime and Page domains on.)
     await Promise.all([
       this.cdp.send('Page.enable', {}, session),
@@ -314,7 +314,7 @@ export class SharedBrowser {
       this.cdp.send('Runtime.addBinding', { name: bindingName }, session),
       ...this._scripts.map(source => this.cdp.send('Page.addScriptToEvaluateOnNewDocument', { source, runImmediately: true }, session)),
       this.cdp.send('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: true, flatten: true }, session),
-    ]).catch(e => console.error(`page scripts: ${(e as Error).message}`));
+    ]).catch(e => console.error(`page scripts (${info.type} ${info.targetId.slice(0, 8)} ${info.url.slice(0, 120)}): ${(e as Error).message}`));
   }
 
   private async _onBindingCalled(session: string, params: any) {
