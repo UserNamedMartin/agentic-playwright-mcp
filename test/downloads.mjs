@@ -1,7 +1,9 @@
 // Downloads reach the chat that started them: small files that finish at
-// once, started from the main frame, a same-site iframe and a cross-site
-// iframe (the way online banking pages are built). Each must end up in the
-// session, and nothing may stay behind in the gateway's own download folder.
+// once, started from the main frame, a same-site iframe, a cross-site iframe
+// (the way online banking pages are built), a hidden iframe removed at once,
+// and a tab of their own (target=_blank, window.open, same or other site).
+// Each must end up in the session, and nothing may stay behind in the
+// gateway's own download folder.
 //
 // Usage: node test/downloads.mjs [browser executable]
 //
@@ -46,6 +48,10 @@ const handler = (req, res) => {
   const other = `http://localhost:${siteB.address().port}`;
   res.end(`<title>bank</title><a id=dl href="/file">download</a>
 <button id=hidden onclick="const f = document.createElement('iframe'); f.style.display = 'none'; f.src = '/file'; document.body.append(f); setTimeout(() => f.remove(), 30);">hidden</button>
+<a id=blank href="/file" target=_blank>new tab</a>
+<button id=open onclick="window.open('/file')">window.open</button>
+<a id=blankx href="${other}/file" target=_blank>new tab, other site</a>
+<button id=openx onclick="window.open('${other}/file')">window.open, other site</button>
 <iframe id=same src="/frame" width=300 height=60></iframe>
 <iframe id=cross src="${other}/frame" width=300 height=60></iframe>`);
 };
@@ -85,8 +91,8 @@ async function chat(id) {
 
 const staging = path.join(home, 'profiles', 'test', 'downloads');
 try {
-  // Other chats' tabs make the owner lookup slower (each tab's frames are
-  // asked for in turn), as in a browser many chats use.
+  // Other chats' tabs open, as in a browser many chats use (an owner found
+  // by searching tabs lost downloads here).
   const B = await chat('chat-B');
   await B('browser_navigate', { url: `http://127.0.0.1:${siteA.address().port}/other` });
   for (let i = 0; i < 15; i++)
@@ -130,6 +136,28 @@ try {
       stuck = Math.max(stuck, left.length);
     }
     check(`${label}: ${rounds} instant downloads reach the chat`, saved === rounds && !stuck, `saved ${saved}, hung ${hung}, left in the gateway's folder ${stuck} ${details.join(' | ')}`);
+  }
+
+  // A download that opens a new tab of its own (a target=_blank link, a
+  // window.open): the tab closes itself once it turns into a download, and
+  // the file must still reach the chat (Playwright MCP saves it in the
+  // chat's files folder).
+  const chatFiles = path.join(home, 'profiles', 'test', 'files', 'chat-A');
+  const csvs = () => (fs.existsSync(chatFiles) ? fs.readdirSync(chatFiles) : []).filter(f => /^statement-\d+\.csv$/.test(f));
+  for (const [label, target] of Object.entries({ 'target=_blank link': '#blank', 'window.open': '#open', 'target=_blank link to another site': '#blankx', 'window.open of another site': '#openx' })) {
+    let arrived = 0, stuck = 0;
+    for (let i = 0; i < rounds; i++) {
+      await A('browser_navigate', { url: `http://127.0.0.1:${siteA.address().port}/?${label.replace(/\W/g, '')}${i}` });
+      const before = csvs().length;
+      await A('browser_click', { element: label, target });
+      for (let t = 0; t < 50 && csvs().length === before; t++)
+        await sleep(100);
+      if (csvs().length > before)
+        arrived++;
+      const left = (fs.existsSync(staging) ? fs.readdirSync(staging) : []).filter(f => fs.statSync(path.join(staging, f)).size === 26000);
+      stuck = Math.max(stuck, left.length);
+    }
+    check(`${label}: ${rounds} downloads in a tab of their own reach the chat`, arrived === rounds && !stuck, `arrived ${arrived}, left in the gateway's folder ${stuck}`);
   }
 } finally {
   gateway.kill('SIGTERM');
