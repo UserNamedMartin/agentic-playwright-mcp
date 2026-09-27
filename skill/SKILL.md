@@ -180,6 +180,16 @@ ask the user for access). Subagents get a subfolder.
 - To upload a project file, pass its absolute path.
 - Give the user the full path when a file matters to them.
 
+## A click that does not go through
+
+When a click fails with "<element> intercepts pointer events", the page
+itself is covering the target, usually a popup, promo modal or cookie banner
+that appeared after the page loaded. The named element can be misleading: a
+popup inside a shadow root is reported as its host, which may look like an
+empty 0×0 `div`. Take a fresh snapshot (or `browser_find` for `close`,
+`accept`, `dialog`), close the overlay, then click again. Do not click through
+it from JavaScript: a real user could not do that either.
+
 ## Report every problem (hard requirement)
 
 This browser is new infrastructure and gets fixed only through honest reports.
