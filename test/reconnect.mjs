@@ -196,6 +196,13 @@ try {
   });
   const afterRestart = tabIds(await a2.call('browser_tabs', { action: 'list' }));
   check('tabs kept after a gateway restart', afterRestart.join() === beforeRestart.join(), afterRestart.join(' '));
+  // The chat connected while the gateway was still starting: a new tab of it
+  // joins its group under its own title, not the client's fallback.
+  const groupsBeforeNewTab = await groupTitles();
+  await a2.call('browser_tabs', { action: 'new', url: `${siteUrl}/after-restart` });
+  await sleep(500);
+  check('a chat that connected during startup keeps its title', JSON.stringify(await groupTitles()) === JSON.stringify(groupsBeforeNewTab), `${groupsBeforeNewTab.join(', ')} -> ${(await groupTitles()).join(', ')}`);
+  await a2.call('browser_tabs', { action: 'close' });
   check('groups kept after a gateway restart', (await groupTitles()).includes('Renamed chat'));
   const shot = await a2.call('browser_take_screenshot', { filename: 'after-restart.png' });
   const folders = fs.readdirSync(filesRoot);

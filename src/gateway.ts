@@ -373,6 +373,10 @@ export class Gateway implements SessionHost, ProxyHost {
       if (!session) {
         session = new AgentSession(entry.info, this, this._config, this._retentionDays);
         this.sessions.set(entry.info.id, session);
+      } else {
+        // It connected before its saved state was loaded: its title is still
+        // the client's fallback until the chat's own title is read again.
+        session.info.title = entry.info.title;
       }
       session.filesDir = entry.filesDir;
       session.startedAt = entry.startedAt;
