@@ -248,7 +248,7 @@ export class Gateway implements SessionHost, ProxyHost {
       onTargetChanged: () => {},
       onPageCall: (targetId, call) => this._onPageCall(targetId, call),
       isOwnerAlive: owner => !!this.sessions.get(owner) && !this.sessions.get(owner)!.disposed,
-      onDownloadEvent: message => void this.proxy.onDownloadEvent(message).catch(() => {}),
+      onDownloadEvent: message => this.proxy.onDownloadEvent(message),
       onDisconnected: () => this._onDisconnected(shared),
       // Nobody hears a browser they cannot see: tabs are muted while it is
       // hidden or minimized (pages do not notice).

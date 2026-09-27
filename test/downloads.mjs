@@ -18,7 +18,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 const executable = process.argv[2] ?? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const rounds = Number(process.env.ROUNDS ?? 10);
 const home = fs.mkdtempSync(path.join(os.tmpdir(), 'apm-downloads-'));
-const [browserPort, gatewayPort] = [19431, 19433];
+const [browserPort, gatewayPort] = [19471, 19473];
 const cli = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..', 'dist', 'cli.js');
 const tmp = path.join(home, 'tmp');
 fs.mkdirSync(tmp);
@@ -45,6 +45,7 @@ const handler = (req, res) => {
     return res.end(`<a id=dl href="/file">download</a>`);
   const other = `http://localhost:${siteB.address().port}`;
   res.end(`<title>bank</title><a id=dl href="/file">download</a>
+<button id=hidden onclick="const f = document.createElement('iframe'); f.style.display = 'none'; f.src = '/file'; document.body.append(f); setTimeout(() => f.remove(), 30);">hidden</button>
 <iframe id=same src="/frame" width=300 height=60></iframe>
 <iframe id=cross src="${other}/frame" width=300 height=60></iframe>`);
 };
@@ -96,6 +97,7 @@ try {
     'main frame': `page.locator('#dl')`,
     'same-site iframe': `page.frameLocator('#same').locator('#dl')`,
     'cross-site iframe': `page.frameLocator('#cross').locator('#dl')`,
+    'hidden iframe removed at once': `page.locator('#hidden')`,
   };
   for (const [label, locator] of Object.entries(where)) {
     let saved = 0, stuck = 0, hung = 0;

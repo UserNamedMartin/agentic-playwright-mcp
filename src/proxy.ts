@@ -55,8 +55,6 @@ export class CdpProxy {
   private _wss = new wsServer({ noServer: true, perMessageDeflate: false, maxPayload: 1024 * 1024 * 1024 });
   // Download guid -> session key, and where the browser saves downloads.
   private _downloads = new Map<string, string>();
-  // Download guid -> the owner lookup started by its downloadWillBegin.
-  private _downloadLookups = new Map<string, Promise<string | undefined>>();
   readonly downloadsDir: string;
   private _socketPath: string;
 
@@ -131,40 +129,24 @@ export class CdpProxy {
       void this.shared.release(targetId);
   }
 
-  // SharedBrowser: download events go to the session whose page downloads.
-  // Finding the owner can take a round trip to the browser, and a small file
-  // finishes meanwhile: every event of a download waits for the same lookup,
-  // so they reach the session in order (a lost "completed" leaves the file in
-  // the gateway's folder and the session's Playwright waiting for it forever).
-  async onDownloadEvent(message: CdpMessage) {
+  // SharedBrowser: download events go to the session whose tab downloads.
+  onDownloadEvent(message: CdpMessage) {
     const { method, params } = message;
-    if (method === 'Browser.downloadWillBegin')
-      this._downloadLookups.set(params.guid, this._frameOwner(params.frameId).catch(() => undefined));
-    const lookup = this._downloadLookups.get(params.guid);
-    if (!lookup)
-      return;
-    const owner = await lookup;
-    if (method === 'Browser.downloadProgress' && params.state !== 'inProgress') {
-      this._downloadLookups.delete(params.guid);
-      this._downloads.delete(params.guid);
-    } else if (owner && method === 'Browser.downloadWillBegin') {
+    if (method === 'Browser.downloadWillBegin') {
+      const tab = this.shared.takeDownloadTab(params.guid);
+      const owner = tab ? this.shared.owners.get(tab) : undefined;
+      if (!owner)
+        return;
       this._downloads.set(params.guid, owner);
-    }
-    if (owner)
       this._clients.get(owner)?.onDownloadEvent(message);
-  }
-
-  // A main frame's id is its tab's target id; other frames are looked up in
-  // the tabs' frame trees.
-  private async _frameOwner(frameId: string): Promise<string | undefined> {
-    const owners = this.shared.owners;
-    if (owners.has(frameId))
-      return owners.get(frameId);
-    for (const [targetId, owner] of owners) {
-      if ((await this.shared.frameIds(targetId).catch(() => [] as string[])).includes(frameId))
-        return owner;
+      return;
     }
-    return undefined;
+    const owner = this._downloads.get(params.guid);
+    if (!owner)
+      return;
+    if (params.state !== 'inProgress')
+      this._downloads.delete(params.guid);
+    this._clients.get(owner)?.onDownloadEvent(message);
   }
 
   downloadOwner(guid: string) {

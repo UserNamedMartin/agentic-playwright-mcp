@@ -62,6 +62,13 @@ Read README.md first for what the project does. This file is about changing it.
   the proxy. Browser-level commands are an allowlist: a new one Playwright
   starts sending is refused until someone decides what it means for other
   chats.
+- The few browser-wide events the proxy routes itself (downloads) go to the
+  session the protocol names: the tab whose own DevTools session carried a
+  matching event (Page.downloadWillBegin arrives on the downloading page's or
+  out-of-process frame's session before Browser.downloadWillBegin). Never find
+  an owner by searching afterwards (frame trees, URLs, timing): a search
+  answers late, misses frames in other processes and frames already gone,
+  and each miss looks like a separate bug.
 - Agents' code never runs in the main thread: everything of a session's
   Playwright lives in its worker (worker.ts), so one agent cannot stall the
   gateway or other chats. Keep it that way; what the tools need from the

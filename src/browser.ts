@@ -87,6 +87,8 @@ export class SharedBrowser {
   // Master session id -> the page target it belongs to (pages and their
   // out-of-process frames).
   private _sessionPage = new Map<string, string>();
+  // Download guid -> the tab it started in (from Page.downloadWillBegin).
+  private _downloadTabs = new Map<string, string>();
   // Tab creations under way (their owner is set when they resolve).
   private _creations = new Set<Promise<unknown>>();
   // Tabs the gateway opened for a page (a link): the page they came from,
@@ -245,6 +247,15 @@ export class SharedBrowser {
         if (params.name === bindingName)
           await this._onBindingCalled(sessionId!, params);
         return;
+      case 'Page.downloadWillBegin': {
+        // Chrome sends this on the session of the page or out-of-process
+        // frame that downloads, before the browser-wide event: which tab a
+        // download belongs to comes from the protocol, never from a search.
+        const tab = sessionId ? this._sessionPage.get(sessionId) : undefined;
+        if (tab)
+          this._downloadTabs.set(params.guid, tab);
+        return;
+      }
       case 'Browser.downloadWillBegin':
       case 'Browser.downloadProgress':
         this._events.onDownloadEvent(message);
@@ -398,26 +409,12 @@ export class SharedBrowser {
       await this.cdp.send('Page.navigate', { url, ...(referrer ? { referrer } : {}) }, session);
   }
 
-  // Every frame of a tab (to tell which tab a download's frame is in): its
-  // own frame tree, and those of its out-of-process frames (a cross-site
-  // iframe has a session of its own and is missing from the tab's tree).
-  async frameIds(targetId: string): Promise<string[]> {
-    const page = this._targets.get(targetId)?.session;
-    if (!page)
-      return [];
-    const sessions = [page, ...[...this._sessionPage].filter(([session, owner]) => owner === targetId && session !== page).map(([session]) => session)];
-    const ids: string[] = [];
-    const visit = (node: any) => {
-      ids.push(node.frame.id);
-      for (const child of node.childFrames ?? [])
-        visit(child);
-    };
-    await Promise.all(sessions.map(async session => {
-      const { frameTree } = await this.cdp.send('Page.getFrameTree', {}, session, 5000).catch(() => ({ frameTree: undefined }));
-      if (frameTree)
-        visit(frameTree);
-    }));
-    return ids;
+  // The tab a download started in, told by the browser on that tab's (or its
+  // out-of-process frame's) session just before Browser.downloadWillBegin.
+  takeDownloadTab(guid: string): string | undefined {
+    const tab = this._downloadTabs.get(guid);
+    this._downloadTabs.delete(guid);
+    return tab;
   }
 
   // --- The companion extension (tab groups, duplicating tabs)
