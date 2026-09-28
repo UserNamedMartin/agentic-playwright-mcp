@@ -165,7 +165,15 @@ try {
   works('browser_generate_locator', await A.call('browser_generate_locator', { element: 'Go', target: '#b' }));
   works('browser_highlight', await A.call('browser_highlight', { element: 'Go', target: '#b' }));
   works('browser_hide_highlight', await A.call('browser_hide_highlight', {}));
+  const screenshotLogAt = gatewayLog.length;
   works('browser_take_screenshot', await A.call('browser_take_screenshot', { scale: 'css' }));
+  for (let i = 0; i < 20 && !gatewayLog.slice(screenshotLogAt).includes('Page.captureScreenshot reply'); i++)
+    await sleep(50);
+  const screenshotLog = gatewayLog.slice(screenshotLogAt);
+  expect('browser_take_screenshot', 'CDP request and reply logged without image data',
+    /Page\.captureScreenshot sent tab=[0-9A-F]{8} window=(visible|hidden|unknown)/.test(screenshotLog) &&
+    /Page\.captureScreenshot reply after \d+ ms ok/.test(screenshotLog) &&
+    !/data:image|base64,/.test(screenshotLog), screenshotLog, 'BROKEN');
   const pdf = await A.call('browser_pdf_save', {});
   works('browser_pdf_save', pdf);
   const pdfPath = pdf.text.match(/(\/\S+\.pdf)/)?.[1];

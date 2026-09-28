@@ -20,6 +20,7 @@ import path from 'node:path';
 import type { Duplex } from 'node:stream';
 import { CdpConnection, type CdpMessage } from './cdp.js';
 import type { SharedBrowser } from './browser.js';
+import { ScreenshotDiagnostics } from './screenshot-diagnostics.js';
 import { wsServer } from './internals.js';
 import { internalUrl, internalUrlResolved } from './urls.js';
 
@@ -218,11 +219,14 @@ class ProxyClient {
   closedByClient = false;
   // Page.getFrameTree calls on a fresh link tab (see _onSessionMessage).
   private _freshTreeCalls = new Set<number>();
+  private _screenshots: ScreenshotDiagnostics;
 
   constructor(proxy: CdpProxy, host: ProxyHost, key: string) {
     this._proxy = proxy;
     this._host = host;
     this.key = key;
+    const diagnosticSession = crypto.createHash('sha256').update(key).digest('hex').slice(0, 8);
+    this._screenshots = new ScreenshotDiagnostics({ session: diagnosticSession, log: line => console.error(line) });
   }
 
   private get _shared() {
@@ -293,6 +297,7 @@ class ProxyClient {
   }
 
   close() {
+    this._screenshots.close();
     const ws = this._ws;
     const real = this._real;
     this._ws = undefined;
@@ -367,6 +372,8 @@ class ProxyClient {
 
   private _onBrowserMessage(message: CdpMessage) {
     if (message.id !== undefined) {
+      if (message.sessionId)
+        this._screenshots.finish(message.sessionId, message.id, message.error);
       // An answer to a message we passed through as it was.
       if (this._freshTreeCalls.delete(message.id) && message.result?.frameTree?.frame)
         message.result.frameTree.frame.url = '';
@@ -467,6 +474,8 @@ class ProxyClient {
         await this._shared.release(targetId);
       return;
     }
+    if (method === 'Page.captureScreenshot')
+      this._screenshots.start(message.sessionId!, message.id!, this._sessions.get(message.sessionId!), this._shared.visibilityForDiagnostics());
     this._real!.sendRaw(message);
   }
 

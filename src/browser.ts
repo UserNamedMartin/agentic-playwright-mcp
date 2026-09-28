@@ -586,6 +586,12 @@ export class SharedBrowser {
 
   private _visible: boolean | undefined;
 
+  // A cached snapshot for passive diagnostics. Querying Chrome while a CDP
+  // command is stuck would make the diagnostic command depend on that failure.
+  visibilityForDiagnostics(): 'visible' | 'hidden' | 'unknown' {
+    return this._visible === undefined ? 'unknown' : this._visible ? 'visible' : 'hidden';
+  }
+
   // Tells the gateway when the browser comes into view or goes out of it
   // (tabs are muted while nobody can see it).
   private _setVisible(visible: boolean) {

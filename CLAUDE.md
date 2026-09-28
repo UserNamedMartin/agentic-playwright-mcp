@@ -16,6 +16,8 @@ Read README.md first for what the project does. This file is about changing it.
   the gateway's page scripts (one binding, `bridgeScript`), background tabs,
   window state, focus guard, `focusTab`, the companion extension.
 - `src/cdp.ts` — a raw CDP connection (used by browser.ts and proxy.ts).
+- `src/screenshot-diagnostics.ts` — passive `Page.captureScreenshot` request,
+  reply and timeout logs; never logs the image, URL or CDP error text.
 - `src/session.ts` — one agent session: one call at a time with a timeout,
   notes, files, routes/offline/emulation kept across new threads, reconnects
   and restarts; starts, pings and ends the session's worker thread.
@@ -120,6 +122,9 @@ Read README.md first for what the project does. This file is about changing it.
   Profiles started by the launcher get `browser-downloads` next to their data.
 - Keep personal data out of the repo: no user names, paths, profile names or
   ports of a particular machine.
+- Screenshot diagnostics must stay passive: log cached window visibility
+  rather than making a new Chrome request while a screenshot may be stuck.
+  Keep screenshot parameters and response data out of logs.
 
 ## Fixing bugs
 
@@ -205,4 +210,5 @@ every command the proxy refuses)
 and a throwaway headless profile with the other scripts in `test/` (see
 test/README.md). Anything that opens windows or moves focus needs
 a headed profile, and on someone's machine, their go-ahead first:
-`node test/headed.mjs` covers the fork copies and passkeys that way.
+`node test/headed.mjs` covers the fork copies and passkeys that way. Run
+`node test/screenshot-diagnostics.mjs` for screenshot request/response logging.

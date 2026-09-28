@@ -317,6 +317,21 @@ launching the browser or creating its context (headless, viewport, user agent,
 proxy, storage state, isolated, ...) do not apply: the gateway connects to the
 profile's running browser.
 
+### Screenshot diagnostics
+
+The profile's `gateway.log` records when a `Page.captureScreenshot` command is
+sent to Chrome and when its reply arrives. A pending command is logged after
+5 seconds and again after 35 seconds without a reply. Each line includes only
+an opaque session suffix, short tab ID, elapsed time and cached window
+visibility; it does not contain a URL, image data or CDP error text. A `sent`
+line followed by `no reply` points to Chrome or the CDP connection. A `reply`
+line followed by a tool timeout points downstream of Chrome's response. Late
+replies are still logged; pending records are discarded after five minutes.
+
+The browser tool's `timeout` argument controls how long the gateway waits for
+the entire call. Playwright's action timeout is separate and comes from its
+`timeouts.action` configuration (5 seconds by default).
+
 Stopping the service (`launchctl kickstart -k`, reinstalling it) leaves the
 browser running, so agents keep their tabs across a gateway restart;
 `service uninstall` closes it. `start` in the foreground closes the browser on
