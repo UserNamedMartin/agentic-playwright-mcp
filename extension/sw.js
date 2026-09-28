@@ -116,6 +116,40 @@ self.apmActivateTarget = async targetId => {
   await chrome.tabs.update(await tabIdForTarget(targetId), { active: true });
 };
 
+// While nobody can see the browser, the gateway keeps its status page in
+// front of its window: Chrome does not draw the front tab of a minimized
+// window, so an agent's tab there stops rendering. Tabs come to the front in
+// many ways (a fork's "Duplicate", window.open, Chrome picking a neighbour
+// when the front tab closes), so every change of the front tab is answered,
+// not only the moment the window goes out of sight. null lets the front tab
+// be. Kept in session storage: the service worker may be stopped in between.
+async function keepInFront(targetId) {
+  const tabId = await tabIdForTarget(targetId).catch(() => undefined);
+  if (tabId === undefined)
+    return;
+  for (let i = 0; i < 5; i++) {
+    // "Tabs cannot be edited right now" while Chrome is still moving tabs.
+    if (await chrome.tabs.update(tabId, { active: true }).then(() => true, () => false))
+      return;
+    await new Promise(r => setTimeout(r, 100));
+  }
+}
+
+self.apmKeepInFront = async targetId => {
+  await chrome.storage.session.set({ keepFront: targetId ?? null });
+  if (targetId)
+    await keepInFront(targetId);
+};
+
+chrome.tabs.onActivated.addListener(async ({ tabId, windowId }) => {
+  const { keepFront } = await chrome.storage.session.get('keepFront');
+  if (!keepFront)
+    return;
+  const front = await tabIdForTarget(keepFront).then(id => chrome.tabs.get(id), () => undefined);
+  if (front && front.id !== tabId && front.windowId === windowId)
+    await keepInFront(keepFront);
+});
+
 // The target id of the tab in front of the window that holds this target,
 // or null.
 self.apmFrontTarget = async targetId => {
@@ -129,4 +163,4 @@ self.apmFrontTarget = async targetId => {
 self.apmPing = () => 'ok';
 // What this version of the extension can do: the gateway reloads an older
 // one it finds still running.
-self.apmVersion = 3;
+self.apmVersion = 4;

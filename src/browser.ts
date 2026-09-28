@@ -593,6 +593,12 @@ export class SharedBrowser {
 
   private _visible: boolean | undefined;
 
+  // Whether someone can see the browser, as last sampled (undefined before
+  // the first sample).
+  get visible(): boolean | undefined {
+    return this._visible;
+  }
+
   // A cached snapshot for passive diagnostics. Querying Chrome while a CDP
   // command is stuck would make the diagnostic command depend on that failure.
   visibilityForDiagnostics(): 'visible' | 'hidden' | 'unknown' {

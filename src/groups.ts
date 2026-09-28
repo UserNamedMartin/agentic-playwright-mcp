@@ -11,7 +11,7 @@ export const extensionDir = path.resolve(path.dirname(fileURLToPath(import.meta.
 
 const colors = ['blue', 'green', 'purple', 'orange', 'cyan', 'pink', 'yellow', 'red', 'grey'];
 // self.apmVersion of the extension in extension/sw.js.
-const extensionVersion = 3;
+const extensionVersion = 4;
 
 export class TabGroups {
   private _shared: SharedBrowser;
@@ -86,6 +86,12 @@ export class TabGroups {
   // The tab in front of the window that holds this tab.
   async frontOf(targetId: string): Promise<string | null> {
     return await this._call<string | null>('apmFrontTarget', targetId);
+  }
+
+  // Keeps this tab in front of its window whatever else comes to the front,
+  // until called with null (see apmKeepInFront).
+  async keepInFront(targetId: string | null) {
+    await this._call('apmKeepInFront', targetId);
   }
 
   async rename(session: AgentSession) {
