@@ -252,6 +252,7 @@ export class Gateway implements SessionHost, ProxyHost {
       onDisconnected: () => this._onDisconnected(shared),
       // Nobody hears a browser they cannot see: tabs are muted while it is
       // hidden or minimized (pages do not notice).
+      onUserFocus: targetId => this._onUserFocus(targetId),
       onVisibilityChanged: visible => {
         void this.groups?.setMuted(!visible).catch(e => console.error(`sound: ${(e as Error).message}`));
         this._onFrontVisibility(visible);
@@ -438,14 +439,16 @@ export class Gateway implements SessionHost, ProxyHost {
   // only the moment the window goes out of sight. The tab that was in front
   // when the window went out of sight comes back when it is in view again.
   // Only a tab link or browser_show_tab lifts this while the window is out of
-  // sight (see _focusTab). Without the companion extension this cannot be
+  // sight (see _onUserFocus). Without the companion extension this cannot be
   // done without showing the window (Target.activateTarget un-minimizes it).
   private _frontBeforeHiding: string | undefined;
   private _frontChanges = Promise.resolve();
+  private _visibilityChanges = 0;
 
   // One change at a time: going out of sight and back in quick succession
   // must not interleave.
   private _onFrontVisibility(visible: boolean) {
+    this._visibilityChanges++;
     this._frontChanges = this._frontChanges.then(() => visible ? this._restoreFront() : this._putHomeInFront());
   }
 
@@ -456,6 +459,7 @@ export class Gateway implements SessionHost, ProxyHost {
     try {
       const front = await this.groups.frontOf(home);
       this._frontBeforeHiding = front && front !== home ? front : this._frontBeforeHiding;
+      console.error(`front: out of sight, keeping the status page in front (front was ${front === home ? 'the status page' : front?.slice(0, 8)})`);
       await this.groups.keepInFront(home);
     } catch (e) {
       console.error(`status page to the front: ${(e as Error).message}`);
@@ -471,26 +475,34 @@ export class Gateway implements SessionHost, ProxyHost {
     try {
       await this.groups.keepInFront(null);
       // A tab link chose the tab to show; so did anything already in front.
-      if (!previous || !this.shared.info(previous) || this.shared.userFocusedRecently())
+      if (!previous || !this.shared.info(previous) || this.shared.userFocusedRecently()) {
+        console.error(`front: in view, released (${!previous ? 'nothing to bring back' : this.shared.userFocusedRecently() ? 'a tab link chose the tab' : 'that tab is gone'})`);
         return;
-      if (await this.groups.frontOf(home) === home)
+      }
+      const front = await this.groups.frontOf(home);
+      console.error(`front: in view, released; ${front === home ? `bringing back ${previous.slice(0, 8)}` : 'another tab is already in front'}`);
+      if (front === home)
         await this.groups.activate(previous);
     } catch (e) {
       console.error(`tab back to the front: ${(e as Error).message}`);
     }
   }
 
-  // A tab link or browser_show_tab: the user wants to see this tab, so the
+  // A tab link or browser_show_tab (SharedBrowser.focusTab, which every way
+  // of showing a tab goes through): the user wants to see this tab, so the
   // status page stops being kept in front before the tab comes forward. If
   // the window still is not in view a little later (the browser could not be
   // shown), it is kept in front again.
-  private async _focusTab(targetId: string) {
+  private async _onUserFocus(targetId: string) {
     await this._frontChanges;
+    console.error(`front: tab link to ${targetId.slice(0, 8)}, released`);
     await this.groups?.keepInFront(null).catch(e => console.error(`front tab for a tab link: ${(e as Error).message}`));
-    await this.shared.focusTab(targetId);
+    const changes = this._visibilityChanges;
     setTimeout(() => {
-      if (this.shared.visible === false)
+      if (this.shared.visible === false && this._visibilityChanges === changes) {
+        console.error('front: the window did not come into view after a tab link');
         this._onFrontVisibility(false);
+      }
     }, 5000).unref();
   }
 
@@ -1082,7 +1094,7 @@ export class Gateway implements SessionHost, ProxyHost {
         [...s.targets].some(id => id === targetId));
     if (!targetId || !ours || !this.shared.info(targetId))
       return errorResult('That tab is closed.');
-    await this._focusTab(targetId);
+    await this.shared.focusTab(targetId);
     return { content: [{ type: 'text' as const, text: 'Opened.' }] };
   }
 
@@ -1134,7 +1146,7 @@ export class Gateway implements SessionHost, ProxyHost {
     try {
       if (!target)
         throw new Error('missing ?target=');
-      await this._focusTab(target);
+      await this.shared.focusTab(target);
       // Closes itself if someone opened the go=1 URL in a browser directly.
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
       res.end('<!doctype html><title>Opened</title><script>window.close()</script>');

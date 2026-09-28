@@ -39,6 +39,9 @@ export type BrowserEvents = {
   onDisconnected(): void;
   // Whether someone could be looking at the browser now (see isVisible).
   onVisibilityChanged(visible: boolean): void;
+  // The user asked to see this tab (focusTab): awaited before it comes
+  // forward. Every way of showing a tab goes through focusTab.
+  onUserFocus(targetId: string): Promise<void>;
 };
 
 // The binding page scripts reach the gateway through, and the object they use.
@@ -472,6 +475,7 @@ export class SharedBrowser {
   async focusTab(targetId: string) {
     this._userFocusAt = Date.now();
     console.error(`focus: showing tab ${targetId.slice(0, 8)} (front was pid ${frontmostPid()})`);
+    await this._events.onUserFocus(targetId);
     // A hidden app's window cannot be un-minimized, so unhide first.
     const pid = await this.pid();
     if (pid && process.platform === 'darwin')
@@ -611,6 +615,7 @@ export class SharedBrowser {
     if (visible === this._visible)
       return;
     this._visible = visible;
+    console.error(`browser ${visible ? 'in view' : 'out of sight'}`);
     this._events.onVisibilityChanged(visible);
   }
 
