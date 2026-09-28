@@ -159,6 +159,19 @@ try {
     }
     check(`${label}: ${rounds} downloads in a tab of their own reach the chat`, arrived === rounds && !stuck, `arrived ${arrived}, left in the gateway's folder ${stuck}`);
   }
+
+  // A download in a tab no chat owns (started in the window by hand) is kept
+  // where the browser keeps its own downloads, not in the gateway's folder
+  // (emptied at every start).
+  const strayDir = path.join(home, 'profiles', 'test', 'browser-downloads');
+  const strays = () => (fs.existsSync(strayDir) ? fs.readdirSync(strayDir) : []).filter(f => /^statement-\d+\.csv$/.test(f));
+  const before = strays().length;
+  await fetch(`http://127.0.0.1:${browserPort}/json/new?http://127.0.0.1:${siteA.address().port}/file`, { method: 'PUT' });
+  for (let t = 0; t < 50 && strays().length === before; t++)
+    await sleep(100);
+  const leftStray = (fs.existsSync(staging) ? fs.readdirSync(staging) : []).filter(f => fs.statSync(path.join(staging, f)).size === 26000);
+  check('a download in nobody\'s tab goes to the browser\'s own downloads folder', strays().length === before + 1 && !leftStray.length,
+      `browser-downloads: ${strays().join(', ') || 'none'}; left in the gateway's folder ${leftStray.length}`);
 } finally {
   gateway.kill('SIGTERM');
   browser.kill();

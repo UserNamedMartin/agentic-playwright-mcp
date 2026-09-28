@@ -190,7 +190,7 @@ export class Gateway implements SessionHost, ProxyHost {
     // Sessions' Playwright connections come in over a socket file (see proxy.ts).
     this._socketPath = path.join(os.tmpdir(), `agentic-playwright-${process.pid}.sock`);
     fs.rmSync(this._socketPath, { force: true });
-    this.proxy = new CdpProxy(this, this._socketPath, downloadsDir);
+    this.proxy = new CdpProxy(this, this._socketPath, downloadsDir, this.options.browserDownloadsDir);
     this._ipcServer = http.createServer((_req, res) => res.writeHead(404).end());
     this._ipcServer.on('upgrade', (req, socket, head) => {
       if (!this.proxy.handleUpgrade(req, socket, head))

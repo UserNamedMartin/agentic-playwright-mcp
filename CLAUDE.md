@@ -158,7 +158,8 @@ How it holds:
 - Refused as browser-wide: other targets, browser contexts, window bounds,
   resetting permissions, the browser's cache and all-cookie commands, service
   workers, downloads behavior (each download is moved to its session's
-  folder), and every browser-level command not on the proxy's list.
+  folder; one in a tab nobody owns to the profile's browser-downloads), and
+  every browser-level command not on the proxy's list.
 - The DevTools port and the gateway's pages: the proxy refuses navigations
   there and takes frames that land there (redirects, scripts) back to
   about:blank; netguard.ts refuses sockets opened on an agent's behalf. A

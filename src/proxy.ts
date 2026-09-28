@@ -56,15 +56,20 @@ export class CdpProxy {
   // Download guid -> session key, and where the browser saves downloads.
   private _downloads = new Map<string, string>();
   readonly downloadsDir: string;
+  // Downloads of tabs no session owns (started in the window by hand): guid
+  // -> file name; they go to this folder when they finish.
+  private _strays = new Map<string, string>();
+  private _strayDownloadsDir: string | undefined;
   private _socketPath: string;
 
   // Sessions connect over a local socket file, not a TCP port: no page (and
   // no request an agent's code makes, see netguard.ts) can reach it, and each
   // session's connection lives inside its agent's network guard.
-  constructor(host: ProxyHost, socketPath: string, downloadsDir: string) {
+  constructor(host: ProxyHost, socketPath: string, downloadsDir: string, strayDownloadsDir?: string) {
     this._host = host;
     this._socketPath = socketPath;
     this.downloadsDir = downloadsDir;
+    this._strayDownloadsDir = strayDownloadsDir;
   }
 
   get shared() {
@@ -135,18 +140,47 @@ export class CdpProxy {
     if (method === 'Browser.downloadWillBegin') {
       const tab = this.shared.takeDownloadTab(params.guid);
       const owner = tab ? this.shared.owners.get(tab) : undefined;
-      if (!owner)
+      if (!owner) {
+        this._strays.set(params.guid, String(params.suggestedFilename ?? ''));
         return;
+      }
       this._downloads.set(params.guid, owner);
       this._clients.get(owner)?.onDownloadEvent(message);
       return;
     }
     const owner = this._downloads.get(params.guid);
-    if (!owner)
+    if (!owner) {
+      if (this._strays.has(params.guid) && params.state !== 'inProgress')
+        this._settleStray(params.guid, params.state);
       return;
+    }
     if (params.state !== 'inProgress')
       this._downloads.delete(params.guid);
     this._clients.get(owner)?.onDownloadEvent(message);
+  }
+
+  // The gateway's folder is emptied at every start: a finished download of
+  // nobody's tab goes where the browser keeps its own downloads.
+  private _settleStray(guid: string, state: string) {
+    const suggested = path.basename(this._strays.get(guid) ?? '');
+    const name = suggested && suggested !== '.' && suggested !== '..' ? suggested : guid;
+    this._strays.delete(guid);
+    const from = path.join(this.downloadsDir, guid);
+    try {
+      if (state !== 'completed' || !this._strayDownloadsDir) {
+        if (state !== 'completed')
+          fs.rmSync(from, { force: true });
+        return;
+      }
+      fs.mkdirSync(this._strayDownloadsDir, { recursive: true });
+      const ext = path.extname(name);
+      let to = path.join(this._strayDownloadsDir, name);
+      for (let i = 1; fs.existsSync(to); i++)
+        to = path.join(this._strayDownloadsDir, `${path.basename(name, ext)} (${i})${ext}`);
+      moveFile(from, to);
+    } catch (e) {
+      console.error(`download ${guid}: ${(e as Error).message}`);
+    }
   }
 
   downloadOwner(guid: string) {
