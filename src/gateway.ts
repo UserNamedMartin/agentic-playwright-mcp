@@ -252,7 +252,10 @@ export class Gateway implements SessionHost, ProxyHost {
       onDisconnected: () => this._onDisconnected(shared),
       // Nobody hears a browser they cannot see: tabs are muted while it is
       // hidden or minimized (pages do not notice).
-      onVisibilityChanged: visible => void this.groups?.setMuted(!visible).catch(e => console.error(`sound: ${(e as Error).message}`)),
+      onVisibilityChanged: visible => {
+        void this.groups?.setMuted(!visible).catch(e => console.error(`sound: ${(e as Error).message}`));
+        void (visible ? this._restoreFront() : this._putHomeInFront());
+      },
     }, [popupInterceptScript, permissionScript, passkeyScript], connecting => this._attaching = connecting);
     this.shared = shared;
     await shared.setDownloadBehavior(this.proxy.downloadsDir);
@@ -422,6 +425,48 @@ export class Gateway implements SessionHost, ProxyHost {
     await this.groups?.pin(homeId).catch(() => {});
     await this.shared.startFocusGuard(homeId);
     await this.shared.hideApp();
+  }
+
+  // Chrome draws the tab in front of a window (its active tab) into the
+  // window itself, and a minimized window or a hidden browser is not drawn:
+  // that tab stops rendering. Its screenshots never answer, and after a
+  // cross-site navigation its new renderer barely runs animation frames.
+  // Tabs behind it render offscreen and are not affected. Agents' tabs open
+  // behind the status page; one comes to the front only when the user looks
+  // at it (a tab link, browser_show_tab) or clicks it while the window is in
+  // view. So whenever the window goes out of sight, the status page goes back
+  // in front, and the tab that was there comes back when the window is in
+  // view again. Without the companion extension this cannot be done without
+  // showing the window (Target.activateTarget un-minimizes it).
+  private _frontBeforeHiding: string | undefined;
+
+  private async _putHomeInFront() {
+    const home = this._homeTargetId;
+    if (!home || !this.groups)
+      return;
+    try {
+      const front = await this.groups.frontOf(home);
+      this._frontBeforeHiding = front && front !== home ? front : undefined;
+      if (this._frontBeforeHiding)
+        await this.groups.activate(home);
+    } catch (e) {
+      console.error(`status page to the front: ${(e as Error).message}`);
+    }
+  }
+
+  private async _restoreFront() {
+    const previous = this._frontBeforeHiding;
+    this._frontBeforeHiding = undefined;
+    const home = this._homeTargetId;
+    // A tab link chose the tab to show; so did anything already in front.
+    if (!previous || !home || !this.groups || !this.shared.info(previous) || this.shared.userFocusedRecently())
+      return;
+    try {
+      if (await this.groups.frontOf(home) === home)
+        await this.groups.activate(previous);
+    } catch (e) {
+      console.error(`tab back to the front: ${(e as Error).message}`);
+    }
   }
 
   // A tab really closed (not just a dropped connection).

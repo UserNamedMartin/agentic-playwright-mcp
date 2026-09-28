@@ -202,7 +202,8 @@ try {
   const afterRestart = tabIds(await a2.call('browser_tabs', { action: 'list' }));
   check('tabs kept after a gateway restart', afterRestart.join() === beforeRestart.join(), afterRestart.join(' '));
   const versionNow = await inExtension(() => self.apmVersion);
-  check('an older extension is reloaded', versionNow === 2, `extension version ${versionNow}`);
+  const versionOnDisk = Number(fs.readFileSync(new URL('../extension/sw.js', import.meta.url), 'utf8').match(/self\.apmVersion = (\d+)/)[1]);
+  check('an older extension is reloaded', versionNow === versionOnDisk, `extension version ${versionNow}, on disk ${versionOnDisk}`);
   // The chat connected while the gateway was still starting: a new tab of it
   // joins its group (found again by its tabs after the reload) under its own
   // title, not the client's fallback.

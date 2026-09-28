@@ -486,6 +486,11 @@ export class SharedBrowser {
     setTimeout(() => console.error(`focus: front is now pid ${frontmostPid()} (browser ${this._pid})`), 500).unref();
   }
 
+  // Whether a tab link or browser_show_tab just chose the tab to show.
+  userFocusedRecently(ms = 10_000) {
+    return Date.now() - this._userFocusAt < ms;
+  }
+
   // Show the window on the main display, wherever it was left.
   private async _moveToMainScreen(targetId: string) {
     const screen = mainScreen();
@@ -571,7 +576,9 @@ export class SharedBrowser {
       const state = await this._windowState().catch(() => undefined);
       if (state)
         this._setVisible(!this._lastHidden && state !== 'minimized');
-      if (!this._lastHidden && state === 'minimized') {
+      // focusTab unhides the browser before it un-minimizes the window: a
+      // sample in between must not hide it again.
+      if (!this._lastHidden && state === 'minimized' && Date.now() - this._userFocusAt > 3000) {
         console.error('window minimized; hiding the browser too');
         await this.hideApp();
       } else if (this._lastHidden && state && state !== 'minimized' && Date.now() - this._userFocusAt > 3000) {

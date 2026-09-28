@@ -11,7 +11,7 @@ export const extensionDir = path.resolve(path.dirname(fileURLToPath(import.meta.
 
 const colors = ['blue', 'green', 'purple', 'orange', 'cyan', 'pink', 'yellow', 'red', 'grey'];
 // self.apmVersion of the extension in extension/sw.js.
-const extensionVersion = 2;
+const extensionVersion = 3;
 
 export class TabGroups {
   private _shared: SharedBrowser;
@@ -76,6 +76,16 @@ export class TabGroups {
 
   async pin(targetId: string) {
     await this._call('apmPinTarget', targetId);
+  }
+
+  // Puts a tab in front of its window without showing the window.
+  async activate(targetId: string) {
+    await this._call('apmActivateTarget', targetId);
+  }
+
+  // The tab in front of the window that holds this tab.
+  async frontOf(targetId: string): Promise<string | null> {
+    return await this._call<string | null>('apmFrontTarget', targetId);
   }
 
   async rename(session: AgentSession) {

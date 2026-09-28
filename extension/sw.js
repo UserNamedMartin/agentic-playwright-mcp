@@ -110,7 +110,23 @@ chrome.tabs.onCreated.addListener(async tab => {
     await setTabMuted(tab, true).catch(() => {});
 });
 
+// Puts a tab in front of its window. Unlike Target.activateTarget over CDP,
+// this does not bring a minimized window back into view.
+self.apmActivateTarget = async targetId => {
+  await chrome.tabs.update(await tabIdForTarget(targetId), { active: true });
+};
+
+// The target id of the tab in front of the window that holds this target,
+// or null.
+self.apmFrontTarget = async targetId => {
+  const { windowId } = await chrome.tabs.get(await tabIdForTarget(targetId));
+  const [front] = await chrome.tabs.query({ active: true, windowId });
+  if (!front)
+    return null;
+  return (await chrome.debugger.getTargets()).find(t => t.tabId === front.id)?.id ?? null;
+};
+
 self.apmPing = () => 'ok';
 // What this version of the extension can do: the gateway reloads an older
 // one it finds still running.
-self.apmVersion = 2;
+self.apmVersion = 3;

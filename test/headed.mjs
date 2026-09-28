@@ -23,7 +23,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 const require = createRequire(import.meta.url);
 const { chromium } = require('playwright-core');
 const root = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
-const { isHiddenPid } = await import(path.join(root, 'dist', 'macos.js'));
+const { isHiddenPid, unhidePid } = await import(path.join(root, 'dist', 'macos.js'));
 const executable = process.argv[2] ?? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const home = fs.mkdtempSync(path.join(os.tmpdir(), 'apm-headed-'));
 const appSupport = path.join(home, 'app-support');
@@ -110,6 +110,14 @@ const mutedTab = async urlPart => {
   }
   return undefined;
 };
+// The tabs each window shows in front (their active tabs), by URL.
+const frontTabs = async () => {
+  for (const worker of browser.contexts()[0].serviceWorkers()) {
+    if (await worker.evaluate(() => typeof self.apmPing === 'function').catch(() => false))
+      return await worker.evaluate(async () => (await chrome.tabs.query({ active: true })).map(t => t.url).join(', '));
+  }
+  return undefined;
+};
 // Samples what the user could see while `action` runs, and for a while after.
 const watch = async (action, afterMs = 3000) => {
   const seen = [];
@@ -171,6 +179,42 @@ try {
   await cdp.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'minimized' } });
   await sleep(2000);
   check('window minimized: tabs are muted again', await mutedTab('/two') === true, `muted: ${await mutedTab('/two')}`);
+
+  // A tab the user looked at must not stay in front of the window once it is
+  // out of sight: Chrome draws a window's front tab into the window, and a
+  // minimized window is not drawn, so that tab would stop rendering
+  // (screenshots never answer, a new renderer barely runs animation frames).
+  await original('browser_tabs', { action: 'new', url: `${base}/looked-at` });
+  await original('browser_show_tab');
+  await sleep(1500);
+  await cdp.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'minimized' } });
+  await sleep(2000);
+  const front = await frontTabs();
+  check('window minimized: the status page is in front again', front === `http://127.0.0.1:${gatewayPort}/`, front);
+  // localhost and 127.0.0.1 are different sites: a new renderer process.
+  await original('browser_navigate', { url: `${base.replace('localhost', '127.0.0.1')}/cross-site` });
+  const shot = await original('browser_take_screenshot', { scale: 'css', timeout: 20 });
+  check('hidden: the tab looked at takes screenshots after a cross-site navigation', /Screenshot of viewport/.test(shot), shot.split('\n').find(l => l.trim()));
+  const frames = Number(await evaluate(original, '() => new Promise(r => { let n = 0; const t0 = performance.now(); const f = () => { n++; performance.now() - t0 < 1000 ? requestAnimationFrame(f) : r(n); }; requestAnimationFrame(f); setTimeout(() => r(n), 3000); })'));
+  check('hidden: the tab looked at keeps running animation frames', frames > 20, `${frames} frames in 1 s`);
+  // Brought back by hand (not by a tab link, whose choice wins for 10 s):
+  // the tab that was in front comes back.
+  await sleep(8000);
+  unhidePid(pid);
+  await cdp.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'normal' } });
+  await sleep(1500);
+  const restored = await frontTabs();
+  check('window back in view: the tab that was in front is in front again', /\/cross-site$/.test(restored ?? ''), restored);
+  // Out of sight again, then a tab link to another tab: the link's tab wins.
+  await cdp.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'minimized' } });
+  await sleep(2000);
+  await original('browser_tabs', { action: 'select', index: 0 });
+  await original('browser_show_tab');
+  await sleep(2500);
+  const linked = await frontTabs();
+  check('shown by a tab link: that tab is in front, not the remembered one', /\/two$/.test(linked ?? ''), linked);
+  await original('browser_tabs', { action: 'close', index: 1 });
+
   await original('browser_show_tab');
   await sleep(1500);
   const shownClick = await original('browser_click', { element: 'register', target: await snapRef() });
