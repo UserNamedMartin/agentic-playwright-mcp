@@ -195,6 +195,23 @@ empty 0×0 `div`. Take a fresh snapshot (or `browser_find` for `close`,
 `accept`, `dialog`), close the overlay, then click again. Do not click through
 it from JavaScript: a real user could not do that either.
 
+## Lessons learned
+
+Short lessons from real use. Add one when a mistake cost a session time.
+
+- `browser_run_code_unsafe` runs in a bare JavaScript sandbox: only `page`
+  and the language's built-ins. No `setTimeout`, `URL`, `require`, `fetch`
+  or `Buffer`. Wait with `page.waitForTimeout`, parse URLs with a regular
+  expression, use browser APIs through `page.evaluate`.
+- `globalThis` is new on every run_code call. Keep state between calls on
+  `page` (gone when the session restarts).
+- run_code cannot write files. Return the data and save it with
+  `browser_evaluate` and `filename`, or a screenshot with `filename`.
+- A `route` handler must end every request (fulfill, continue or abort),
+  also when it throws: an uncaught error leaves the request hanging, and a
+  `catch` that aborts hides your bug behind the page's own error screen.
+  Put the error text in the response instead.
+
 ## Report every problem (hard requirement)
 
 This browser is new infrastructure and gets fixed only through honest reports.
