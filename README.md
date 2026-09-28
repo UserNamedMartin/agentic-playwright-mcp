@@ -237,8 +237,9 @@ the gateway created). Change the location or the retention with `filesDir` and
   out of sight.
 - Claude Code sends each tool call's tool-use id; the gateway looks it up in
   the chat's transcripts to tell subagents apart.
-- A small companion extension, loaded over CDP, manages the tab groups and
-  duplicates tabs for forked chats.
+- A small companion extension, loaded over CDP, manages the tab groups,
+  duplicates tabs for forked chats, mutes tabs and keeps the status page in
+  front of the window while it is out of sight.
 - Page scripts added to every tab report permission and passkey requests and
   new-tab links to the gateway.
 - Chat titles and forks come from the Claude desktop app's chat files.
@@ -336,6 +337,12 @@ visibility; it does not contain a URL, image data or CDP error text. A `sent`
 line followed by `no reply` points to Chrome or the CDP connection. A `reply`
 line followed by a tool timeout points downstream of Chrome's response. Late
 replies are still logged; pending records are discarded after five minutes.
+
+Next to them, `browser in view` / `browser out of sight` and `front: ...` lines
+record when the status page starts and stops being kept in front of the window
+and why (out of sight, back in view, a tab link). A screenshot that never
+answers on a tab that the `front:` lines show in front of a hidden window is
+that case; one on a tab behind the status page is something else.
 
 The browser tool's `timeout` argument controls how long the gateway waits for
 the entire call. Playwright's action timeout is separate and comes from its

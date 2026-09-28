@@ -48,7 +48,8 @@ Read README.md first for what the project does. This file is about changing it.
 - `src/launcher.ts`, `supervisor.ts`, `service.ts`, `profiles.ts`,
   `urlhandler.ts`, `macos.ts` — running profiles on the machine.
 - `extension/` — companion extension (tab groups, duplicating tabs for forked
-  chats, muting tabs while the browser is out of sight), loaded over CDP.
+  chats, muting tabs and keeping the status page in front while the browser
+  is out of sight), loaded over CDP.
   Bump `self.apmVersion` (and `extensionVersion` in groups.ts) when it
   changes: the gateway reloads an older copy it finds running.
 - `skill/SKILL.md` — the agent skill users install; keep it in sync with
@@ -93,6 +94,14 @@ Read README.md first for what the project does. This file is about changing it.
 - Never let agent work steal focus: the proxy creates every tab in the
   background and answers Page.bringToFront / Target.activateTarget itself.
   Only explicit user requests (`focusTab`) may raise the window.
+- While out of sight, the status page is the front tab of its window: Chrome
+  does not draw the front tab of a minimized window, so an agent's tab there
+  never answers screenshots. This is a state to hold, not a moment to act
+  on: the extension answers every chrome.tabs.onActivated while the window is
+  out of sight (a fork's Duplicate, window.open and closing the front tab all
+  bring tabs forward). Only `SharedBrowser.focusTab` releases it
+  (`onUserFocus`); every way of showing a tab must go through focusTab.
+  `test/front.mjs` checks each way a tab comes forward; add new ones there.
 - macOS: never talk to "System Events" from the gateway (it runs as a launchd
   service and blocks on an Automation permission prompt). Use `lsappinfo` and
   the link-handler applet (`agentic-browser://raise/<pid>`); background
@@ -203,12 +212,13 @@ chat gets for another chat's secret.
 ## Checking changes
 
 `npm run build`, then `node test/reconnect.mjs`, `node test/permissions.mjs`,
-`node test/passkeys.mjs`, `node test/forks.mjs`, `node test/downloads.mjs`, `node test/hangs.mjs`, `node test/matrix.mjs`, `node test/robustness.mjs`, `node test/reconnect-stall.mjs`, `node test/leaks.mjs`, `node test/config.mjs` and `node test/canary.mjs`
+`node test/passkeys.mjs`, `node test/forks.mjs`, `node test/downloads.mjs`, `node test/paths.mjs`, `node test/front.mjs`, `node test/hangs.mjs`, `node test/matrix.mjs`, `node test/robustness.mjs`, `node test/reconnect-stall.mjs`, `node test/leaks.mjs`, `node test/config.mjs` and `node test/canary.mjs`
 (self-contained, headless; headless Chrome grants some permissions by itself,
 so check permission changes in a headed profile too; `APM_PROXY_DEBUG=1` logs
 every command the proxy refuses)
 and a throwaway headless profile with the other scripts in `test/` (see
 test/README.md). Anything that opens windows or moves focus needs
 a headed profile, and on someone's machine, their go-ahead first:
-`node test/headed.mjs` covers the fork copies and passkeys that way. Run
+`node test/headed.mjs` covers the fork copies, passkeys, and the front tab
+around a minimized window and tab links that way. Run
 `node test/screenshot-diagnostics.mjs` for screenshot request/response logging.
