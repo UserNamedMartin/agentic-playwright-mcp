@@ -651,16 +651,24 @@ export class AgentSession {
   }
 }
 
-// Relative file paths in a result ("./shot.png", "shots/a.png", "../x.pdf")
-// become absolute. Only paths of files that exist are changed, so text from the
-// page (a link to "./about") stays as it is.
-function absolutePaths(text: string, filesDir: string) {
-  return text.replace(/(^|[\s("'`])((?:\.\.?\/)*[\w@%+~-][\w@%+~.\/-]*\.[A-Za-z0-9]{1,8})(?=$|[\s)"'`,;])/g, (match, before: string, name: string) => {
+// The paths Playwright MCP prints for files it saved ("./shot.png", relative
+// to the files folder) become absolute. Only the lines Playwright writes for
+// them are touched: a file link "- [Screenshot of page](./shot.png)" and
+// "- Downloaded file a.pdf to "./a.pdf"". Everything else (the code it ran,
+// evaluate results, page snapshots, console text) is left exactly as it was,
+// even when it names a file that exists. Only files that exist are changed.
+export function absolutePaths(text: string, filesDir: string) {
+  const resolve = (name: string) => {
+    if (path.isAbsolute(name))
+      return name;
     const file = path.resolve(filesDir, name);
     try {
-      return fs.statSync(file).isFile() ? `${before}${file}` : match;
+      return fs.statSync(file).isFile() ? file : name;
     } catch {
-      return match;
+      return name;
     }
-  });
+  };
+  return text
+    .replace(/^(- \[.*\]\()(.+)(\))$/gm, (_, before: string, name: string, after: string) => before + resolve(name) + after)
+    .replace(/^(- Downloaded file .* to ")(.+)(")$/gm, (_, before: string, name: string, after: string) => before + resolve(name) + after);
 }

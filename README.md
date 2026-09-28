@@ -202,7 +202,9 @@ agent works in:
 Folders are named by id rather than by chat title, since titles change.
 
 Tool results give every saved file's absolute path (stock Playwright MCP
-gives "./shot.png", and agents then search the disk for it). A chat that comes back finds its folder
+gives "./shot.png", and agents then search the disk for it). Only the lines
+Playwright writes for saved files and downloads are changed; code, evaluate
+results and page text keep their file names. A chat that comes back finds its folder
 again. Folders nobody has read or written for 7 days are deleted (only folders
 the gateway created). Change the location or the retention with `filesDir` and
 `filesRetentionDays` in `profiles.json`.
