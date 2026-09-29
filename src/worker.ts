@@ -104,6 +104,7 @@ const host: ToolHost = {
   allCookies: () => rpc('allCookies'),
   deleteCookies: cookies => rpc('deleteCookies', cookies),
   focusTab: targetId => rpc('focusTab', targetId),
+  zoomForTarget: targetId => rpc('zoomForTarget', targetId),
   answerPermissions: (...args) => rpc('answerPermissions', ...args),
 };
 
@@ -149,8 +150,12 @@ async function open() {
   for (const tab of context.tabs()) {
     const targetId = await targetIdOf(tab.page).catch(() => undefined);
     const settings = targetId && host.emulation.get(targetId);
-    if (settings)
-      await applyEmulation(tab.page, settings).catch(() => {});
+    if (settings && targetId) {
+      const zoom = await host.zoomForTarget(targetId).catch(() => settings.zoom ?? 1);
+      const updated = { ...settings, zoom };
+      host.emulation.set(targetId, updated);
+      await applyEmulation(tab.page, updated).catch(() => {});
+    }
     if (targetId && targetId === start.currentTarget)
       context._currentTab = tab;
   }
@@ -237,7 +242,11 @@ async function call(id: number, name: string, args: any, tab: string | undefined
   const state = { abandoned: false };
   calls.set(id, state);
   try {
+    if (name !== 'browser_emulate_device' && name !== 'browser_close')
+      await refreshEmulation(context.currentTab()?.page);
     const result = await callState.run(state, () => backend.callTool(name, args));
+    if (name !== 'browser_emulate_device' && name !== 'browser_close')
+      await refreshEmulation(context.currentTab()?.page);
     const disconnected = !browser.isConnected() || !!backend._disconnected;
     const current = disconnected ? undefined : context.currentTab()?.page;
     return {
@@ -252,6 +261,18 @@ async function call(id: number, name: string, args: any, tab: string | undefined
   } finally {
     calls.delete(id);
   }
+}
+
+async function refreshEmulation(page: Page | undefined) {
+  if (!page || page.isClosed()) return;
+  const targetId = await targetIdOf(page);
+  const settings = host.emulation.get(targetId);
+  if (!settings) return;
+  const zoom = await host.zoomForTarget(targetId).catch(() => settings.zoom ?? 1);
+  if (zoom === settings.zoom) return;
+  const updated = { ...settings, zoom };
+  await applyEmulation(page, updated);
+  host.emulation.set(targetId, updated);
 }
 
 // What the session keeps for a new connection.

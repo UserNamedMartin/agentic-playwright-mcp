@@ -295,6 +295,10 @@ export class AgentSession {
         if (!this.targets.has(args[0]))
           throw new Error('That tab is not yours.');
         return await shared.focusTab(args[0]);
+      case 'zoomForTarget':
+        if (!this.targets.has(args[0]))
+          throw new Error('That tab is not yours.');
+        return await shared.zoomForTarget(args[0]);
       case 'answerPermissions':
         return await this._host.answerPermissions(this, args[0], args[1], args[2], args[3]);
     }

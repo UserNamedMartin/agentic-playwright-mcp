@@ -9,6 +9,7 @@ import { permissionTypes } from './permissions.js';
 // What the session's tools need from outside the backend (context._agentSession).
 export type ToolHost = {
   targetIdOf(page: Page): Promise<string>;
+  zoomForTarget(targetId: string): Promise<number>;
   // Device emulation by tab (target id), kept to set again on a new connection.
   emulation: Map<string, Emulation>;
   offline: boolean;
@@ -24,7 +25,7 @@ export type ToolHost = {
 // attached, so keep one per page.
 const emulationSessions = new WeakMap<Page, CDPSession>();
 
-export type Emulation = { width: number; height: number; mobile: boolean; deviceScaleFactor: number; touch: boolean; userAgent?: string };
+export type Emulation = { width: number; height: number; mobile: boolean; deviceScaleFactor: number; touch: boolean; userAgent?: string; zoom?: number };
 
 // Applies (or with undefined, clears) a tab's device emulation.
 export async function applyEmulation(page: Page, settings: Emulation | undefined) {
@@ -41,6 +42,7 @@ export async function applyEmulation(page: Page, settings: Emulation | undefined
   }
   await cdp.send('Emulation.setDeviceMetricsOverride', {
     width: settings.width, height: settings.height, mobile: settings.mobile, deviceScaleFactor: settings.deviceScaleFactor,
+    scale: settings.zoom ?? 1,
   });
   await cdp.send('Emulation.setTouchEmulationEnabled', { enabled: settings.touch, maxTouchPoints: settings.touch ? 5 : 1 });
   if (settings.userAgent)
@@ -113,11 +115,16 @@ export function extraTools() {
       if (!width || !height)
         throw new Error('Pass a device name or width and height.');
       const mobile = params.mobile ?? device.isMobile ?? false;
+      const zoom = await (context._agentSession as ToolHost).zoomForTarget(targetId).catch(() => undefined);
+      if (zoom === undefined)
+        response.addTextResult('Chrome zoom could not be read (the companion extension may be unavailable). ' +
+          'Assuming 100% site zoom; reset any custom zoom before clicking in the emulated tab.');
       const settings: Emulation = {
         width, height, mobile,
         deviceScaleFactor: params.deviceScaleFactor ?? device.deviceScaleFactor ?? 1,
         touch: params.touch ?? device.hasTouch ?? mobile,
         userAgent: params.userAgent ?? device.userAgent,
+        zoom: zoom ?? 1,
       };
       await applyEmulation(page, settings);
       // Kept by the session, to apply again after a reconnect or restart.

@@ -79,7 +79,10 @@ Stock Playwright MCP is built for one agent at a time:
   offers its other ways to sign in) and the agent is told; with the window in
   front (after a tab link) they go through to the browser as usual.
 - **Per-tab device emulation**: `browser_emulate_device` emulates a phone in
-  one tab without affecting other agents.
+  one tab without affecting other agents. It reads Chrome's zoom for that tab
+  and matches the CDP scale, so a saved 50% site zoom cannot move Playwright
+  clicks to half their intended coordinates. The scale is refreshed after
+  navigation and before later actions if the user changes zoom.
 - **Dock badges** (macOS): each profile's browser icon carries a short label
   (up to 3 characters, e.g. `WRK`, `P`) in a colored tag, so several agent
   browsers are easy to tell apart.

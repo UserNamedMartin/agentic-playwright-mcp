@@ -433,6 +433,13 @@ export class SharedBrowser {
     return result.value as T;
   }
 
+  async zoomForTarget(targetId: string): Promise<number> {
+    const zoom = await this.extensionEvaluate<number>(`self.apmZoomForTarget(${JSON.stringify(targetId)})`);
+    if (!Number.isFinite(zoom) || zoom <= 0)
+      throw new Error(`Invalid Chrome zoom level for tab ${targetId}`);
+    return zoom;
+  }
+
   // The extension was reloaded: look for its new service worker.
   forgetExtension() {
     this._extensionSession = undefined;

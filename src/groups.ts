@@ -11,7 +11,7 @@ export const extensionDir = path.resolve(path.dirname(fileURLToPath(import.meta.
 
 const colors = ['blue', 'green', 'purple', 'orange', 'cyan', 'pink', 'yellow', 'red', 'grey'];
 // self.apmVersion of the extension in extension/sw.js.
-const extensionVersion = 4;
+const extensionVersion = 5;
 
 export class TabGroups {
   private _shared: SharedBrowser;

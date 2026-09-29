@@ -160,7 +160,12 @@ self.apmFrontTarget = async targetId => {
   return (await chrome.debugger.getTargets()).find(t => t.tabId === front.id)?.id ?? null;
 };
 
+// Chrome keeps a per-site zoom level in this persistent profile. CDP device
+// emulation must use that same scale or Playwright clicks land at the wrong
+// CSS coordinates (at 50% zoom, a click at 80,804 arrives at 40,402).
+self.apmZoomForTarget = async targetId => chrome.tabs.getZoom(await tabIdForTarget(targetId));
+
 self.apmPing = () => 'ok';
 // What this version of the extension can do: the gateway reloads an older
 // one it finds still running.
-self.apmVersion = 4;
+self.apmVersion = 5;
