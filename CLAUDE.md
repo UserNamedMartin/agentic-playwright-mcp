@@ -135,6 +135,12 @@ Read README.md first for what the project does. This file is about changing it.
   rather than making a new Chrome request while a screenshot may be stuck.
   Keep screenshot parameters and response data out of logs.
 
+## Bugs
+
+Known bugs live in `bugs/`, one Markdown file each, indexed in `bugs/README.md` (which also says how
+to file one and what a report contains). Read the open ones before you start; when you fix one, set
+its status and `fixed-in`, add a "## Fix" section and update the index row.
+
 ## Fixing bugs
 
 Every bug fix comes with a test that fails without the fix and passes with it,
