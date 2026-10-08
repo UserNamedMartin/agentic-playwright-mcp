@@ -39,6 +39,7 @@ import { cleanFolders, cleanOldEntries, sessionFolder, subagentFolder } from './
 import { baseIcon, renderDockIcon } from './docktile.js';
 import { appMimeType, openTabWindowTool, tabLinkHtml, tabLinkResource, tabLinkResourceUri, tabLinkTool } from './apps.js';
 import { DesktopChatFile } from './titles.js';
+import { processEnv } from './identity.js';
 import { passkeyScript, type PasskeyRequest } from './passkeys.js';
 import { describeRequests, holdMs, permissionScript, permissionTypes, type PermissionRequest } from './permissions.js';
 
@@ -95,7 +96,9 @@ export class Gateway implements SessionHost, ProxyHost {
   private _homeTargetId: string | undefined;
   private _stopping = false;
   private _transports = new Map<string, Transport>();
-  private _transcripts = new Map<string, TranscriptIndex>();
+  private _transcripts = new Map<string, { sessionId: string; configDir: string; index: TranscriptIndex }>();
+  // Subagent lookups that found nothing, logged once per chat.
+  private _missLogged = new Set<string>();
   private _config: any;
   private _tools: any[] = [];
   private _server: http.Server | undefined;
@@ -806,26 +809,44 @@ export class Gateway implements SessionHost, ProxyHost {
   }
 
   private _chatTitle(root: AgentSession): string | undefined {
-    const { desktopChat, claudeSessionId, configDir } = root.info;
+    const { desktopChat } = root.info;
     if (desktopChat) {
       const title = this._desktopChatFile(desktopChat).read()?.title;
       if (title)
         return title;
     }
-    if (claudeSessionId && configDir)
-      return this._transcriptIndex(root)?.customTitle();
-    return undefined;
+    return this._transcriptIndex(root)?.customTitle();
+  }
+
+  // Where the chat's transcripts are now. The desktop chat file has the
+  // current CLI session id: a new chat connects before the app writes it, and
+  // the app can continue a chat under a new id, while the headers keep what
+  // they had at connect time. The config dir comes from the headers or, for
+  // clients connected before the helper always sent it, the agent's environment.
+  private _transcriptLocation(root: AgentSession): { sessionId: string; configDir: string } | undefined {
+    const { desktopChat, pid } = root.info;
+    const sessionId = (desktopChat && this._desktopChatFile(desktopChat).read()?.cliSessionId) || root.info.claudeSessionId;
+    if (!sessionId)
+      return undefined;
+    if (!root.info.configDir && pid) {
+      const env = processEnv(pid);
+      if (env)
+        root.info.configDir = env['CLAUDE_CONFIG_DIR'] || path.join(os.homedir(), '.claude');
+    }
+    return root.info.configDir ? { sessionId, configDir: root.info.configDir } : undefined;
   }
 
   private _transcriptIndex(root: AgentSession) {
-    const { claudeSessionId, configDir } = root.info;
-    if (!claudeSessionId || !configDir)
+    const location = this._transcriptLocation(root);
+    if (!location)
       return undefined;
-    let index = this._transcripts.get(root.info.id);
-    if (!index) {
-      index = new TranscriptIndex(configDir, claudeSessionId, () => this._refreshTitles());
-      this._transcripts.set(root.info.id, index);
-    }
+    const cached = this._transcripts.get(root.info.id);
+    if (cached?.sessionId === location.sessionId && cached.configDir === location.configDir)
+      return cached.index;
+    if (cached)
+      console.error(`transcripts of ${root.info.title} moved: session ${cached.sessionId} -> ${location.sessionId}`);
+    const index = new TranscriptIndex(location.configDir, location.sessionId, () => this._refreshTitles());
+    this._transcripts.set(root.info.id, { ...location, index });
     return index;
   }
 
@@ -1037,7 +1058,14 @@ export class Gateway implements SessionHost, ProxyHost {
   private async _autoTarget(session: AgentSession, toolUseId: unknown): Promise<AgentSession> {
     if (typeof toolUseId !== 'string')
       return session;
-    const caller = await this._transcriptIndex(session)?.lookup(toolUseId).catch(() => undefined);
+    const index = this._transcriptIndex(session);
+    const caller = await index?.lookup(toolUseId).catch(() => undefined);
+    if (!caller && !this._missLogged.has(session.info.id)) {
+      // Silent until now, which hid a whole class of misattributions.
+      this._missLogged.add(session.info.id);
+      console.error(`subagent lookup: tool_use ${toolUseId} of ${session.info.title} not found ` +
+        `(${index ? 'not in its transcripts' : 'transcripts unknown'}); the call goes to the chat`);
+    }
     if (caller?.kind !== 'subagent')
       return session;
     const id = `${session.info.id}#${caller.agentId}`;
@@ -1236,6 +1264,7 @@ export class Gateway implements SessionHost, ProxyHost {
       console.error(`session closed: ${session.info.title} (${session.targets.size} tab(s))`);
     this.sessions.delete(session.info.id);
     this._transcripts.delete(session.info.id);
+    this._missLogged.delete(session.info.id);
     const chat = session.info.desktopChat;
     if (chat && ![...this.sessions.values()].some(s => s.info.desktopChat === chat))
       this._desktopChats.delete(chat);

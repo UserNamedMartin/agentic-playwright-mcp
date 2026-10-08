@@ -27,8 +27,12 @@ export function identityHeaders(): Record<string, string> {
   // tell subagents apart (see subagents.ts).
   const claudeSessionId = process.env.CLAUDE_CODE_SESSION_ID ?? agent.env['CLAUDE_CODE_SESSION_ID'] ?? desktop?.cliSessionId;
   const configDir = process.env.CLAUDE_CONFIG_DIR ?? agent.env['CLAUDE_CONFIG_DIR'] ?? path.join(os.homedir(), '.claude');
-  if (claudeSessionId && /(^|\/)claude( |$)/.test(agent.command)) {
-    headers['x-agent-claude-session'] = encodeURIComponent(claudeSessionId);
+  // A new desktop chat connects before the app has written its CLI session id;
+  // the gateway then reads it from the chat file later, and needs the config
+  // dir to find the transcripts.
+  if (/(^|\/)claude( |$)/.test(agent.command)) {
+    if (claudeSessionId)
+      headers['x-agent-claude-session'] = encodeURIComponent(claudeSessionId);
     headers['x-agent-config-dir'] = encodeURIComponent(configDir);
   }
   headers['x-agent-session-id'] = encodeURIComponent(sessionId);
@@ -57,6 +61,11 @@ function findAgentProcess(): Proc | undefined {
     pid = proc.ppid;
   }
   return fallback;
+}
+
+// The environment a process started with (only our own processes are readable).
+export function processEnv(pid: number): Record<string, string> | undefined {
+  return readProcess(pid)?.env;
 }
 
 function readProcess(pid: number): Proc | undefined {

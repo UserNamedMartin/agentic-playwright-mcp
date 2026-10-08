@@ -1,5 +1,5 @@
 ---
-status: open
+status: fixed
 area: subagents
 found: 2026-09-30
 filed: 2026-10-01
@@ -88,3 +88,23 @@ Confirmed in the code, not yet by a test:
   they still share the parent's queue.
 - Restarting the client process (so its environment carries the new session id) and the gateway
   restores attribution; check `gateway.log` for `session started: … · <subagent>` lines.
+
+## Fix
+Found again on 2026-10-08 in a fresh desktop chat (no id change at all): the chat's first browser call
+created its session without `claudeSessionId` and without `configDir`. The headers helper runs when
+the client connects, before the desktop app has written `cliSessionId` into the chat file, and the
+Claude Code process itself carries no `CLAUDE_CODE_SESSION_ID`; the helper sent the config dir only
+together with a session id. So the gateway had no transcripts to read and every subagent call of
+that chat fell back to the chat, silently. The session-id change above is the same defect: the
+transcript location was fixed at connect time.
+
+- `gateway.ts` `_transcriptLocation()`: the transcript session id is read from the desktop chat file
+  on each lookup (mtime-cached) and wins over the header; the config dir comes from the header or,
+  for clients connected without it, the agent process's environment (`CLAUDE_CONFIG_DIR`, else
+  `~/.claude`). The cached `TranscriptIndex` is rebuilt when the location changes (logged).
+- `identity.ts`: the helper always sends `x-agent-config-dir` for Claude Code, with or without a
+  session id.
+- A lookup that finds nothing is logged once per chat.
+- Test: `test/subagent-transcripts.mjs` (self-contained): late session id, changed session id, stale
+  header, config dir from the environment. Without the fix the chat's own tab list shows the
+  subagent's tab.

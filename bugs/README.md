@@ -7,7 +7,7 @@ open ones before they start; an agent that hits a problem while using the browse
 
 | File | Status | Area | Found | Summary |
 |---|---|---|---|---|
-| [2026-10-01-subagents-attributed-to-parent.md](2026-10-01-subagents-attributed-to-parent.md) | open | subagents | 2026-09-30 | After a chat's Claude Code session id changes mid-chat, every subagent call is attributed to the parent: shared tab group and one call queue |
+| [2026-10-01-subagents-attributed-to-parent.md](2026-10-01-subagents-attributed-to-parent.md) | fixed | subagents | 2026-09-30 | After a chat's Claude Code session id changes mid-chat, every subagent call is attributed to the parent: shared tab group and one call queue |
 
 Keep the table sorted newest first; update the row when the status changes.
 
