@@ -28,7 +28,9 @@ Read README.md first for what the project does. This file is about changing it.
 - `src/netguard.ts` — sockets opened on an agent's behalf (everything in its
   worker thread) cannot reach the DevTools or gateway ports.
 - `src/internals.ts` — the only place that touches playwright-core internals.
-- `src/subagents.ts` — Claude Code subagent detection from transcripts.
+- `src/subagents.ts` — Claude Code subagent detection from transcripts;
+  which transcripts comes from `Gateway._transcriptLocation` (the desktop chat
+  file's current CLI session id wins over the connect-time header).
 - `src/files.ts` — per-chat file folders and their weekly cleanup.
 - `src/apps.ts` — MCP Apps tab-link widget; `src/tools.ts` — extra tools
   (show_tab, emulate_device with per-tab settings kept by the session,
@@ -49,6 +51,9 @@ Read README.md first for what the project does. This file is about changing it.
   AppKit call that would put the app on screen (activate, unhide, ordering a
   window in, deminiaturize) unless the gate file holds a future deadline
   (`SharedBrowser.focusTab` writes it) or the user made the app active.
+  Copies are versioned (`<home>/browsers/<version>/`, never replaced while a
+  browser may run from them); `updateGatedBrowser` rebuilds after the source
+  updates, and each profile's supervisor runs it hourly in a child process.
 - `src/titles.ts` — current chat titles and forks (Claude desktop chat
   files); CLI `/rename` titles come from `subagents.ts`.
 - `src/launcher.ts`, `supervisor.ts`, `service.ts`, `profiles.ts`,

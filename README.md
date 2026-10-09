@@ -60,7 +60,11 @@ Stock Playwright MCP is built for one agent at a time:
   window is out of sight, whatever brings another tab forward (a fork's copy,
   window.open, Chrome picking a neighbour when the front tab closes); only a
   tab link lets a tab through. The tab you had in front comes back when the
-  window is in view again.
+  window is in view again. On macOS the **gated browser** (a re-signed copy of
+  Google Chrome, built and kept up to date by the gateway) goes further: pages
+  cannot bring it on screen at all, whatever they do (window.open, popups,
+  forms, focus()); only a tab link, `browser_show_tab` or you can. See
+  "Things to know".
 - **Tab links**: `browser_tab_link` gives the agent a link to put in the chat;
   clicking it opens the window on that tab (for logins, captchas, review).
 - **Tabs survive hiccups**: when the connection to the browser drops (macOS
@@ -93,6 +97,9 @@ Stock Playwright MCP is built for one agent at a time:
 
 - Node.js 20 or newer.
 - Chrome, Brave, Edge or Chromium.
+- For the gated browser (optional, macOS): Google Chrome and the Xcode
+  Command Line Tools (`clang`, `codesign`); a stable code-signing identity is
+  recommended (a self-signed certificate is enough).
 - macOS for the background service, window handling and tab links. The gateway
   itself is plain Node and should run on Linux and Windows too, but that is not
   tested yet.
@@ -239,7 +246,14 @@ the gateway created). Change the location or the retention with `filesDir` and
   Playwright has set it up, opens tabs in the background, and keeps the window
   out of sight.
 - Claude Code sends each tool call's tool-use id; the gateway looks it up in
-  the chat's transcripts to tell subagents apart.
+  the chat's transcripts to tell subagents apart. Which transcripts is read
+  from the desktop app's chat file on each lookup (a new chat connects before
+  the app has assigned its CLI session id, and a chat can continue under a new
+  one).
+- With the gated browser (macOS), a small library loaded into the browser's
+  main process refuses every request to put the app on screen (activate,
+  unhide, ordering a window in) unless the gateway opened the gate for a user
+  request or the app is already in front.
 - A small companion extension, loaded over CDP, manages the tab groups,
   duplicates tabs for forked chats, mutes tabs and keeps the status page in
   front of the window while it is out of sight.
@@ -329,12 +343,17 @@ config <profile>                 print the MCP client entry
 link-handler install [--force]   (macOS) tab links and window activation
 finicky-config [browser]         print a Finicky config for tab links
 identity                         headersHelper output
+gated-browser build [--source <app>] [--sign <identity>] [--keychain <file>] [--profile <name>]...
+                                 (macOS) build the gated copy of Google Chrome
+gated-browser update             rebuild after Chrome updated, move profiles, prune
 ```
 
 Data lives in `~/.agentic-playwright-mcp` (override with
 `AGENTIC_PLAYWRIGHT_HOME`): `profiles.json`, and per profile the browser data,
 `gateway.log` and `sessions.json` (which chat owns which tab, so a restarted
-gateway can hand the tabs back).
+gateway can hand the tabs back), plus `show-gate` and `show-gate.log` for a
+gated browser; gated copies live in `browsers/<version>/` with
+`browsers/gated-browser.json`.
 
 Playwright MCP's own options come from a Playwright MCP config file (the
 profile's `config`, or `--config`) and from `PLAYWRIGHT_MCP_*` variables, as
