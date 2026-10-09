@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { activatePid, frontmostPid } from './macos.js';
 import type { Profile } from './profiles.js';
+import { gateEnv } from './gatedbrowser.js';
 
 export function cdpEndpoint(profile: Profile) {
   return `http://127.0.0.1:${profile.cdpPort}`;
@@ -35,6 +36,9 @@ export function browserArgs(profile: Profile) {
     // Nobody sees permission prompts in a hidden window: refuse instead of
     // prompting, and let agents decide (see permissions.ts).
     '--deny-permission-prompts',
+    // Tests with a freshly signed browser: keep it away from the user's
+    // keychain, which would ask on screen for access to "Chrome Safe Storage".
+    ...(process.env.AGENTIC_MOCK_KEYCHAIN ? ['--use-mock-keychain'] : []),
     // No window at startup: the gateway creates the first one already
     // minimized and unfocused (see Gateway._setUpHomeTab).
     ...(profile.headless ? ['--headless=new'] : ['--no-startup-window']),
@@ -72,12 +76,16 @@ export async function startBrowser(profile: Profile) {
   setDownloadFallback(profile);
   const args = browserArgs(profile);
   const appBundle = macAppBundle(profile.executablePath);
+  // A gated copy gets its show gate (see gatedbrowser.ts); `open` passes the
+  // environment only with --env.
+  const env = gateEnv(profile.name, profile.executablePath);
   const frontmost = appBundle && !profile.headless ? frontmostPid() : undefined;
   if (appBundle && !profile.headless) {
     // `open -g -n`: a separate instance, not activated by Launch Services.
-    spawn('open', ['-g', '-n', '-a', appBundle, '--args', ...args], { stdio: 'ignore', detached: true }).unref();
+    const envArgs = Object.entries(env ?? {}).flatMap(([key, value]) => ['--env', `${key}=${value}`]);
+    spawn('open', ['-g', '-n', '-a', appBundle, ...envArgs, '--args', ...args], { stdio: 'ignore', detached: true }).unref();
   } else {
-    spawn(profile.executablePath, args, { stdio: 'ignore', detached: true }).unref();
+    spawn(profile.executablePath, args, { stdio: 'ignore', detached: true, env: { ...process.env, ...env } }).unref();
   }
   for (let i = 0; i < 100; i++) {
     if (await isBrowserUp(profile)) {

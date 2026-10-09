@@ -43,6 +43,12 @@ Read README.md first for what the project does. This file is about changing it.
 - `src/permissions.ts`, `src/passkeys.ts`, `src/popups.ts` — page scripts
   (through the bridge in browser.ts) and the notes agents get.
 - `src/identity.ts` — `headersHelper` output (who is connecting).
+- `src/gatedbrowser.ts`, `native/show-gate/show_gate.m` — the gated browser
+  (macOS): a re-signed copy of Google Chrome whose main process loads the show
+  gate through `DYLD_INSERT_LIBRARIES` (launcher.ts). The gate refuses every
+  AppKit call that would put the app on screen (activate, unhide, ordering a
+  window in, deminiaturize) unless the gate file holds a future deadline
+  (`SharedBrowser.focusTab` writes it) or the user made the app active.
 - `src/titles.ts` — current chat titles and forks (Claude desktop chat
   files); CLI `/rename` titles come from `subagents.ts`.
 - `src/launcher.ts`, `supervisor.ts`, `service.ts`, `profiles.ts`,
@@ -93,7 +99,10 @@ Read README.md first for what the project does. This file is about changing it.
   app, and a hidden app's window cannot be un-minimized (unhide first).
 - Never let agent work steal focus: the proxy creates every tab in the
   background and answers Page.bringToFront / Target.activateTarget itself.
-  Only explicit user requests (`focusTab`) may raise the window.
+  Only explicit user requests (`focusTab`) may raise the window. What a page
+  does by itself (window.open, popups, forms, rel=opener links) is stopped by
+  the show gate inside a gated browser, not by intercepting each way in from
+  page scripts; the focus guard is only the fallback for stock Chrome.
 - While out of sight, the status page is the front tab of its window: Chrome
   does not draw the front tab of a minimized window, so an agent's tab there
   never answers screenshots. This is a state to hold, not a moment to act
@@ -225,6 +234,7 @@ every command the proxy refuses)
 and a throwaway headless profile with the other scripts in `test/` (see
 test/README.md). Anything that opens windows or moves focus needs
 a headed profile, and on someone's machine, their go-ahead first:
-`node test/headed.mjs` covers the fork copies, passkeys, and the front tab
+`node test/show-gate.mjs` (and `--ungated`, which must fail) covers the show
+gate; `node test/headed.mjs` covers the fork copies, passkeys, and the front tab
 around a minimized window and tab links that way. Run
 `node test/screenshot-diagnostics.mjs` for screenshot request/response logging.

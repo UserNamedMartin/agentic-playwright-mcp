@@ -277,8 +277,20 @@ the gateway created). Change the location or the retention with `filesDir` and
   `profiles/<name>/browser-downloads`, never to your Downloads folder.
 - `playwright-core` is pinned to an exact version because the gateway relies on
   internal parts of it; startup fails loudly if they change.
-- A page's own `window.open()` (typically a sign-in popup) can still show the
-  browser for about a second before the gateway hides it again.
+- With stock Google Chrome, a page's own `window.open()`, a popup window, a
+  form with `target=_blank` or a link with `rel=opener` can still show the
+  browser for about a second before the gateway hides it again. The gated
+  browser (macOS) closes this for good: `gated-browser build --sign <identity>
+  --profile <name>` builds a copy of Google Chrome whose main process refuses
+  to come on screen unless the gateway asked for it (a tab link,
+  `browser_show_tab`) or you brought it forward yourself (Dock, Cmd-Tab).
+  Same browser, same profile and logins; the copy is re-signed with your
+  identity (signing it ad hoc works, but the keychain then asks again after
+  every rebuild), keeps Google's signature on everything nested, does not
+  update itself (rebuild after Chrome updates), and lacks Apple-provisioned
+  features tied to Google's team (iCloud Keychain passkeys, Widevine may stop).
+  The first launch of a new build waits about 30 s for the system's malware
+  scan, and asks once for access to "Chrome Safe Storage" (Always Allow).
 - Closing the browser window (red button) closes every agent's tabs in it; the
   gateway puts a new hidden window back. Use the yellow button or Cmd+H instead.
 - The browser's icon stays in the Dock while it runs (it is a normal Chrome).

@@ -9,6 +9,7 @@ import { addProfile, getProfile, loadProfiles, removeProfile, updateProfile } fr
 import { runProfile } from './supervisor.js';
 import { finickyConfig, installUrlHandler, openLink } from './urlhandler.js';
 import { validateBadge } from './docktile.js';
+import { buildGatedBrowser } from './gatedbrowser.js';
 import { installService, isServiceInstalled, startService, stopService, uninstallService } from './service.js';
 
 const usage = `agentic-playwright-mcp — many agents, one real browser, one tab group each.
@@ -38,6 +39,9 @@ Running:
   open <profile>               show the browser window
   login <profile>              open the browser without remote control to sign in to sites
                                that refuse automated browsers; quit it to resume the gateway
+  gated-browser build [--source <Chrome.app>] [--sign <identity>] [--keychain <file>] [--profile <name>]...
+                               macOS: build a copy of Google Chrome that pages cannot bring on
+                               screen (see README); --profile switches those profiles to it
 
 Client setup:
   config <profile>             print the MCP server entry for your client config
@@ -66,6 +70,10 @@ async function main() {
       'force': { type: 'boolean' },
       'badge': { type: 'string' },
       'badge-color': { type: 'string' },
+      'source': { type: 'string' },
+      'sign': { type: 'string' },
+      'keychain': { type: 'string' },
+      'profile': { type: 'string', multiple: true },
       'help': { type: 'boolean', short: 'h' },
     },
   });
@@ -204,6 +212,20 @@ async function main() {
     }
     case 'open-link': {
       await openLink(requireArg(sub, 'url'));
+      return;
+    }
+    case 'gated-browser': {
+      if (sub !== 'build')
+        break;
+      const built = buildGatedBrowser({
+        source: values.source, identity: values.sign, keychain: values.keychain, log: line => console.log(line),
+      });
+      for (const name of values.profile ?? []) {
+        updateProfile(getProfile(name).name, { executablePath: built.executable });
+        console.log(`Profile "${name}" now runs ${built.app}. Restart it to apply (service install ${name}).`);
+      }
+      if (!values.sign)
+        console.log('Signed ad hoc: the keychain will ask again after every rebuild. Use --sign with a stable identity.');
       return;
     }
     case 'identity': {

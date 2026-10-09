@@ -9,6 +9,7 @@
 //   passkey requests), talking back through one raw binding;
 // - browser-level work: background tabs, window state, activation, focus
 //   guard, permissions, the Dock icon, the companion extension.
+import fs from 'node:fs';
 import { CdpConnection, type CdpMessage } from './cdp.js';
 import { activatePid, frontmostPid, hidePid, isHiddenPid, mainScreen, unhidePid } from './macos.js';
 
@@ -101,6 +102,10 @@ export class SharedBrowser {
   private _pid: number | undefined;
   private _headless: boolean | undefined;
   private _userFocusAt = 0;
+  // A gated browser's show gate (see gatedbrowser.ts and native/show-gate):
+  // the browser may show itself only while the deadline written here lies
+  // ahead. Undefined for any other browser.
+  showGatePath: string | undefined;
   private _otherFrontmost: number | undefined;
   private _homeTargetId: string | undefined;
   private _lastHidden = false;
@@ -481,6 +486,7 @@ export class SharedBrowser {
   // applet (see macos.ts).
   async focusTab(targetId: string) {
     this._userFocusAt = Date.now();
+    this._openShowGate();
     console.error(`focus: showing tab ${targetId.slice(0, 8)} (front was pid ${frontmostPid()})`);
     await this._events.onUserFocus(targetId);
     // A hidden app's window cannot be un-minimized, so unhide first.
@@ -495,6 +501,19 @@ export class SharedBrowser {
       await this.cdp.send('Page.bringToFront', {}, session).catch(() => {});
     await this.activateApp();
     setTimeout(() => console.error(`focus: front is now pid ${frontmostPid()} (browser ${this._pid})`), 500).unref();
+  }
+
+  // Lets a gated browser show itself for the next few seconds: long enough for
+  // the unhide, un-minimize and activation below (the applet's activation can
+  // take a second). Once the app is active the gate lets it be anyway.
+  private _openShowGate() {
+    if (!this.showGatePath)
+      return;
+    try {
+      fs.writeFileSync(this.showGatePath, String(Date.now() + 8000));
+    } catch (e) {
+      console.error(`show gate: cannot open ${this.showGatePath}: ${(e as Error).message}`);
+    }
   }
 
   // Whether a tab link or browser_show_tab just chose the tab to show.

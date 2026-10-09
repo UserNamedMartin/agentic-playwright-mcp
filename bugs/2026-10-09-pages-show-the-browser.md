@@ -1,5 +1,5 @@
 ---
-status: open
+status: fixed
 area: front
 found: 2026-10-08
 filed: 2026-10-09
@@ -69,3 +69,17 @@ hidden and never become frontmost, and `focusTab` must still show the window.
 ## Workaround
 None that agents can rely on. Avoid page buttons that open documents in a new tab (fetch the
 document's URL instead).
+
+## Fix
+The gated browser (`src/gatedbrowser.ts`, `native/show-gate/show_gate.m`): a copy of Google Chrome,
+re-signed (top level only; nested code keeps Google's signature) so its main process may take
+`DYLD_INSERT_LIBRARIES`; the launcher loads the show gate into it. The gate swizzles the AppKit
+methods that put the app on screen, on `NSApplication`, `NSWindow`, `NSRunningApplication` and every
+subclass that overrides them (also in images loaded later), and lets them through only while the
+gate file holds a future deadline (`SharedBrowser.focusTab` writes one) or the app is already active.
+Chrome's main executable has no room for another load command, hence the environment variable.
+
+Test: `test/show-gate.mjs` (headed): window.open blob and popup, form `target=_blank`, `rel=opener`
+link, `window.focus()` — 0 samples on screen, no focus-guard line, 9 calls blocked, `browser_show_tab`
+still shows the window. `--ungated` on stock Chrome fails: popup, form and opener link each put it on
+screen and the focus guard hid it three times.

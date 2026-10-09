@@ -67,6 +67,9 @@ export type GatewayOptions = {
   stateFile?: string;
   // A Playwright MCP config file (JSON), for the options upstream reads there.
   configFile?: string;
+  // The show gate file of a gated browser (see gatedbrowser.ts): focusTab
+  // opens it before showing the window.
+  showGate?: string;
 };
 
 type Transport = { transport: StreamableHTTPServerTransport; sessionKey: string };
@@ -258,6 +261,7 @@ export class Gateway implements SessionHost, ProxyHost {
       onUserFocus: targetId => this._onUserFocus(targetId),
       onVisibilityChanged: visible => {
         void this.groups?.setMuted(!visible).catch(e => console.error(`sound: ${(e as Error).message}`));
+    shared.showGatePath = this.options.showGate;
         this._onFrontVisibility(visible);
       },
     }, [popupInterceptScript, permissionScript, passkeyScript], connecting => this._attaching = connecting);

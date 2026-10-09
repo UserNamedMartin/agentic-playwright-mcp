@@ -7,6 +7,7 @@ import path from 'node:path';
 import { Gateway } from './gateway.js';
 import { cdpEndpoint, closeBrowser, downloadFallbackDir, startBrowser } from './launcher.js';
 import { homeDir, profileBadge, type Profile } from './profiles.js';
+import { gateEnv } from './gatedbrowser.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -35,6 +36,7 @@ export async function runProfile(profile: Profile, options: Options) {
       executablePath: profile.executablePath,
       dockIconCache: path.join(homeDir, 'profiles', profile.name, 'dock-icon-base.png'),
       stateFile: path.join(homeDir, 'profiles', profile.name, 'sessions.json'),
+      showGate: gateEnv(profile.name, profile.executablePath)?.AGENTIC_SHOW_GATE,
     });
     // Only a gateway that started counts: one that failed (a stalled browser
     // connection) is stopped, so the next check starts a fresh one instead of
