@@ -1,19 +1,22 @@
 // Runs a profile's browser and gateway only while one of its client apps is
 // running: starts them when a matching process appears, stops them a while
 // after the last one is gone. Without activateWith rules they just run.
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import path from 'node:path';
 import { Gateway } from './gateway.js';
 import { cdpEndpoint, closeBrowser, downloadFallbackDir, startBrowser } from './launcher.js';
-import { homeDir, profileBadge, type Profile } from './profiles.js';
+import { getProfile, homeDir, profileBadge, type Profile } from './profiles.js';
 import { gateEnv } from './gatedbrowser.js';
 
 const execFileAsync = promisify(execFile);
 
 type Options = { caps?: string[]; config?: string; keepTabsOnExit?: boolean };
 
-export async function runProfile(profile: Profile, options: Options) {
+export async function runProfile(initial: Profile, options: Options) {
+  // Read again at every start: a gated browser update moves the profile to a
+  // new copy (see gatedbrowser.ts).
+  let profile = initial;
   let gateway: Gateway | undefined;
   let busy = false;
   let lastSeen = 0;
@@ -21,6 +24,7 @@ export async function runProfile(profile: Profile, options: Options) {
   const graceMs = profile.stopAfterMs ?? 2 * 60 * 1000;
 
   const start = async () => {
+    profile = getProfile(initial.name);
     await startBrowser(profile);
     const starting = new Gateway({
       profile: profile.name,
@@ -64,6 +68,26 @@ export async function runProfile(profile: Profile, options: Options) {
   // tabs back.
   process.on('SIGINT', () => void stop('SIGINT').finally(() => process.exit(0)));
   process.on('SIGTERM', () => void stop('SIGTERM', { keepBrowser: true }).finally(() => process.exit(0)));
+
+  // A gated browser is rebuilt after Chrome updates, in a child process (the
+  // build blocks for a minute; this process serves every agent). The profile
+  // switches to the new copy at its next browser start.
+  const updateGatedBrowser = () => {
+    if (!gateEnv(profile.name, getProfile(initial.name).executablePath))
+      return;
+    const child = spawn(process.execPath, [process.argv[1], 'gated-browser', 'update'], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let output = '';
+    child.stdout.on('data', d => output += d);
+    child.stderr.on('data', d => output += d);
+    child.on('exit', code => {
+      const lines = output.trim().split('\n').filter(Boolean);
+      if (code || lines.length > 1)
+        for (const line of lines)
+          console.error(`[${profile.name}] gated browser: ${line}`);
+    });
+  };
+  updateGatedBrowser();
+  setInterval(updateGatedBrowser, 60 * 60_000).unref();
 
   if (!rules.length) {
     await start();

@@ -286,8 +286,11 @@ the gateway created). Change the location or the retention with `filesDir` and
   `browser_show_tab`) or you brought it forward yourself (Dock, Cmd-Tab).
   Same browser, same profile and logins; the copy is re-signed with your
   identity (signing it ad hoc works, but the keychain then asks again after
-  every rebuild), keeps Google's signature on everything nested, does not
-  update itself (rebuild after Chrome updates), and lacks Apple-provisioned
+  every rebuild) and keeps Google's signature on everything nested. It does not
+  update itself; the profile services check hourly (`gated-browser update`):
+  after Google Chrome updated, they build a copy of the new version in its own
+  folder, move the profiles to it (each browser switches at its next start)
+  and delete copies nothing runs from any more. It lacks Apple-provisioned
   features tied to Google's team (iCloud Keychain passkeys, Widevine may stop).
   The first launch of a new build waits about 30 s for the system's malware
   scan, and asks once for access to "Chrome Safe Storage" (Always Allow).

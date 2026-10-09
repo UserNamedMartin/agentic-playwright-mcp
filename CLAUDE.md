@@ -235,6 +235,6 @@ and a throwaway headless profile with the other scripts in `test/` (see
 test/README.md). Anything that opens windows or moves focus needs
 a headed profile, and on someone's machine, their go-ahead first:
 `node test/show-gate.mjs` (and `--ungated`, which must fail) covers the show
-gate; `node test/headed.mjs` covers the fork copies, passkeys, and the front tab
+gate and `node test/gated-update.mjs` its updates; `node test/headed.mjs` covers the fork copies, passkeys, and the front tab
 around a minimized window and tab links that way. Run
 `node test/screenshot-diagnostics.mjs` for screenshot request/response logging.

@@ -9,7 +9,7 @@ import { addProfile, getProfile, loadProfiles, removeProfile, updateProfile } fr
 import { runProfile } from './supervisor.js';
 import { finickyConfig, installUrlHandler, openLink } from './urlhandler.js';
 import { validateBadge } from './docktile.js';
-import { buildGatedBrowser } from './gatedbrowser.js';
+import { buildGatedBrowser, updateGatedBrowser } from './gatedbrowser.js';
 import { installService, isServiceInstalled, startService, stopService, uninstallService } from './service.js';
 
 const usage = `agentic-playwright-mcp — many agents, one real browser, one tab group each.
@@ -42,6 +42,8 @@ Running:
   gated-browser build [--source <Chrome.app>] [--sign <identity>] [--keychain <file>] [--profile <name>]...
                                macOS: build a copy of Google Chrome that pages cannot bring on
                                screen (see README); --profile switches those profiles to it
+  gated-browser update         rebuild it if the source browser updated, move profiles to the
+                               newest copy, delete unused copies (services run this hourly)
 
 Client setup:
   config <profile>             print the MCP server entry for your client config
@@ -215,6 +217,21 @@ async function main() {
       return;
     }
     case 'gated-browser': {
+      if (sub === 'update') {
+        let result;
+        try {
+          result = updateGatedBrowser({ log: line => console.log(line) });
+        } catch (e) {
+          // Every profile's service checks; one of them doing it is enough.
+          if (/another update/.test((e as Error).message)) {
+            console.log('skipped: another update is running');
+            return;
+          }
+          throw e;
+        }
+        console.log(result ? `gated browser ${result.version}${result.built ? ' (built now)' : ''}` : 'no gated browser built yet');
+        return;
+      }
       if (sub !== 'build')
         break;
       const built = buildGatedBrowser({

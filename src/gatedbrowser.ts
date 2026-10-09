@@ -16,7 +16,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { homeDir } from './profiles.js';
+import { homeDir, loadProfiles, updateProfile } from './profiles.js';
 
 export const gateLibraryName = 'AgenticShowGate.dylib';
 const sourceFile = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..', 'native', 'show-gate', 'show_gate.m');
@@ -65,6 +65,11 @@ export function gateLibraryFor(executablePath: string) {
   return lib && fs.existsSync(lib) ? lib : undefined;
 }
 
+// Builds a gated copy of the source browser into <destDir>/<version>/ and
+// remembers how (gated-browser.json), so updateGatedBrowser can rebuild it
+// after the source updates. Each build gets its own folder: a running browser
+// keeps launching helpers from its own version's folder, so a build never
+// replaces a copy that may be in use.
 export function buildGatedBrowser(options: GatedBuildOptions = {}): { app: string; executable: string; version: string } {
   if (process.platform !== 'darwin')
     throw new Error('The gated browser is macOS only.');
@@ -76,10 +81,14 @@ export function buildGatedBrowser(options: GatedBuildOptions = {}): { app: strin
   const version = plistValue(info, 'CFBundleShortVersionString');
   const executableName = plistValue(info, 'CFBundleExecutable');
   const appName = path.basename(source);
-  const finalApp = path.join(destDir, appName);
-  const tmpApp = path.join(destDir, `.building-${appName}`);
   fs.mkdirSync(destDir, { recursive: true });
-  fs.rmSync(tmpApp, { recursive: true, force: true });
+  let versionDir = path.join(destDir, version);
+  if (fs.existsSync(versionDir) && copyInUse(versionDir))
+    versionDir = path.join(destDir, `${version}-${Date.now()}`);
+  const building = path.join(destDir, `.building-${path.basename(versionDir)}`);
+  const tmpApp = path.join(building, appName);
+  fs.rmSync(building, { recursive: true, force: true });
+  fs.mkdirSync(building, { recursive: true });
 
   log(`copying ${source} (${version})`);
   // APFS clone: instant, no extra space until files diverge.
@@ -113,19 +122,118 @@ export function buildGatedBrowser(options: GatedBuildOptions = {}): { app: strin
     // Top level only: nested frameworks and helpers keep Google's signatures.
     sign(tmpApp, ['--options', 'runtime', '--entitlements', entitlements, '--timestamp=none']);
     run('codesign', ['--verify', '--deep', '--strict', tmpApp]);
+
+    // The first run of a newly signed app waits for the system's malware scan
+    // (about 30 s), longer than the launcher waits for the browser: do it now.
+    log('first run (system malware scan, about 30 s)');
+    execFileSync(path.join(tmpApp, 'Contents', 'MacOS', executableName), ['--version'], { stdio: 'ignore', timeout: 300_000 });
+  } catch (e) {
+    fs.rmSync(building, { recursive: true, force: true });
+    throw e;
   } finally {
     fs.rmSync(work, { recursive: true, force: true });
   }
 
-  // Swap in the new copy; a running browser keeps the files it has open.
-  const old = path.join(destDir, `.old-${appName}`);
-  fs.rmSync(old, { recursive: true, force: true });
-  if (fs.existsSync(finalApp))
-    fs.renameSync(finalApp, old);
-  fs.renameSync(tmpApp, finalApp);
-  fs.rmSync(old, { recursive: true, force: true });
-  log(`ready: ${finalApp}`);
-  return { app: finalApp, executable: path.join(finalApp, 'Contents', 'MacOS', executableName), version };
+  fs.rmSync(versionDir, { recursive: true, force: true });
+  fs.renameSync(building, versionDir);
+  const config: GatedConfig = { source, identity, ...(options.keychain ? { keychain: options.keychain } : {}) };
+  fs.writeFileSync(path.join(destDir, configName), JSON.stringify(config, null, 2) + '\n');
+  const app = path.join(versionDir, appName);
+  log(`ready: ${app}`);
+  return { app, executable: path.join(app, 'Contents', 'MacOS', executableName), version };
+}
+
+const configName = 'gated-browser.json';
+type GatedConfig = { source: string; identity: string; keychain?: string };
+
+// Brings the gated copies up to date with their source browser: builds a new
+// copy after the source updated, points every profile that runs a gated copy
+// at the newest one (they switch at their next browser start), and deletes
+// copies no profile points at and no process runs. Returns what it did, or
+// undefined when no gated copy was ever built here.
+export function updateGatedBrowser(options: { destDir?: string; log?: (line: string) => void } = {}) {
+  const destDir = options.destDir ?? defaultGatedBrowserDir;
+  const log = options.log ?? (() => {});
+  const configFile = path.join(destDir, configName);
+  if (!fs.existsSync(configFile))
+    return undefined;
+  const config: GatedConfig = JSON.parse(fs.readFileSync(configFile, 'utf8'));
+  return withLock(path.join(destDir, '.update-lock'), () => {
+    const sourceVersion = plistValue(path.join(config.source, 'Contents', 'Info.plist'), 'CFBundleShortVersionString');
+    const appName = path.basename(config.source);
+    let latest = builtCopies(destDir, appName).find(c => c.version === sourceVersion);
+    let built = false;
+    if (!latest) {
+      log(`source is ${sourceVersion}, no copy of it yet: building`);
+      const result = buildGatedBrowser({ ...config, destDir, log });
+      latest = { dir: path.dirname(result.app), app: result.app, version: result.version, executable: result.executable };
+      built = true;
+    }
+    const switched: string[] = [];
+    for (const profile of loadProfiles()) {
+      if (profile.executablePath.startsWith(destDir + path.sep) && profile.executablePath !== latest.executable) {
+        updateProfile(profile.name, { executablePath: latest.executable });
+        switched.push(profile.name);
+      }
+    }
+    if (switched.length)
+      log(`profiles now on ${latest.version} (from their next browser start): ${switched.join(', ')}`);
+    const wanted = new Set(loadProfiles().map(p => p.executablePath));
+    const removed: string[] = [];
+    for (const entry of fs.readdirSync(destDir)) {
+      const dir = path.join(destDir, entry);
+      if (entry.startsWith('.') || entry === configName || dir === latest.dir || !fs.statSync(dir).isDirectory())
+        continue;
+      // A copy at the top level (the first layout) is its own folder.
+      const app = entry.endsWith('.app') ? dir : path.join(dir, appName);
+      if ([...wanted].some(e => e.startsWith(app + path.sep)) || copyInUse(dir))
+        continue;
+      fs.rmSync(dir, { recursive: true, force: true });
+      removed.push(entry);
+    }
+    if (removed.length)
+      log(`removed unused copies: ${removed.join(', ')}`);
+    return { version: latest.version, executable: latest.executable, built, switched, removed };
+  });
+}
+
+function builtCopies(destDir: string, appName: string) {
+  const copies: { dir: string; app: string; version: string; executable: string }[] = [];
+  for (const entry of fs.existsSync(destDir) ? fs.readdirSync(destDir) : []) {
+    const dir = path.join(destDir, entry);
+    const app = path.join(dir, appName);
+    const info = path.join(app, 'Contents', 'Info.plist');
+    if (entry.startsWith('.') || !fs.existsSync(info) || !fs.existsSync(path.join(app, 'Contents', 'Frameworks', gateLibraryName)))
+      continue;
+    const version = plistValue(info, 'CFBundleShortVersionString');
+    copies.push({ dir, app, version, executable: path.join(app, 'Contents', 'MacOS', plistValue(info, 'CFBundleExecutable')) });
+  }
+  // Newest build first (a same-version rebuild gets a timestamped folder).
+  return copies.sort((a, b) => fs.statSync(b.dir).mtimeMs - fs.statSync(a.dir).mtimeMs);
+}
+
+// Whether any process runs from inside this folder (a browser or its helpers).
+function copyInUse(dir: string) {
+  const commands = execFileSync('ps', ['-axo', 'command='], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
+  return commands.split('\n').some(c => c.startsWith(dir + path.sep));
+}
+
+// One update at a time across processes (every profile's service runs one).
+function withLock<T>(lockDir: string, fn: () => T): T {
+  try {
+    fs.mkdirSync(lockDir);
+  } catch {
+    // A lock older than 15 minutes is from a process that died mid-update.
+    if (Date.now() - fs.statSync(lockDir).mtimeMs < 15 * 60_000)
+      throw new Error('another update of the gated browser is running');
+    fs.rmSync(lockDir, { recursive: true, force: true });
+    fs.mkdirSync(lockDir);
+  }
+  try {
+    return fn();
+  } finally {
+    fs.rmSync(lockDir, { recursive: true, force: true });
+  }
 }
 
 function run(command: string, args: string[]) {
