@@ -4,7 +4,7 @@ area: front
 found: 2026-10-08
 filed: 2026-10-09
 reproducible: yes (any page that calls window.open from its own script while the browser is out of sight)
-fixed-in:
+fixed-in: 5fb6b99 (test/show-gate.mjs)
 ---
 
 # A page can show the hidden browser; the focus guard only hides it again afterwards
