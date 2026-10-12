@@ -50,7 +50,9 @@ Read README.md first for what the project does. This file is about changing it.
   gate through `DYLD_INSERT_LIBRARIES` (launcher.ts). The gate refuses every
   AppKit call that would put the app on screen (activate, unhide, ordering a
   window in, deminiaturize) unless the gate file holds a future deadline
-  (`SharedBrowser.focusTab` writes it) or the user made the app active.
+  (`SharedBrowser.focusTab` writes it, and `createTarget({ newWindow })` for
+  the gateway's own home window, which must be ordered in once or it can never
+  be un-minimized) or the user made the app active.
   Copies are versioned (`<home>/browsers/<version>/`, never replaced while a
   browser may run from them); `updateGatedBrowser` rebuilds after the source
   updates, and each profile's supervisor runs it hourly in a child process.

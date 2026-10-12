@@ -261,10 +261,11 @@ export class Gateway implements SessionHost, ProxyHost {
       onUserFocus: targetId => this._onUserFocus(targetId),
       onVisibilityChanged: visible => {
         void this.groups?.setMuted(!visible).catch(e => console.error(`sound: ${(e as Error).message}`));
-    shared.showGatePath = this.options.showGate;
         this._onFrontVisibility(visible);
       },
     }, [popupInterceptScript, permissionScript, passkeyScript], connecting => this._attaching = connecting);
+    // Before anything that may order a window in (the home window in _setUpTabs).
+    shared.showGatePath = this.options.showGate;
     this.shared = shared;
     await shared.setDownloadBehavior(this.proxy.downloadsDir);
     const groups = new TabGroups(shared);

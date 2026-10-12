@@ -252,8 +252,8 @@ the gateway created). Change the location or the retention with `filesDir` and
   one).
 - With the gated browser (macOS), a small library loaded into the browser's
   main process refuses every request to put the app on screen (activate,
-  unhide, ordering a window in) unless the gateway opened the gate for a user
-  request or the app is already in front.
+  unhide, ordering a window in) unless the gateway opened the gate (a user
+  request, or creating its own window) or the app is already in front.
 - A small companion extension, loaded over CDP, manages the tab groups,
   duplicates tabs for forked chats, mutes tabs and keeps the status page in
   front of the window while it is out of sight.

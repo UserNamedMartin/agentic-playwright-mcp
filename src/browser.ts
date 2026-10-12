@@ -359,6 +359,13 @@ export class SharedBrowser {
   // offline mode, so `navigateTo` opens it blank and goes there once it runs.
   async createTarget({ url = 'about:blank', owner, opener, navigateTo, newWindow = false }:
     { url?: string; owner?: string; opener?: string; navigateTo?: string; newWindow?: boolean } = {}): Promise<string> {
+    // The gateway's own window (the home window) is created minimized while
+    // the browser is out of sight. A gated browser must be let through to
+    // order it in once: a window the gate kept from ever being ordered in is
+    // reported minimized but cannot be deminiaturized, so no tab link could
+    // show it later.
+    if (newWindow)
+      this._openShowGate(3000);
     const creation = this.cdp.send<{ targetId: string }>('Target.createTarget', {
       url, background: true, focus: false, ...(newWindow ? { newWindow: true, windowState: 'minimized' } : {}),
     }).then(r => {
@@ -503,14 +510,19 @@ export class SharedBrowser {
     setTimeout(() => console.error(`focus: front is now pid ${frontmostPid()} (browser ${this._pid})`), 500).unref();
   }
 
-  // Lets a gated browser show itself for the next few seconds: long enough for
-  // the unhide, un-minimize and activation below (the applet's activation can
-  // take a second). Once the app is active the gate lets it be anyway.
-  private _openShowGate() {
+  // Lets a gated browser show itself for the next few seconds: for focusTab,
+  // long enough for the unhide, un-minimize and activation (the applet's
+  // activation can take a second). Once the app is active the gate lets it be
+  // anyway. Never shortens a deadline already set.
+  private _openShowGate(ms = 8000) {
     if (!this.showGatePath)
       return;
     try {
-      fs.writeFileSync(this.showGatePath, String(Date.now() + 8000));
+      let current = 0;
+      try {
+        current = Number(fs.readFileSync(this.showGatePath, 'utf8')) || 0;
+      } catch {}
+      fs.writeFileSync(this.showGatePath, String(Math.max(current, Date.now() + ms)));
     } catch (e) {
       console.error(`show gate: cannot open ${this.showGatePath}: ${(e as Error).message}`);
     }
