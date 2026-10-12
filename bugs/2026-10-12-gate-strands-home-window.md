@@ -1,10 +1,10 @@
 ---
-status: open
+status: fixed
 area: front
 found: 2026-10-12
 filed: 2026-10-12
 reproducible: yes (every tab link and browser_show_tab in a gated browser)
-fixed-in:
+fixed-in: f777aa7 (test/show-gate.mjs)
 ---
 
 # The show gate keeps the home window from ever being ordered in, so no tab link can show it
@@ -81,3 +81,13 @@ that hid it again.
 ## Workaround
 None from the agent side. A browser that started on a gated copy keeps its stranded home
 window until the browser restarts with the fix.
+
+## Fix
+`f777aa7`: `showGatePath` is set right after connecting, and `createTarget({ newWindow })` opens
+the gate for 3 s so Chrome can order the gateway's own window in (without shortening a deadline
+focusTab set). Pages are still refused.
+
+Test: `test/show-gate.mjs` (headed) checks that after `browser_show_tab` and after a Dock click
+(`open -a`) the window with the tabs is `normal`, the app is still in view 4.5 s later and nothing
+hid it again, with no new empty window: 6 checks fail without the fix, all pass with it.
+A browser that started before the fix keeps its stranded window: restart the browser once.
