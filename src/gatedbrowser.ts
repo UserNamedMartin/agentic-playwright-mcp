@@ -263,16 +263,25 @@ function copyInUse(dir: string) {
 }
 
 // One update at a time across processes (every profile's service runs one).
+// The lock holds its owner's pid: it is stale only once that process is gone,
+// however long the update takes (taking over a live one would rebuild in the
+// same folder under it).
 function withLock<T>(lockDir: string, fn: () => T): T {
+  const pidFile = path.join(lockDir, 'pid');
   try {
     fs.mkdirSync(lockDir);
   } catch {
-    // A lock older than 15 minutes is from a process that died mid-update.
-    if (Date.now() - fs.statSync(lockDir).mtimeMs < 15 * 60_000)
+    let pid = 0;
+    try {
+      pid = Number(fs.readFileSync(pidFile, 'utf8'));
+    } catch {}
+    // No pid yet: just created by an update that is about to write it.
+    if (pid ? processAlive(pid) : Date.now() - fs.statSync(lockDir).mtimeMs < 60_000)
       throw new Error('another update of the gated browser is running');
     fs.rmSync(lockDir, { recursive: true, force: true });
     fs.mkdirSync(lockDir);
   }
+  fs.writeFileSync(pidFile, String(process.pid));
   try {
     return fn();
   } finally {
@@ -280,9 +289,20 @@ function withLock<T>(lockDir: string, fn: () => T): T {
   }
 }
 
+function processAlive(pid: number) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e: any) {
+    return e.code === 'EPERM';
+  }
+}
+
+// A step that hangs (a tool waiting for an answer nobody gives) fails the
+// build instead of holding the update lock forever.
 function run(command: string, args: string[]) {
   try {
-    execFileSync(command, args, { stdio: ['ignore', 'ignore', 'pipe'] });
+    execFileSync(command, args, { stdio: ['ignore', 'ignore', 'pipe'], timeout: 10 * 60_000 });
   } catch (e: any) {
     throw new Error(`${command} failed: ${String(e.stderr ?? e.message).trim()}`);
   }
