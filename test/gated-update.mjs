@@ -61,7 +61,10 @@ try {
   check('copy in use is kept', copies().join() === '1.0.1,1.0.2', copies().join());
   browser.kill('SIGKILL');
   browser = undefined;
-  await sleep(1500);
+  // Its crash handlers outlive a SIGKILL by a few seconds.
+  const running = () => execFileSync('ps', ['-axo', 'command='], { encoding: 'utf8' }).split('\n').some(c => c.startsWith(path.join(destDir, '1.0.1') + path.sep));
+  for (let i = 0; i < 60 && running(); i++)
+    await sleep(500);
   r = updateGatedBrowser({ destDir });
   check('kept copy removed once nothing runs from it', !r.built && copies().join() === '1.0.2', copies().join());
 
