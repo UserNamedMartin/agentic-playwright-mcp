@@ -7,7 +7,7 @@ open ones before they start; an agent that hits a problem while using the browse
 
 | File | Status | Area | Found | Summary |
 |---|---|---|---|---|
-| [2026-10-20-update-asks-keychain-password.md](2026-10-20-update-asks-keychain-password.md) | open | gated-browser | 2026-10-19 | Gated browser updates run codesign against a locked keychain, so the user gets a password dialog every hour after a reboot |
+| [2026-10-20-update-asks-keychain-password.md](2026-10-20-update-asks-keychain-password.md) | fixed | gated-browser | 2026-10-19 | Gated browser updates run codesign against a locked keychain, so the user gets a password dialog every hour after a reboot |
 | [2026-10-12-gate-strands-home-window.md](2026-10-12-gate-strands-home-window.md) | fixed | front | 2026-10-12 | The show gate keeps the home window from ever being ordered in, so tab links show the app for 3 s and the guard hides it again |
 | [2026-10-09-pages-show-the-browser.md](2026-10-09-pages-show-the-browser.md) | fixed | front | 2026-10-08 | A page's own `window.open` shows the hidden browser; the focus guard only hides it afterwards, so every call is a flash |
 | [2026-10-01-subagents-attributed-to-parent.md](2026-10-01-subagents-attributed-to-parent.md) | fixed | subagents | 2026-09-30 | After a chat's Claude Code session id changes mid-chat, every subagent call is attributed to the parent: shared tab group and one call queue |

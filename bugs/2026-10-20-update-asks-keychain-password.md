@@ -1,10 +1,10 @@
 ---
-status: open
+status: fixed
 area: gated-browser
 found: 2026-10-19
 filed: 2026-10-20
 reproducible: yes (any update after a reboot, with the identity in a keychain of its own)
-fixed-in:
+fixed-in: 9a705de, bc5f553 (test/gated-update.mjs)
 ---
 
 # Gated browser updates run codesign against a locked keychain, which asks the user for its password
@@ -55,10 +55,16 @@ Confirmed:
    first still ran, rebuilt into the same `.building-…` folder (codesign: "replacing existing
    signature") and showed another dialog.
 
-## Suggested fix
-Never reach codesign with the keychain locked: unlock it without UI from a saved password, or stop
-with a message. Take the update lock over only when its owner process is gone. Test in
-`test/gated-update.mjs` with a scratch keychain.
+## Fix
+- The keychain password can be given once (`gated-browser build --keychain-password`) and is saved
+  in `gated-browser.json` (mode 0600). Before copying anything, a build with `--keychain` reads
+  the keychain's status through the Security framework with user interaction off, unlocking it
+  with the saved password first; still locked → the build stops with a message, no codesign.
+- The update lock holds its owner's pid and is taken over only once that process is gone.
+- Every build step has a 10-minute timeout.
+- Test: `test/gated-update.mjs` (scratch keychain: locked without password stops before copying,
+  wrong password reported, right password unlocks; lock with a live pid kept, with a dead one
+  taken over).
 
 ## Workaround
 Unlock the keychain by hand (`security unlock-keychain <file>`, with its own password), or press
