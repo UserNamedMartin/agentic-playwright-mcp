@@ -304,7 +304,13 @@ the gateway created). Change the location or the retention with `filesDir` and
   update itself; the profile services check hourly (`gated-browser update`):
   after Google Chrome updated, they build a copy of the new version in its own
   folder, move the profiles to it (each browser switches at its next start)
-  and delete copies nothing runs from any more. It lacks Apple-provisioned
+  and delete copies nothing runs from any more. Keychains lock at every
+  restart, and codesign would then ask for the password in a dialog; give a
+  keychain of its own (holding only the signing identity) with `--keychain`
+  and its password with `--keychain-password`, which is saved in
+  `gated-browser.json` (readable by you only) so updates unlock it. Without
+  the password an update stops while the keychain is locked and says so in
+  `gateway.log`. It lacks Apple-provisioned
   features tied to Google's team (iCloud Keychain passkeys, Widevine may stop).
   The first launch of a new build waits about 30 s for the system's malware
   scan, and asks once for access to "Chrome Safe Storage" (Always Allow).
@@ -343,7 +349,7 @@ config <profile>                 print the MCP client entry
 link-handler install [--force]   (macOS) tab links and window activation
 finicky-config [browser]         print a Finicky config for tab links
 identity                         headersHelper output
-gated-browser build [--source <app>] [--sign <identity>] [--keychain <file>] [--profile <name>]...
+gated-browser build [--source <app>] [--sign <identity>] [--keychain <file>] [--keychain-password <pw>] [--profile <name>]...
                                  (macOS) build the gated copy of Google Chrome
 gated-browser update             rebuild after Chrome updated, move profiles, prune
 ```

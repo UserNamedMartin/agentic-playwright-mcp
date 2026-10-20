@@ -55,6 +55,7 @@ export type GatedBuildOptions = {
   destDir?: string;     // where the copy goes (default <home>/browsers)
   identity?: string;    // codesign identity (name or SHA-1); '-' = ad hoc
   keychain?: string;    // keychain holding the identity
+  keychainPassword?: string; // its password, to unlock it without asking (it locks at every restart)
   log?: (line: string) => void;
 };
 
@@ -81,6 +82,11 @@ export function buildGatedBrowser(options: GatedBuildOptions = {}): { app: strin
   const version = plistValue(info, 'CFBundleShortVersionString');
   const executableName = plistValue(info, 'CFBundleExecutable');
   const appName = path.basename(source);
+  // codesign asks for a locked keychain's password in a dialog, and an update
+  // runs unattended: unlock it first, or stop before anything can ask.
+  if (identity !== '-' && options.keychain && !unlockKeychain(options.keychain, options.keychainPassword))
+    throw new Error(`the signing keychain ${options.keychain} is locked (keychains lock at every restart): `
+      + 'save its password with gated-browser build --keychain-password, or unlock it with security unlock-keychain');
   fs.mkdirSync(destDir, { recursive: true });
   let versionDir = path.join(destDir, version);
   if (fs.existsSync(versionDir) && copyInUse(versionDir))
@@ -136,15 +142,53 @@ export function buildGatedBrowser(options: GatedBuildOptions = {}): { app: strin
 
   fs.rmSync(versionDir, { recursive: true, force: true });
   fs.renameSync(building, versionDir);
-  const config: GatedConfig = { source, identity, ...(options.keychain ? { keychain: options.keychain } : {}) };
-  fs.writeFileSync(path.join(destDir, configName), JSON.stringify(config, null, 2) + '\n');
+  const config: GatedConfig = {
+    source, identity,
+    ...(options.keychain ? { keychain: options.keychain } : {}),
+    ...(options.keychainPassword ? { keychainPassword: options.keychainPassword } : {}),
+  };
+  fs.writeFileSync(path.join(destDir, configName), JSON.stringify(config, null, 2) + '\n', { mode: 0o600 });
+  fs.chmodSync(path.join(destDir, configName), 0o600);
   const app = path.join(versionDir, appName);
   log(`ready: ${app}`);
   return { app, executable: path.join(app, 'Contents', 'MacOS', executableName), version };
 }
 
 const configName = 'gated-browser.json';
-type GatedConfig = { source: string; identity: string; keychain?: string };
+type GatedConfig = { source: string; identity: string; keychain?: string; keychainPassword?: string };
+
+// Whether the keychain is unlocked, after unlocking it with the password when
+// one is given. Never shows UI (user interaction is off for the lookup); the
+// password goes through the environment, not the command line.
+export function unlockKeychain(keychain: string, password?: string): boolean {
+  const script = `ObjC.import('Security');
+function run(argv) {
+  $.SecKeychainSetUserInteractionAllowed(false);
+  const ref = Ref();
+  let r = $.SecKeychainOpen(argv[0], ref);
+  if (r !== 0) return 'error: cannot open the keychain (' + r + ')';
+  const pw = $.NSProcessInfo.processInfo.environment.objectForKey('AGENTIC_KEYCHAIN_PASSWORD');
+  if (!pw.isNil()) {
+    const data = pw.dataUsingEncoding($.NSUTF8StringEncoding);
+    r = $.SecKeychainUnlock(ref[0], data.length, data.bytes, true);
+    if (r !== 0) return 'error: cannot unlock the keychain (' + r + (r === -25293 ? ', wrong password' : '') + ')';
+  }
+  const status = Ref();
+  r = $.SecKeychainGetStatus(ref[0], status);
+  if (r !== 0) return 'error: cannot read the keychain status (' + r + ')';
+  return (status[0] & 1) ? 'unlocked' : 'locked';
+}`;
+  if (!fs.existsSync(keychain))
+    throw new Error(`no keychain at ${keychain}`);
+  const env = { ...process.env };
+  delete env.AGENTIC_KEYCHAIN_PASSWORD;
+  if (password)
+    env.AGENTIC_KEYCHAIN_PASSWORD = password;
+  const result = execFileSync('osascript', ['-l', 'JavaScript', '-e', script, keychain], { encoding: 'utf8', env, timeout: 30_000 }).trim();
+  if (result.startsWith('error: '))
+    throw new Error(`${keychain}: ${result.slice('error: '.length)}`);
+  return result === 'unlocked';
+}
 
 // Brings the gated copies up to date with their source browser: builds a new
 // copy after the source updated, points every profile that runs a gated copy

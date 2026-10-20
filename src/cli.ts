@@ -39,9 +39,11 @@ Running:
   open <profile>               show the browser window
   login <profile>              open the browser without remote control to sign in to sites
                                that refuse automated browsers; quit it to resume the gateway
-  gated-browser build [--source <Chrome.app>] [--sign <identity>] [--keychain <file>] [--profile <name>]...
+  gated-browser build [--source <Chrome.app>] [--sign <identity>] [--keychain <file>]
+                      [--keychain-password <password>] [--profile <name>]...
                                macOS: build a copy of Google Chrome that pages cannot bring on
-                               screen (see README); --profile switches those profiles to it
+                               screen (see README); --profile switches those profiles to it;
+                               the keychain password is saved so updates can unlock it
   gated-browser update         rebuild it if the source browser updated, move profiles to the
                                newest copy, delete unused copies (services run this hourly)
 
@@ -75,6 +77,7 @@ async function main() {
       'source': { type: 'string' },
       'sign': { type: 'string' },
       'keychain': { type: 'string' },
+      'keychain-password': { type: 'string' },
       'profile': { type: 'string', multiple: true },
       'help': { type: 'boolean', short: 'h' },
     },
@@ -235,7 +238,8 @@ async function main() {
       if (sub !== 'build')
         break;
       const built = buildGatedBrowser({
-        source: values.source, identity: values.sign, keychain: values.keychain, log: line => console.log(line),
+        source: values.source, identity: values.sign, keychain: values.keychain,
+        keychainPassword: values['keychain-password'], log: line => console.log(line),
       });
       for (const name of values.profile ?? []) {
         updateProfile(getProfile(name).name, { executablePath: built.executable });
