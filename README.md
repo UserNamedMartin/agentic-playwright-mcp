@@ -414,6 +414,12 @@ browser and gateway; `headed` needs a screen and shows a window) and scripts
 used during development against a running gateway; see
 [test/README.md](test/README.md).
 
+Bugs live in [bugs/](bugs/README.md), one file each. Agents file them
+themselves: the skill tells every agent that uses the browser to write a report
+when the gateway gets something wrong (not when a website does), with what is
+needed to reproduce it. `bugs/README.md` says what counts, what does not, and
+what a report contains.
+
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).

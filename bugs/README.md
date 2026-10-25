@@ -19,13 +19,58 @@ open ones before they start; an agent that hits a problem while using the browse
 
 Keep the table sorted newest first; update the row when the status changes.
 
+## What to file, and what not
+
+File a bug when the gateway or its browser setup gets something wrong, whoever notices it (an agent using the
+browser in any project, or one working on this repo):
+
+- another chat's or agent's things: a tab you did not open in your list, your own tab "not found", a call that
+  waited for a call you never made, your page changed by someone else;
+- tabs or groups that disappear, close, move or lose their title unexpectedly;
+- the browser window or focus showing up on the user's screen;
+- errors that come from the gateway rather than the page: `connectOverCDP` timeouts, refusals that make no
+  sense, a session that restarts or hangs for no reason, notes in results that are wrong;
+- files saved to the wrong folder, downloads that go missing;
+- anything that behaves differently from `skill/SKILL.md`.
+
+Do not file:
+
+- **a website's own behavior:** HTTP errors, rate limits (429), captchas and bot checks, logins it asks for, pages
+  that are broken or slow;
+- **performance:** slow pages, slow snapshots or screenshots, unless the same step is clearly fast without the
+  gateway (stock Playwright on the same page) — if you cannot compare, do not file;
+- **Playwright's own behavior** that is the same without the gateway (upstream);
+- your own mistakes (a wrong ref, a wrong argument).
+
+**Not sure** whether it is the site, Playwright or the gateway? File it anyway with `suspect: unknown`, and say in
+"Cause" what points each way and what would settle it (another site, stock Playwright, a second chat).
+
 ## Filing a bug
+
+Do it right away, without asking the user; a one-line mention in your reply is enough, and none is needed if
+your task went on unaffected. Then carry on with your task.
+
+**From another project** (you use the browser, you are not working on this repo): this folder is `bugs/` in the
+repository the `agentic-browser` skill comes from — `realpath` the skill's folder (it is usually a symlink) and go
+one level up. Write the file and the index row only: do not commit, do not touch code (someone may be working in
+the repository). If the folder does not exist (the skill was installed without the repository), tell the user
+instead. Capture while it is fresh:
+
+- the tool calls involved, with their arguments, and the exact result or error text;
+- times in UTC, tab ids (shortened), whether you are the main chat or a subagent and how many agents used the
+  browser at once, the client (Claude Code CLI / desktop, Codex, …);
+- the gateway's log lines around that time: `~/.agentic-playwright-mcp/profiles/<profile>/gateway.log` (find the
+  profile whose log has your calls);
+- whether it happened again when you repeated the step, and anything you tried.
+
 
 1. **Check first:** search this folder (and `git log`) for the symptom; add to an existing file rather than opening a second one.
 2. **One file per bug:** `YYYY-MM-DD-short-slug.md` (the date it was filed, a slug of 3–6 words naming the defect, not the symptom's place).
 3. **Add a row to the index** above in the same commit.
 4. **No personal data** (this repo's rule): no user names, home paths, profile names, ports of a particular machine, chat titles or client names. Write paths relative to known roots (`<configDir>/projects/<project>/…`, `profiles/<profile>/gateway.log`) and replace ids with placeholders (`<old-session-id>`) unless the id itself is the point, then shorten it (`3fae…`).
-5. Commit it on its own (`Bugs: <slug>`), separate from any fix.
+5. **Working on this repo:** commit it on its own (`Bugs: <slug>`), separate from any fix. From another project:
+   do not commit (see above).
+6. **Seen again?** Add a dated "Seen again" line with the new evidence to the existing file instead of a new one.
 
 ## What a bug report contains
 
@@ -38,6 +83,7 @@ area: subagents         # sessions | subagents | proxy | tools | files | front |
 found: 2026-09-30       # when it happened
 filed: 2026-10-01
 reproducible: no        # yes (with the steps below) | sometimes | no (evidence only)
+suspect: gateway        # gateway | playwright | site | unknown — whose fault it most likely is
 fixed-in:               # the commit that fixes it, with its test
 ---
 

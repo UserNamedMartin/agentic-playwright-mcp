@@ -1,6 +1,6 @@
 ---
 name: agentic-browser
-description: How to use the shared agent browser (the `browser` MCP server, tools named browser_*, from agentic-playwright-mcp). Read before the first browser call in a chat, and before spawning subagents that will use the browser. Covers tab groups, subagents, logins and credentials, tab links, what is shared between chats, and the rule to report every browser problem to the user.
+description: How to use the shared agent browser (the `browser` MCP server, tools named browser_*, from agentic-playwright-mcp). Read before the first browser call in a chat, and before spawning subagents that will use the browser. Covers tab groups, subagents, logins and credentials, tab links, what is shared between chats, and filing a bug report yourself when the browser itself misbehaves.
 ---
 
 # Shared agent browser
@@ -219,20 +219,36 @@ Short lessons from real use. Add one when a mistake cost a session time.
   `catch` that aborts hides your bug behind the page's own error screen.
   Put the error text in the response instead.
 
-## Report every problem (hard requirement)
+## When the browser itself misbehaves: file a bug
 
-This browser is new infrastructure and gets fixed only through honest reports.
-Whenever something goes wrong, say so in your reply to the user, in its own
-clearly marked paragraph, even if you worked around it:
+This browser is new infrastructure and gets fixed through bug reports. When the
+gateway gets something wrong, file a report yourself, right away, without asking:
 
-- a tool error, timeout or crash (quote the exact error text);
-- the wrong tab, a missing tab or group, tabs that belong to someone else;
-- the browser window or focus jumping in front of the user;
-- a missing login (see "Logins");
-- a site that refuses the automated browser;
+- a tab you did not open in your list, your own tab "not found", a call that
+  waited for a call you never made, your page changed by someone else;
+- tabs or groups that disappear, close or lose their title unexpectedly;
+- the browser window or focus showing up on the user's screen;
+- errors from the gateway rather than the page (`connectOverCDP` timeouts,
+  senseless refusals, a session that restarts or hangs for no reason);
+- files in the wrong folder, missing downloads;
 - anything that behaves differently from this skill.
 
-State what you called, what you expected, what happened and what you tried.
-Do not retry the same failing call more than twice, and do not silently switch
-to other browser tools (for example `claude-in-chrome`) to get around a
-problem; ask the user first.
+Not bugs, do not file: a website's own errors, rate limits, captchas, bot
+checks or slowness; performance in general; your own mistakes. Not sure whether
+it is the site, Playwright or the gateway? File it with `suspect: unknown` and
+say why.
+
+How: the rules and the template are in `bugs/README.md` of the repository this
+skill comes from (`realpath` this skill's folder, then `../bugs/`). Write the
+file and the index row; do not commit. Note what is needed to reproduce it: the
+calls with their arguments, the exact error text, UTC times, tab ids, how many
+agents used the browser, and the matching lines of
+`~/.agentic-playwright-mcp/profiles/<profile>/gateway.log`. Keep the user's
+sites, chat titles and names out of it (placeholders). A one-line mention to the
+user is enough, none if your task went on unaffected; then carry on. If there
+is no `bugs/` folder, tell the user instead.
+
+A missing login is not a bug: stop and ask the user (see "Logins"). Do not
+retry the same failing call more than twice, and do not silently switch to
+other browser tools (for example `claude-in-chrome`) to get around a problem;
+ask the user first.
