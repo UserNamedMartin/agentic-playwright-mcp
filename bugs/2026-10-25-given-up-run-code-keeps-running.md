@@ -11,7 +11,7 @@ fixed-in: c7b70ee (test/hangs.mjs, "run_code given up at its timeout stops runni
 
 ## Symptoms
 
-The main agent ran a polling loop in `browser_run_code_unsafe` (fetching attendee profiles from an event site, one every
+The main agent ran a polling loop in `browser_run_code_unsafe` (fetching records from a site where the browser was logged in, one every
 1.5 s). The call came back with "did not finish within 115 s and was given up". The loop went on in the session's
 thread: the next calls of the session waited behind it ("This call waited 178 s for your previous call"), and it kept
 hitting the site until the site rate-limited the logged-in account (HTTP 429 "Too Many Attempts") for about half an hour.

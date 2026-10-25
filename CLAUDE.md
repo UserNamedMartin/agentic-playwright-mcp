@@ -9,8 +9,8 @@ Read README.md first for what the project does. This file is about changing it.
   requests, cleanup sweeps.
 - `src/proxy.ts` — the isolation: every session's Playwright connects to the
   browser through its own DevTools endpoint here (a socket file, not a TCP
-  port) and sees only its own tabs. The few browser-level commands are listed;
-  anything else browser-wide is refused.
+  port) and sees only its own tabs, each announced only once it answers. The
+  few browser-level commands are listed; anything else browser-wide is refused.
 - `src/browser.ts` — the gateway's own raw DevTools connection: every tab and
   its owner, holding new tabs until their owner's Playwright has set them up,
   the gateway's page scripts (one binding, `bridgeScript`), background tabs,

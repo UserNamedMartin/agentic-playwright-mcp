@@ -13,11 +13,11 @@ fixed-in: 9e43c5f (root; 9d17f01 was a mitigation) — test/subagent-transcripts
 
 One desktop chat ran up to five background research subagents at once, most of them using the browser.
 
-- A subagent's `browser_navigate` result listed a tab titled "Deep Tech Summit 2026 | Gridaly" that only the parent
+- A subagent's `browser_navigate` result listed a tab (`<parent page title>`) that only the parent
   chat had opened, and said the call had waited for a `browser_tabs` call the subagent never made.
-- Right after that, the parent's own tab (`705646A3`, the event app) showed the subagent's page
-  (`pgeventures.pl`) in the parent's `browser_tabs` list.
-- Another subagent got `Tab "0BFF8788" not found` from `browser_navigate` while `browser_tabs` listed that tab as
+- Right after that, the parent's own tab (`<tab-id>`, the parent's page) showed the subagent's page
+  (`<subagent's site>`) in the parent's `browser_tabs` list.
+- Another subagent got `Tab "<tab-id>" not found` from `browser_navigate` while `browser_tabs` listed that tab as
   current; its parallel `browser_navigate` / `browser_evaluate` "ran on a different tab state", `browser_evaluate`
   returned the previous page, and snapshots were saved outside its subagent folder.
 - A third subagent's `browser_tabs close` failed in the parent's session (see Evidence).
@@ -47,7 +47,7 @@ appends the subagent's `tool_use` line 900 ms / 2500 ms after it sends the call 
   16:47:41.091Z, i.e. the lookup gave up before the line reached the disk. Only the first miss per session is
   logged (`_missLogged`), so every later miss of the day — the subagents' — left no trace.
 - 18:03:46Z: `browser_tabs from <chat> failed: … connectOverCDP: Timeout 15000ms exceeded` — a subagent's call
-  ("Identify remaining attendees" had just had its thread ended at 18:02:58Z) logged under the parent's title.
+  (a subagent whose thread had just been ended at 18:02:58Z) logged under the parent's title.
 - Measured on the live chat (a watcher polling the transcript every 5 ms): `tool_use` lines reach the disk
   117–949 ms after their `timestamp`; the first call of a parallel batch was the slowest (949 ms).
 
@@ -61,12 +61,12 @@ assumption (they append before calling), so they never saw it.
 
 ## Suggested fix
 
-Wait for the line instead of guessing: while the chat has subagents that are alive (a subagent transcript written
+(As filed; the root fix below replaced it.) Wait for the line instead of guessing: while the chat has subagents that are alive (a subagent transcript written
 recently), keep rescanning until the call's `tool_use` appears (a few seconds' cap); a found id resolves at once, so
 calls from the chat are delayed only by the write itself. With no live subagents nothing but the chat can be
 calling, so keep the short wait. Log every miss that still happens. Test: the late-transcript case above.
 
-## Fix
+## First fix (replaced by the root fix below)
 
 9d17f01: `TranscriptIndex.lookup` rescans every 25 ms until the call's `tool_use` line appears, up to 5 s while any
 subagent of the chat wrote its transcript in the last 10 minutes (`subagentsAlive()`), 250 ms otherwise. A found id

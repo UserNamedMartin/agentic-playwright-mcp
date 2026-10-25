@@ -1,6 +1,6 @@
 ---
 status: fixed
-area: sessions
+area: proxy
 found: 2026-10-25
 filed: 2026-10-25
 reproducible: yes
@@ -44,11 +44,11 @@ in `worker.ts`), but a thread start does not.
 
 ## Suggested fix
 
-Before a thread starts, check the session's tabs from the gateway's own connection: dismiss an open JavaScript dialog
+(As filed; the root fix below replaced it.) Before a thread starts, check the session's tabs from the gateway's own connection: dismiss an open JavaScript dialog
 (handled by the browser, works while the page waits), close a tab whose renderer does not answer within a few seconds,
 and tell the agent which. Test: the case above.
 
-## Fix
+## First fix (replaced by the root fix below)
 
 af253c5: before a thread starts, `AgentSession._closeStuckTabs` dismisses JavaScript dialogs the gateway saw open on the session's tabs (`SharedBrowser.dismissDialog`, tracked from `Page.javascriptDialogOpening/Closed` on its own connection) and closes tabs whose renderer does not answer `Page.getFrameTree` within 5 s (`SharedBrowser.responsive`); the agent gets a "### Closed tabs" / "### Dialog dismissed" note. Two pages on one site can share a renderer, so a loop in one freezes both; the test uses two sites.
 
