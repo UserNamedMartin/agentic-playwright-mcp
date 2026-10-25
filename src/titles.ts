@@ -71,12 +71,16 @@ function findDesktopChatFiles(hostSessionId: string): string[] {
   } catch {
     return [];
   }
+  // Only <account>/<org>/<id>.json: the app also writes files of the same
+  // name in subfolders (waiting-input/<id>.json, no title, while the chat
+  // waits for the user), and the newest of those used to win.
   const found: string[] = [];
   for (const appDir of appDirs)
-    findFiles(path.join(supportDir, appDir, 'claude-code-sessions'), `${hostSessionId}.json`, 3, found);
+    findFiles(path.join(supportDir, appDir, 'claude-code-sessions'), `${hostSessionId}.json`, 2, found);
   return found;
 }
 
+// Files named `name` exactly `depth` folders below `dir`.
 function findFiles(dir: string, name: string, depth: number, found: string[]) {
   let entries: fs.Dirent[];
   try {
@@ -85,9 +89,9 @@ function findFiles(dir: string, name: string, depth: number, found: string[]) {
     return;
   }
   for (const entry of entries) {
-    if (entry.isFile() && entry.name === name)
+    if (depth === 0 && entry.isFile() && entry.name === name)
       found.push(path.join(dir, entry.name));
-    else if (entry.isDirectory() && depth > 0)
+    else if (depth > 0 && entry.isDirectory())
       findFiles(path.join(dir, entry.name), name, depth - 1, found);
   }
 }
