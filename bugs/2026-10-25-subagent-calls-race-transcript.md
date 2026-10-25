@@ -1,10 +1,10 @@
 ---
-status: open
+status: fixed
 area: subagents
 found: 2026-10-25
 filed: 2026-10-25
 reproducible: yes
-fixed-in:
+fixed-in: 9d17f01 (test/subagent-transcripts.mjs, late-transcript and parallel cases)
 ---
 
 # Subagent calls go to the parent chat when Claude Code writes the tool_use to its transcript after the call arrives
@@ -65,3 +65,11 @@ Wait for the line instead of guessing: while the chat has subagents that are ali
 recently), keep rescanning until the call's `tool_use` appears (a few seconds' cap); a found id resolves at once, so
 calls from the chat are delayed only by the write itself. With no live subagents nothing but the chat can be
 calling, so keep the short wait. Log every miss that still happens. Test: the late-transcript case above.
+
+## Fix
+
+9d17f01: `TranscriptIndex.lookup` rescans every 25 ms until the call's `tool_use` line appears, up to 5 s while any
+subagent of the chat wrote its transcript in the last 10 minutes (`subagentsAlive()`), 250 ms otherwise. A found id
+answers at once, so the chat's own calls wait only for Claude Code's write. `_autoTarget` logs every miss that
+happens while subagents are alive. Without the fix the new cases fail exactly like the live chat: every subagent's
+navigation lands in the chat's one tab.
