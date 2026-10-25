@@ -85,6 +85,17 @@ Read README.md first for what the project does. This file is about changing it.
   an owner by searching afterwards (frame trees, URLs, timing): a search
   answers late, misses frames in other processes and frames already gone,
   and each miss looks like a separate bug.
+- Which agent made a call comes from the transcript line Claude Code writes
+  for it (`subagents.ts`), and the call waits for that line: it is written
+  after the call arrives (0.1-1 s). Never guess the caller from timing or
+  recent activity, and never give an unidentified call to the chat: a call
+  no transcript names is refused. Guessing put subagents' calls into their
+  parent's tabs three times, each time for a different reason. Tests must
+  write the line after the call starts, as Claude Code does.
+- A tab is announced to a session's Playwright only once it answers
+  (`ProxyClient._attachQuietly`): connectOverCDP waits for every announced
+  tab, so one silent tab would keep the whole session from connecting. Do
+  not move that decision into the session or the worker.
 - Agents' code never runs in the main thread: everything of a session's
   Playwright lives in its worker (worker.ts), so one agent cannot stall the
   gateway or other chats. Keep it that way; what the tools need from the
