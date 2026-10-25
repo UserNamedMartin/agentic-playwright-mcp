@@ -7,6 +7,7 @@ open ones before they start; an agent that hits a problem while using the browse
 
 | File | Status | Area | Found | Summary |
 |---|---|---|---|---|
+| [2026-10-25-subagent-calls-race-transcript.md](2026-10-25-subagent-calls-race-transcript.md) | open | subagents | 2026-10-25 | Claude Code writes a tool_use to its transcript after the call arrives; the lookup gives up after 250 ms and the subagent's call runs in the parent chat's session |
 | [2026-10-20-update-asks-keychain-password.md](2026-10-20-update-asks-keychain-password.md) | fixed | gated-browser | 2026-10-19 | Gated browser updates run codesign against a locked keychain, so the user gets a password dialog every hour after a reboot |
 | [2026-10-12-gate-strands-home-window.md](2026-10-12-gate-strands-home-window.md) | fixed | front | 2026-10-12 | The show gate keeps the home window from ever being ordered in, so tab links show the app for 3 s and the guard hides it again |
 | [2026-10-09-pages-show-the-browser.md](2026-10-09-pages-show-the-browser.md) | fixed | front | 2026-10-08 | A page's own `window.open` shows the hidden browser; the focus guard only hides it afterwards, so every call is a flash |
