@@ -62,4 +62,8 @@ the place to decide is where tabs are told: the proxy. bbfc230: the proxy announ
 re-checked every 2 s and announced when it answers, and closed after 60 s of silence. Dialogs left open are dismissed at
 attach. The session-level check is removed.
 
-Not covered: an out-of-process iframe stuck inside a page that answers.
+An out-of-process iframe stuck inside a page that answers (checked after the fix): the page is not silent, a reconnect
+takes ~0.3 s and the page stays in the list (test/hangs.mjs). What such a frame does slow down is upstream, not the
+gateway: Playwright's `page.ariaSnapshot({ mode: 'ai' })`, which every snapshot-returning MCP tool calls, waits 30 s for
+the stuck frame, and screenshots time out (the compositor waits on that renderer). Measured the same on stock Playwright
+connected straight to Chrome (30 008 ms; `locator('body').ariaSnapshot()` 11 ms, click 24 ms), so nothing to fix here.

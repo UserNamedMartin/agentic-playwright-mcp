@@ -132,7 +132,14 @@ try {
   // data: pages shared one, and the loop froze the dialog page too).
   const site = http.createServer((req, res) => {
     res.writeHead(200, { 'content-type': 'text/html' });
-    res.end(`<title>${new URL(req.url, 'http://x').searchParams.get('t')}</title>`);
+    const t = new URL(req.url, 'http://x').searchParams.get('t');
+    // A page that answers, with a cross-site (out-of-process) frame stuck in a loop.
+    if (t === 'framed')
+      res.end(`<title>framed</title><iframe src="http://localhost:${port}/?t=frameloop"></iframe>`);
+    else if (t === 'frameloop')
+      res.end('<script>setTimeout(() => { for (;;) {} }, 300)</script>');
+    else
+      res.end(`<title>${t}</title>`);
   }).listen(0, '::');
   await new Promise(r => site.on('listening', r));
   const port = site.address().port;
@@ -164,6 +171,15 @@ try {
   const closedLater = await call('browser_tabs', { action: 'list' });
   check('a tab silent past the limit is closed and the agent told', /### Closed tabs/.test(closedLater) && !/\[stuck\]/.test(listTitles(closedLater)),
     closedLater.split('### Closed tabs\n')[1]?.split('\n')[0]?.slice(0, 100));
+  // A page that answers with a stuck out-of-process frame is not silent: it
+  // stays in the list across a reconnect, and the reconnect is not held up.
+  await call('browser_tabs', { action: 'new', url: `http://127.0.0.1:${port}/?t=framed` });
+  await sleep(1000);
+  await call('browser_run_code_unsafe', { code: 'async () => new Promise(() => {})', timeout: 1 });
+  const framedAt = Date.now();
+  const framedList = await call('browser_tabs', { action: 'list' });
+  check('a stuck out-of-process frame neither holds up a reconnect nor hides its page',
+    Date.now() - framedAt < 4000 && /\[framed\]/.test(listTitles(framedList)), `${Date.now() - framedAt} ms; ${listTitles(framedList).replace(/\n/g, ' ').slice(0, 160)}`);
   await call('browser_tabs', { action: 'select', index: 0 }).catch(() => {});
   site.close();
 
