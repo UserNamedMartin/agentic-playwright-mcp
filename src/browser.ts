@@ -78,7 +78,9 @@ const holdMs = 10_000;
 // Longest an attach decision waits for tab creations under way.
 const creationWaitMs = 2_000;
 
-type Entry = { info: TargetInfo; session?: string; waiting: boolean; holdTimer?: NodeJS.Timeout };
+// dialog: a JavaScript dialog the page shows now; the renderer answers
+// nothing while it is open.
+type Entry = { info: TargetInfo; session?: string; waiting: boolean; holdTimer?: NodeJS.Timeout; dialog?: { type: string; message: string } };
 
 export class SharedBrowser {
   readonly cdp: CdpConnection;
@@ -187,6 +189,28 @@ export class SharedBrowser {
     return !!this._targets.get(targetId)?.waiting;
   }
 
+  // Whether a tab's renderer answers within `ms`. One stuck in a script (an
+  // endless loop) answers nothing, and so does one showing a dialog (see
+  // dismissDialog). A held tab has not run yet and counts as answering.
+  async responsive(targetId: string, ms: number): Promise<boolean> {
+    const entry = this._targets.get(targetId);
+    if (!entry || entry.waiting || entry.info.type !== 'page')
+      return true;
+    return await this.cdp.send('Page.getFrameTree', {}, entry.session, ms).then(() => true, () => false);
+  }
+
+  // Dismisses the JavaScript dialog a tab shows, if any (handled by the
+  // browser, so it works while the page waits on it); returns what it was.
+  async dismissDialog(targetId: string): Promise<{ type: string; message: string } | undefined> {
+    const entry = this._targets.get(targetId);
+    const dialog = entry?.dialog;
+    if (!dialog || !entry.session)
+      return undefined;
+    await this.cdp.send('Page.handleJavaScriptDialog', { accept: false }, entry.session).catch(() => {});
+    entry.dialog = undefined;
+    return dialog;
+  }
+
   // Lets a held tab run (its owner has set it up, or nobody will).
   async release(targetId: string) {
     const entry = this._targets.get(targetId);
@@ -249,6 +273,13 @@ export class SharedBrowser {
         this._targets.delete(params.targetId);
         this.openers.delete(params.targetId);
         this._events.onTargetDestroyed(params.targetId);
+        return;
+      }
+      case 'Page.javascriptDialogOpening':
+      case 'Page.javascriptDialogClosed': {
+        const entry = sessionId ? this._targets.get(this._sessionPage.get(sessionId) ?? '') : undefined;
+        if (entry)
+          entry.dialog = method === 'Page.javascriptDialogOpening' ? { type: params.type, message: params.message } : undefined;
         return;
       }
       case 'Runtime.bindingCalled':

@@ -47,7 +47,9 @@ no longer blocks the next ones, but it may still be running in the page. Pass
 code that never yields (a busy loop, after about 10 seconds): your browser
 session restarts on the next call, your tabs stay, a recording, trace or video
 and routes added from code end. What the code started inside a page (timers,
-fetches) is not stopped; close or reload that tab if it must end.
+fetches) is not stopped; close or reload that tab if it must end. When your
+session restarts, a tab of yours whose page is stuck in a script is closed and
+a JavaScript dialog left open is dismissed; the result says which.
 
 ## Tabs do not live forever
 

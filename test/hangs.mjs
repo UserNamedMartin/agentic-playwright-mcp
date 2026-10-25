@@ -8,6 +8,7 @@
 // AGENTIC_PLAYWRIGHT_HOME. Prints one line per check.
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
+import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -121,6 +122,37 @@ try {
   check('cancelled run_code stops running', c1 > n2 && c1 === c2, `counter ${c1} -> ${c2}`);
   const tabsLeft = await call('browser_tabs', { action: 'list' });
   check('tabs survive stopping the code', /hangs|t1/.test(tabsLeft), tabsLeft.split('\n').slice(0, 3).join(' '));
+
+  // A tab stuck in a script kept a new thread from connecting: every call of
+  // the session failed with connectOverCDP's timeout, closing that tab too.
+  // It is closed before the thread starts; a page showing a dialog is not stuck.
+  // Different sites, so the two pages get their own renderer processes (two
+  // data: pages shared one, and the loop froze the dialog page too).
+  const site = http.createServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'text/html' });
+    res.end(`<title>${new URL(req.url, 'http://x').searchParams.get('t')}</title>`);
+  }).listen(0, '127.0.0.1');
+  await new Promise(r => site.on('listening', r));
+  const port = site.address().port;
+  await call('browser_tabs', { action: 'new', url: `http://127.0.0.1:${port}/?t=dialog` });
+  await call('browser_evaluate', { function: '() => { setTimeout(() => alert("hi"), 100); return 1; }' });
+  await sleep(500);
+  await call('browser_tabs', { action: 'new', url: `http://localhost:${port}/?t=stuck` });
+  await call('browser_evaluate', { function: '() => { setTimeout(() => { for (;;) {} }, 200); return 1; }', timeout: 3 });
+  await sleep(800);
+  await call('browser_run_code_unsafe', { code: 'async () => new Promise(() => {})', timeout: 1 });
+  const restartedAt = Date.now();
+  const afterStuck = await call('browser_tabs', { action: 'list' });
+  const restartMs = Date.now() - restartedAt;
+  check('a stuck tab does not keep the session from reconnecting', restartMs < 12000 && !/connectOverCDP/.test(afterStuck), `${restartMs} ms`);
+  check('... the stuck tab was closed and the agent told', /### Closed tabs/.test(afterStuck) && !/\[stuck\]/.test(afterStuck),
+    afterStuck.split('### Closed tabs\n')[1]?.split('\n')[0]?.slice(0, 120));
+  check('... a dialog left open is dismissed and the agent told', /### Dialog dismissed\nThe alert dialog "hi"/.test(afterStuck),
+    afterStuck.split('### Dialog dismissed\n')[1]?.split('\n')[0]?.slice(0, 120));
+  check('... tabs that answer stay, a dialog included', /\[dialog\]/.test(afterStuck) && /\[t1\]|\[hangs\]/.test(afterStuck),
+    afterStuck.split('### Result')[1]?.split('###')[0].replace(/\n/g, ' ').slice(0, 200));
+  await call('browser_tabs', { action: 'select', index: 0 }).catch(() => {});
+  site.close();
 
   const slow = call('browser_evaluate', { function: '() => new Promise(r => setTimeout(() => r("slow"), 3000))' });
   await sleep(200);

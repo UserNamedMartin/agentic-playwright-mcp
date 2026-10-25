@@ -115,6 +115,8 @@ const lostOnReconnect: Record<string, string> = {
 // A thread that does not answer a ping for this long while a call runs is
 // stuck (a busy loop in an agent's code) and is ended.
 const stuckMs = 10_000;
+// A tab that does not answer for this long when a thread starts is stuck.
+const stuckTabMs = 5_000;
 const pingMs = 2_000;
 // A thread with nothing to do for this long is ended (it is started again on
 // the next call); its memory is the session's biggest cost.
@@ -214,6 +216,7 @@ export class AgentSession {
       if (note)
         this._notes.push(note);
     }
+    await this._closeStuckTabs();
     const start: WorkerStart = {
       endpoint: this._host.proxy.endpoint(this.info.id),
       config: this._config,
@@ -326,6 +329,34 @@ export class AgentSession {
       return;
     this._ended(thread, 'The browser session\'s thread was ended.');
     void thread.worker.terminate().catch(() => {});
+  }
+
+  // A new thread's Playwright sets up every tab of the session while it
+  // connects, and a tab whose page answers nothing blocks that: the
+  // connection timed out and every call of the session failed, so the agent
+  // could not even close the tab (live, 2026-10-25). A dialog left open is
+  // dismissed (the new thread could not have shown it anyway); a page still
+  // stuck in a script is closed. The agent is told either way.
+  private async _closeStuckTabs() {
+    const shared = this._host.shared;
+    for (const targetId of this.targets) {
+      const dialog = await shared.dismissDialog(targetId);
+      if (dialog)
+        this._notes.push(`### Dialog dismissed\nThe ${dialog.type} dialog "${dialog.message.slice(0, 200)}" on ` +
+          `${shared.info(targetId)?.url || targetId.slice(0, 8)} was still open when your browser session restarted and was dismissed.`);
+    }
+    const checks = await Promise.all([...this.targets].map(async targetId =>
+      ({ targetId, info: shared.info(targetId), ok: await shared.responsive(targetId, stuckTabMs).catch(() => true) })));
+    const stuck = checks.filter(c => !c.ok);
+    for (const { targetId } of stuck)
+      await shared.closeTarget(targetId);
+    if (!stuck.length)
+      return;
+    const urls = stuck.map(c => c.info?.url || c.targetId.slice(0, 8));
+    console.error(`${this.info.title}: closed ${stuck.length} tab(s) stuck in a script before reconnecting`);
+    this._notes.push(`### Closed tabs
+These tabs of yours had stopped responding (a script stuck in a loop) and kept ` +
+      `your browser session from starting, so they were closed: ${urls.join(', ')}. Open the page again if you still need it.`);
   }
 
   // What ended with a thread that the agent had running.
