@@ -1,10 +1,10 @@
 ---
-status: open
+status: fixed
 area: sessions
 found: 2026-10-25
 filed: 2026-10-25
 reproducible: yes
-fixed-in:
+fixed-in: 3684a80 (test/reconnect.mjs, "a dialog open across the restart is dismissed, its tab kept")
 ---
 
 # A JavaScript dialog open across a gateway restart makes its tab look stuck, and it gets closed
@@ -46,3 +46,10 @@ Dismiss the dialogs of agents' tabs while the old connection still sees them: on
 (service restart). Notes not yet delivered must survive the restart so the agent hears about it. A dropped connection
 or a crash cannot be handled this way; the tab then stays "silent", and the note must say a lost dialog is a possible
 cause.
+
+## Fix
+
+3684a80: `Gateway.stop({ keepBrowser: true })` dismisses the dialogs of owned tabs (`_dismissOwnedDialogs`) before it saves
+state, and undelivered notes are saved with each session (`SavedNetworkState.notes`) and delivered after the restart.
+Not fixable: a dialog left open when the DevTools connection drops or the gateway crashes; its tab is then left out as
+silent and closed after the limit, and the note says a lost dialog may be the cause.
