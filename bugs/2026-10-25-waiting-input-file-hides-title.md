@@ -1,10 +1,10 @@
 ---
-status: open
+status: fixed
 area: sessions
 found: 2026-10-25
 filed: 2026-10-25
 reproducible: yes
-fixed-in:
+fixed-in: 8d796e8 (test/titles.mjs)
 ---
 
 # A chat's waiting-input file is read as the chat itself: the tab group loses its title and the CLI session id
@@ -49,3 +49,7 @@ connect-time header, which is wrong after the app continued the chat under a new
 ## Suggested fix
 
 Accept only `<account>/<org>/<id>.json`. Test: `test/titles.mjs`.
+
+## Fix
+
+8d796e8: `findDesktopChatFiles` takes only files exactly two folders below `claude-code-sessions` (`<account>/<org>/<id>.json`).
