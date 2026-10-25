@@ -7,6 +7,7 @@ open ones before they start; an agent that hits a problem while using the browse
 
 | File | Status | Area | Found | Summary |
 |---|---|---|---|---|
+| [2026-10-25-waiting-input-file-hides-title.md](2026-10-25-waiting-input-file-hides-title.md) | open | sessions | 2026-10-25 | The desktop app's waiting-input/<id>.json marker is read as the chat itself: tab groups lose their title and the chat's CLI session id while it waits |
 | [2026-10-25-stuck-tab-blocks-reconnect.md](2026-10-25-stuck-tab-blocks-reconnect.md) | open | sessions | 2026-10-25 | A tab stuck in a script keeps a new session thread from connecting: every call, even closing that tab, fails with connectOverCDP's 15 s timeout |
 | [2026-10-25-given-up-run-code-keeps-running.md](2026-10-25-given-up-run-code-keeps-running.md) | fixed | sessions | 2026-10-25 | browser_run_code_unsafe keeps running in the session's thread after the gateway gave it up or the agent cancelled it |
 | [2026-10-25-subagent-calls-race-transcript.md](2026-10-25-subagent-calls-race-transcript.md) | fixed | subagents | 2026-10-25 | Claude Code writes a tool_use to its transcript after the call arrives; the lookup gives up after 250 ms and the subagent's call runs in the parent chat's session |
