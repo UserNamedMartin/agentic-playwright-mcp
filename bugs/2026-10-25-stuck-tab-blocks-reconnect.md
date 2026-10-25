@@ -4,7 +4,7 @@ area: sessions
 found: 2026-10-25
 filed: 2026-10-25
 reproducible: yes
-fixed-in: af253c5 (test/hangs.mjs, "a stuck tab does not keep the session from reconnecting")
+fixed-in: bbfc230 (root, proxy; af253c5 was a session-level patch) — test/hangs.mjs stuck/busy/dialog cases
 ---
 
 # A tab stuck in a script keeps its session's new thread from connecting; every call fails
@@ -51,3 +51,15 @@ and tell the agent which. Test: the case above.
 ## Fix
 
 af253c5: before a thread starts, `AgentSession._closeStuckTabs` dismisses JavaScript dialogs the gateway saw open on the session's tabs (`SharedBrowser.dismissDialog`, tracked from `Page.javascriptDialogOpening/Closed` on its own connection) and closes tabs whose renderer does not answer `Page.getFrameTree` within 5 s (`SharedBrowser.responsive`); the agent gets a "### Closed tabs" / "### Dialog dismissed" note. Two pages on one site can share a renderer, so a loop in one freezes both; the test uses two sites.
+
+## Root fix
+
+af253c5 probed tabs from the session before a thread started and closed any that did not answer within 5 s: a tab that
+was only busy for a while was closed for good, and a tab could go silent between the probe and the connection. The
+defect is that Playwright's connectOverCDP waits for every tab it is told about (`_waitForAllPagesToBeInitialized`), so
+the place to decide is where tabs are told: the proxy. bbfc230: the proxy announces a tab only after it answers
+`Page.getFrameTree` on the proxy's own session (2 s); a silent tab is left out (its session's messages are dropped),
+re-checked every 2 s and announced when it answers, and closed after 60 s of silence. Dialogs left open are dismissed at
+attach. The session-level check is removed.
+
+Not covered: an out-of-process iframe stuck inside a page that answers.
