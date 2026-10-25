@@ -249,7 +249,13 @@ the gateway created). Change the location or the retention with `filesDir` and
   the chat's transcripts to tell subagents apart. Which transcripts is read
   from the desktop app's chat file on each lookup (a new chat connects before
   the app has assigned its CLI session id, and a chat can continue under a new
-  one).
+  one). Claude Code writes the line after the call arrives, so the call waits
+  for it; a call no transcript names is refused rather than run in another
+  agent's tabs.
+- The proxy tells a session's Playwright about a tab only once the tab
+  answers: Playwright waits for every tab it knows about while it connects,
+  so a page stuck in a script is left out (and closed after a minute of
+  silence) instead of blocking the whole session.
 - With the gated browser (macOS), a small library loaded into the browser's
   main process refuses every request to put the app on screen (activate,
   unhide, ordering a window in) unless the gateway opened the gate (a user

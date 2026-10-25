@@ -67,7 +67,8 @@ In Claude Code nothing is needed: the gateway recognizes which subagent is
 calling and gives each one its own tab group ("Chat title · subagent
 description"), running in parallel with the others and with the main chat.
 A subagent sees only its own tabs, not the main chat's; to hand a page over,
-pass its URL.
+pass its URL. If a call comes back with "could not tell which agent of this
+chat made this call", nothing was done: repeat the call.
 
 In other clients (Codex and others) a subagent first calls
 `browser_subagent_start` with a short label and then passes the returned id as
