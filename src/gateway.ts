@@ -158,6 +158,10 @@ export class Gateway implements SessionHost, ProxyHost {
     this.sessions.get(key)?.note(`### Navigation blocked\nA tab of yours was sent to ${url}; it was taken back to about:blank: ${reason}.`);
   }
 
+  onTabNote(key: string, text: string) {
+    this.sessions.get(key)?.note(text);
+  }
+
   // Ports agents may not reach: this gateway's, its browser's, and every
   // other profile's (see urls.ts).
   internalPorts(): string[] {

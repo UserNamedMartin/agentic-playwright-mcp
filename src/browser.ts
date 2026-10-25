@@ -189,16 +189,6 @@ export class SharedBrowser {
     return !!this._targets.get(targetId)?.waiting;
   }
 
-  // Whether a tab's renderer answers within `ms`. One stuck in a script (an
-  // endless loop) answers nothing, and so does one showing a dialog (see
-  // dismissDialog). A held tab has not run yet and counts as answering.
-  async responsive(targetId: string, ms: number): Promise<boolean> {
-    const entry = this._targets.get(targetId);
-    if (!entry || entry.waiting || entry.info.type !== 'page')
-      return true;
-    return await this.cdp.send('Page.getFrameTree', {}, entry.session, ms).then(() => true, () => false);
-  }
-
   // Dismisses the JavaScript dialog a tab shows, if any (handled by the
   // browser, so it works while the page waits on it); returns what it was.
   async dismissDialog(targetId: string): Promise<{ type: string; message: string } | undefined> {

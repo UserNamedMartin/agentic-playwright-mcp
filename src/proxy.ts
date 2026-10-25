@@ -30,7 +30,22 @@ export type ProxyHost = {
   internalPorts(): string[];
   // A session's tab was sent to an internal address and taken back.
   onNavigationBlocked(key: string, url: string, reason: string): void;
+  // Something about a session's tabs the agent should hear with its next result.
+  onTabNote(key: string, text: string): void;
 };
+
+// Playwright's connectOverCDP waits until every tab it is attached to has been
+// set up, and a page stuck in a script answers nothing: one such tab kept a
+// session from connecting at all, so every call failed, closing that tab
+// included. A tab is announced to Playwright only once it answers; until then
+// it is left out (and announced as soon as it answers), and one that stays
+// silent this long is closed, as Chrome itself offers for an unresponsive page.
+const tabAnswerMs = 2_000;
+const tabRetryMs = 2_000;
+const silentTabCloseMs = Number(process.env.AGENTIC_SILENT_TAB_CLOSE_MS) || 60_000;
+// The proxy's own commands (CdpConnection.send) use ids from here up; a late
+// answer to one of them is not Playwright's.
+const ownIdsFrom = 1_000_000_000;
 
 const refusedMessage = (method: string) => `${method} is not available: it reaches the whole browser, which other chats share.`;
 
@@ -219,6 +234,9 @@ class ProxyClient {
   closedByClient = false;
   // Page.getFrameTree calls on a fresh link tab (see _onSessionMessage).
   private _freshTreeCalls = new Set<number>();
+  // Tabs left out because they do not answer: target id -> real session id
+  // (attached, not announced) and when they were first found silent.
+  private _silent = new Map<string, { sessionId: string; since: number; timer?: NodeJS.Timeout }>();
   private _screenshots: ScreenshotDiagnostics;
 
   constructor(proxy: CdpProxy, host: ProxyHost, key: string) {
@@ -305,6 +323,9 @@ class ProxyClient {
     this._sessions.clear();
     this._attached.clear();
     this._attaching.clear();
+    for (const silent of this._silent.values())
+      clearTimeout(silent.timer);
+    this._silent.clear();
     this._browserSessions.clear();
     this._replyTag.clear();
     this._parentSession.clear();
@@ -343,34 +364,107 @@ class ProxyClient {
   }
 
   private async _attach(targetId: string) {
-    if (this._attached.has(targetId) || this._attaching.has(targetId) || !this._real)
-      return;
+    const sessionId = await this._attachQuietly(targetId);
+    if (sessionId)
+      this._announce(targetId, sessionId);
+  }
+
+  // Attaches to a tab of ours and checks that it answers. Returns the session
+  // to announce, or undefined (already attached, gone, or left out as silent).
+  // A held tab (new, waiting for its owner) has not run yet and is announced
+  // as it is; a dialog left open is dismissed, since the new Playwright could
+  // not show it to the agent.
+  private async _attachQuietly(targetId: string): Promise<string | undefined> {
+    if (this._attached.has(targetId) || this._attaching.has(targetId) || this._silent.has(targetId) || !this._real)
+      return undefined;
     this._attaching.add(targetId);
     try {
       const real = this._real;
       const { sessionId } = await real.send('Target.attachToTarget', { targetId, flatten: true });
       if (real !== this._real)
-        return;
+        return undefined;
+      if (!this._shared.isHeld(targetId)) {
+        const dialog = await this._shared.dismissDialog(targetId);
+        if (dialog)
+          this._host.onTabNote(this.key, `### Dialog dismissed\nThe ${dialog.type} dialog "${dialog.message.slice(0, 200)}" on ` +
+            `${this._shared.info(targetId)?.url || targetId.slice(0, 8)} was still open when your browser session reconnected and was dismissed.`);
+        if (!await this._answers(sessionId)) {
+          if (real === this._real)
+            this._leaveOut(targetId, sessionId);
+          return undefined;
+        }
+      }
+      if (real !== this._real)
+        return undefined;
       this._sessions.set(sessionId, targetId);
       this._attached.set(targetId, sessionId);
-      const info = this._shared.info(targetId);
-      const opener = this._shared.openers.get(targetId) ?? info?.openerId;
-      const waiting = this._shared.isHeld(targetId);
-      this._send({ method: 'Target.attachedToTarget', params: {
-        sessionId,
-        targetInfo: {
-          targetId, type: info?.type ?? 'page', title: info?.title ?? '', url: info?.url ?? 'about:blank', attached: true,
-          canAccessOpener: false, browserContextId: info?.browserContextId,
-          ...(opener && this._owns(opener) ? { openerId: opener } : {}),
-        },
-        waitingForDebugger: waiting,
-      } });
+      return sessionId;
     } finally {
       this._attaching.delete(targetId);
     }
   }
 
+  private async _answers(sessionId: string) {
+    return await this._real!.send('Page.getFrameTree', {}, sessionId, tabAnswerMs).then(() => true, () => false);
+  }
+
+  private _announce(targetId: string, sessionId: string) {
+    const info = this._shared.info(targetId);
+    const opener = this._shared.openers.get(targetId) ?? info?.openerId;
+    this._send({ method: 'Target.attachedToTarget', params: {
+      sessionId,
+      targetInfo: {
+        targetId, type: info?.type ?? 'page', title: info?.title ?? '', url: info?.url ?? 'about:blank', attached: true,
+        canAccessOpener: false, browserContextId: info?.browserContextId,
+        ...(opener && this._owns(opener) ? { openerId: opener } : {}),
+      },
+      waitingForDebugger: this._shared.isHeld(targetId),
+    } });
+  }
+
+  private _leaveOut(targetId: string, sessionId: string) {
+    const url = this._shared.info(targetId)?.url || targetId.slice(0, 8);
+    console.error(`proxy ${this.key}: tab ${targetId.slice(0, 8)} does not answer; left out until it does`);
+    this._host.onTabNote(this.key, `### Tab not responding\n${url} is stuck (a script that does not stop, most likely) and is ` +
+      `left out of your browser session until it answers again; if it stays silent for ${silentTabCloseMs / 1000} s it is closed.`);
+    const silent = { sessionId, since: Date.now(), timer: undefined as NodeJS.Timeout | undefined };
+    this._silent.set(targetId, silent);
+    const retry = async () => {
+      if (this._silent.get(targetId) !== silent || !this._real)
+        return;
+      if (!this._shared.info(targetId)) {
+        this._silent.delete(targetId);
+        return;
+      }
+      if (await this._answers(silent.sessionId)) {
+        if (this._silent.get(targetId) !== silent)
+          return;
+        this._silent.delete(targetId);
+        this._sessions.set(silent.sessionId, targetId);
+        this._attached.set(targetId, silent.sessionId);
+        this._announce(targetId, silent.sessionId);
+        this._host.onTabNote(this.key, `### Tab back\n${url} answers again and is back in your tab list.`);
+        return;
+      }
+      if (Date.now() - silent.since >= silentTabCloseMs) {
+        this._silent.delete(targetId);
+        console.error(`proxy ${this.key}: tab ${targetId.slice(0, 8)} silent for ${silentTabCloseMs / 1000} s; closing it`);
+        await this._shared.closeTarget(targetId);
+        this._host.onTabNote(this.key, `### Closed tabs\n${url} did not answer for ${silentTabCloseMs / 1000} s (stuck in a script) and was closed. Open the page again if you still need it.`);
+        return;
+      }
+      silent.timer = setTimeout(() => void retry(), tabRetryMs);
+    };
+    silent.timer = setTimeout(() => void retry(), tabRetryMs);
+  }
+
   private _onBrowserMessage(message: CdpMessage) {
+    // A late answer to the proxy's own command (one that timed out).
+    if (message.id !== undefined && message.id >= ownIdsFrom)
+      return;
+    // A tab left out is not Playwright's yet: nothing of its session goes there.
+    if (message.sessionId && this._isSilentSession(message.sessionId))
+      return;
     if (message.id !== undefined) {
       if (message.sessionId)
         this._screenshots.finish(message.sessionId, message.id, message.error);
@@ -398,6 +492,14 @@ class ProxyClient {
     if (message.method === 'Page.frameNavigated')
       void this._checkNavigation(message).catch(() => {});
     this._send(message);
+  }
+
+  private _isSilentSession(sessionId: string) {
+    for (const silent of this._silent.values()) {
+      if (silent.sessionId === sessionId)
+        return true;
+    }
+    return false;
   }
 
   // A frame of ours that lands on an internal address (a redirect, a page's
@@ -567,11 +669,12 @@ class ProxyClient {
       case 'Target.setAutoAttach': {
         // Our existing tabs are announced before the answer, as Chrome does.
         this._autoAttach = !!params.autoAttach;
+        // Checked all at once (a silent tab costs its wait only once), then
+        // announced in the original order, which is the agent's tab order.
         if (this._autoAttach) {
-          for (const [targetId, owner] of this._shared.owners) {
-            if (owner === this.key && this._shared.info(targetId)?.type === 'page')
-              await this._attach(targetId).catch(() => {});
-          }
+          const ours = [...this._shared.owners].filter(([targetId, owner]) => owner === this.key && this._shared.info(targetId)?.type === 'page').map(([targetId]) => targetId);
+          const sessions = await Promise.all(ours.map(targetId => this._attachQuietly(targetId).catch(() => undefined)));
+          ours.forEach((targetId, i) => sessions[i] && this._announce(targetId, sessions[i]!));
         }
         return this._reply(message, {});
       }
@@ -590,7 +693,7 @@ class ProxyClient {
         }
       }
       case 'Target.getTargets': {
-        const targetInfos = this._shared.pages().filter(info => this._owns(info.targetId))
+        const targetInfos = this._shared.pages().filter(info => this._owns(info.targetId) && !this._silent.has(info.targetId))
             .map(info => ({ ...info, attached: this._attached.has(info.targetId), canAccessOpener: false }));
         return this._reply(message, { targetInfos });
       }

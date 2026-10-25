@@ -48,8 +48,10 @@ code that never yields (a busy loop, after about 10 seconds): your browser
 session restarts on the next call, your tabs stay, a recording, trace or video
 and routes added from code end. What the code started inside a page (timers,
 fetches) is not stopped; close or reload that tab if it must end. When your
-session restarts, a tab of yours whose page is stuck in a script is closed and
-a JavaScript dialog left open is dismissed; the result says which.
+session reconnects, a tab of yours whose page does not answer (a script stuck
+in a loop) is left out of your tab list until it answers again and is closed
+after a minute of silence; a JavaScript dialog left open is dismissed. Results
+tell you each time.
 
 ## Tabs do not live forever
 

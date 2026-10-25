@@ -18,7 +18,8 @@ const executable = process.argv[2] ?? '/Applications/Google Chrome.app/Contents/
 const home = fs.mkdtempSync(path.join(os.tmpdir(), 'apm-hangs-'));
 const [cdpPort, gatewayPort] = [19371, 19372];
 const cli = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..', 'dist', 'cli.js');
-const env = { ...process.env, AGENTIC_PLAYWRIGHT_HOME: home };
+// Silent tabs are closed after 12 s here (60 s otherwise).
+const env = { ...process.env, AGENTIC_PLAYWRIGHT_HOME: home, AGENTIC_SILENT_TAB_CLOSE_MS: '12000' };
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 let failures = 0;
 const check = (name, ok, detail = '') => {
@@ -125,32 +126,44 @@ try {
 
   // A tab stuck in a script kept a new thread from connecting: every call of
   // the session failed with connectOverCDP's timeout, closing that tab too.
-  // It is closed before the thread starts; a page showing a dialog is not stuck.
-  // Different sites, so the two pages get their own renderer processes (two
+  // The proxy leaves a silent tab out until it answers, brings back one that
+  // recovers, closes one that stays silent; a dialog left open is dismissed.
+  // Different sites, so the pages get their own renderer processes (two
   // data: pages shared one, and the loop froze the dialog page too).
   const site = http.createServer((req, res) => {
     res.writeHead(200, { 'content-type': 'text/html' });
     res.end(`<title>${new URL(req.url, 'http://x').searchParams.get('t')}</title>`);
-  }).listen(0, '127.0.0.1');
+  }).listen(0, '::');
   await new Promise(r => site.on('listening', r));
   const port = site.address().port;
+  const listTitles = text => (text.split('### Result')[1] ?? '').split('###')[0];
   await call('browser_tabs', { action: 'new', url: `http://127.0.0.1:${port}/?t=dialog` });
   await call('browser_evaluate', { function: '() => { setTimeout(() => alert("hi"), 100); return 1; }' });
   await sleep(500);
   await call('browser_tabs', { action: 'new', url: `http://localhost:${port}/?t=stuck` });
   await call('browser_evaluate', { function: '() => { setTimeout(() => { for (;;) {} }, 200); return 1; }', timeout: 3 });
+  await call('browser_tabs', { action: 'new', url: `http://[::1]:${port}/?t=busy` });
+  await call('browser_evaluate', { function: '() => { setTimeout(() => { const end = Date.now() + 9000; while (Date.now() < end) {} }, 200); return 1; }', timeout: 1 });
   await sleep(800);
   await call('browser_run_code_unsafe', { code: 'async () => new Promise(() => {})', timeout: 1 });
   const restartedAt = Date.now();
   const afterStuck = await call('browser_tabs', { action: 'list' });
   const restartMs = Date.now() - restartedAt;
-  check('a stuck tab does not keep the session from reconnecting', restartMs < 12000 && !/connectOverCDP/.test(afterStuck), `${restartMs} ms`);
-  check('... the stuck tab was closed and the agent told', /### Closed tabs/.test(afterStuck) && !/\[stuck\]/.test(afterStuck),
-    afterStuck.split('### Closed tabs\n')[1]?.split('\n')[0]?.slice(0, 120));
+  check('a stuck tab does not keep the session from reconnecting', restartMs < 6000 && !/connectOverCDP/.test(afterStuck), `${restartMs} ms`);
+  check('... it is left out and the agent told', /### Tab not responding/.test(afterStuck) && !/\[stuck\]/.test(listTitles(afterStuck)),
+    afterStuck.split('### Tab not responding\n')[1]?.split('\n')[0]?.slice(0, 100));
   check('... a dialog left open is dismissed and the agent told', /### Dialog dismissed\nThe alert dialog "hi"/.test(afterStuck),
     afterStuck.split('### Dialog dismissed\n')[1]?.split('\n')[0]?.slice(0, 120));
-  check('... tabs that answer stay, a dialog included', /\[dialog\]/.test(afterStuck) && /\[t1\]|\[hangs\]/.test(afterStuck),
-    afterStuck.split('### Result')[1]?.split('###')[0].replace(/\n/g, ' ').slice(0, 200));
+  check('... tabs that answer stay, the dialog tab included, in their order',
+    /\[t1\][\s\S]*\[dialog\]/.test(listTitles(afterStuck)), listTitles(afterStuck).replace(/\n/g, ' ').slice(0, 200));
+  await sleep(8000);
+  const recovered = await call('browser_tabs', { action: 'list' });
+  check('a tab that was only busy comes back', /\[busy\]/.test(listTitles(recovered)) && /### Tab back/.test(recovered),
+    listTitles(recovered).replace(/\n/g, ' ').slice(0, 200));
+  await sleep(5000);
+  const closedLater = await call('browser_tabs', { action: 'list' });
+  check('a tab silent past the limit is closed and the agent told', /### Closed tabs/.test(closedLater) && !/\[stuck\]/.test(listTitles(closedLater)),
+    closedLater.split('### Closed tabs\n')[1]?.split('\n')[0]?.slice(0, 100));
   await call('browser_tabs', { action: 'select', index: 0 }).catch(() => {});
   site.close();
 
