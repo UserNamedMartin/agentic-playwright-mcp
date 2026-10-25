@@ -1065,11 +1065,14 @@ export class Gateway implements SessionHost, ProxyHost {
       return session;
     const index = this._transcriptIndex(session);
     const caller = await index?.lookup(toolUseId).catch(() => undefined);
-    if (!caller && !this._missLogged.has(session.info.id)) {
-      // Silent until now, which hid a whole class of misattributions.
+    // A miss while subagents are alive may be a subagent's call run in the
+    // chat: always logged. Otherwise only the first, to show a chat whose
+    // transcripts cannot be found at all.
+    const alive = index?.subagentsAlive() ?? false;
+    if (!caller && (alive || !this._missLogged.has(session.info.id))) {
       this._missLogged.add(session.info.id);
       console.error(`subagent lookup: tool_use ${toolUseId} of ${session.info.title} not found ` +
-        `(${index ? 'not in its transcripts' : 'transcripts unknown'}); the call goes to the chat`);
+        `(${index ? `not in its transcripts${alive ? ' after waiting, subagents alive' : ''}` : 'transcripts unknown'}); the call goes to the chat`);
     }
     if (caller?.kind !== 'subagent')
       return session;

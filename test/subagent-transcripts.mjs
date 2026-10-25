@@ -103,6 +103,32 @@ try {
   const m1 = await who(moved, movedFiles.m1, 'm1');
   check('the chat file\'s session id wins over a stale header', own(m1, 'm1'), m1.tabs.join(' '));
 
+  // 2c. Claude Code writes the tool_use to disk after the call has started
+  // (measured: 0.1-1 s later, more under load). The call must still go to the
+  // subagent that made it, not to the chat.
+  writeChat('local_late', { cliSessionId: 'sid-late' });
+  const late = await connect({ 'x-agent-session-id': 'local_late', 'x-agent-desktop-chat': 'local_late', 'x-agent-title': 'Late',
+    'x-agent-pid': String(process.pid), 'x-agent-config-dir': encodeURIComponent(configDir) });
+  const lateFiles = transcripts(configDir, 'sid-late', ['l1', 'l2']);
+  await late(lateFiles.main, 'browser_navigate', { url: `${base}/?who=main` });
+  for (const [tag, delay] of [['l1', 900], ['l2', 2500]]) {
+    const r = await who((file, name, args) => late(file, name, args, delay), lateFiles[tag], tag);
+    // A misrouted call lands in the chat's tab, where `own` alone would pass.
+    const lateMain = tabUrls(await late(lateFiles.main, 'browser_tabs', { action: 'list' }, 900));
+    check(`subagent call written to the transcript ${delay} ms late gets its own tabs`,
+      own(r, tag) && lateMain.length === 1 && lateMain[0].includes('who=main'), `${tag}: ${r.tabs.join(' ')}; chat: ${lateMain.join(' ')}`);
+  }
+
+  // 2d. Several subagents and the chat at once, every line late: each keeps
+  // its own tab (the live case had 3-5 subagents in parallel).
+  const parFiles = transcripts(configDir, 'sid-late', ['p1', 'p2', 'p3']);
+  const lateCall = (file, name, args) => late(file, name, args, 300 + Math.floor(Math.random() * 1200));
+  const par = await Promise.all(['p1', 'p2', 'p3'].map(tag => who(lateCall, parFiles[tag], tag)));
+  const parMain = tabUrls(await lateCall(lateFiles.main, 'browser_tabs', { action: 'list' }));
+  check('parallel subagents with late transcripts each keep their own tabs',
+    par.every(r => own(r, r.tag)) && parMain.length === 1 && parMain[0].includes('who=main'),
+    par.map(r => `${r.tag}: ${r.tabs.join(' ')}`).join('; ') + `; chat: ${parMain.join(' ')}`);
+
   // 3. No config dir in the headers: taken from the agent's environment.
   writeChat('local_envdir', { cliSessionId: 'sid-env' });
   const child = spawn(process.execPath, [self, 'client', 'local_envdir', configDir, 'sid-env'], {
@@ -127,10 +153,15 @@ async function connect(headers) {
   const transport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${gatewayPort}/mcp`), { requestInit: { headers } });
   const client = new Client({ name: 'subagent-transcripts-test', version: '1' });
   await client.connect(transport);
-  // Appends the tool_use to the caller's transcript first, as Claude Code does.
-  return async (file, name, args = {}) => {
+  // Appends the tool_use to the caller's transcript, `lateMs` after the call
+  // started (Claude Code's own write can come after the call).
+  return async (file, name, args = {}, lateMs = 0) => {
     const id = `toolu_${Math.random().toString(36).slice(2)}`;
-    fs.appendFileSync(file, JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id, name: `mcp__browser__${name}`, input: {} }] } }) + '\n');
+    const write = () => fs.appendFileSync(file, JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id, name: `mcp__browser__${name}`, input: {} }] } }) + '\n');
+    if (lateMs)
+      setTimeout(write, lateMs);
+    else
+      write();
     const res = await client.callTool({ name, arguments: args, _meta: { 'claudecode/toolUseId': id } });
     return res.content.map(c => c.text ?? '').join('\n');
   };

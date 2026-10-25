@@ -1,16 +1,29 @@
 // Automatic subagent detection for Claude Code. Every tools/call carries the
 // id of the tool_use block that made it (_meta["claudecode/toolUseId"]), and
-// Claude Code appends that block to the caller's transcript before running the
-// tool: the main agent's to <session>.jsonl, each subagent's to
-// <session>/subagents/agent-<id>.jsonl (with agent-<id>.meta.json holding its
-// description). Indexing those files tells the gateway which agent is calling,
-// so subagents get their own tab group without having to do anything.
+// Claude Code appends that block to the caller's transcript: the main agent's
+// to <session>.jsonl, each subagent's to <session>/subagents/agent-<id>.jsonl
+// (with agent-<id>.meta.json holding its description). Indexing those files
+// tells the gateway which agent is calling, so subagents get their own tab
+// group without having to do anything.
+//
+// The line is written asynchronously and often reaches the disk after the
+// call has arrived (measured with Claude Code 2.1.267: 0.1-1 s, the first call
+// of a parallel batch slowest). So a lookup waits for it while any subagent may
+// be calling; giving up early sent subagents' calls to the parent chat.
 import fs from 'node:fs';
 import path from 'node:path';
 
 const scanChunkBytes = 4 * 1024 * 1024;
 // Tool calls remembered per chat; a lookup is for a call made just now.
 const maxCallers = 5000;
+// While subagents are alive, a call waits this long for its tool_use line.
+const liveSubagentWaitMs = 5000;
+// Without live subagents only the chat itself can be calling.
+const quickWaitMs = 250;
+const rescanMs = 25;
+// A subagent whose transcript was written this recently may still be calling
+// (subagents write their transcript on every turn).
+const subagentAliveMs = 10 * 60 * 1000;
 
 export type Caller = { kind: 'main' } | { kind: 'subagent'; agentId: string; description: string };
 
@@ -23,6 +36,7 @@ export class TranscriptIndex {
   private _descriptions = new Map<string, string>();
   private _customTitle: string | undefined;
   private _scanning: Promise<void> | undefined;
+  private _newestSubagentWrite = 0;
 
   private _onTitleChange: (() => void) | undefined;
 
@@ -33,15 +47,24 @@ export class TranscriptIndex {
     this._onTitleChange = onTitleChange;
   }
 
+  // Waits for the call's tool_use line; a found id answers at once, so the
+  // chat's own calls wait only for the write itself.
   async lookup(toolUseId: string): Promise<Caller | undefined> {
-    for (let attempt = 0; attempt < 5; attempt++) {
+    const start = Date.now();
+    for (;;) {
       await this._scanSoon();
       const caller = this._callers.get(toolUseId);
       if (caller)
         return caller;
-      await new Promise(r => setTimeout(r, 50));
+      if (Date.now() - start >= (this.subagentsAlive() ? liveSubagentWaitMs : quickWaitMs))
+        return undefined;
+      await new Promise(r => setTimeout(r, rescanMs));
     }
-    return undefined;
+  }
+
+  // Whether a subagent of this chat wrote its transcript recently.
+  subagentsAlive(): boolean {
+    return Date.now() - this._newestSubagentWrite < subagentAliveMs;
   }
 
   // The chat's title as set with /rename in the Claude Code CLI, if any.
@@ -90,7 +113,10 @@ export class TranscriptIndex {
   private async _scanFile(file: string, caller: Caller) {
     let size: number;
     try {
-      size = (await fs.promises.stat(file)).size;
+      const stat = await fs.promises.stat(file);
+      size = stat.size;
+      if (caller.kind === 'subagent')
+        this._newestSubagentWrite = Math.max(this._newestSubagentWrite, stat.mtimeMs);
     } catch {
       return;
     }
