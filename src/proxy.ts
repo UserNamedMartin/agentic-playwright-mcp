@@ -425,8 +425,9 @@ class ProxyClient {
   private _leaveOut(targetId: string, sessionId: string) {
     const url = this._shared.info(targetId)?.url || targetId.slice(0, 8);
     console.error(`proxy ${this.key}: tab ${targetId.slice(0, 8)} does not answer; left out until it does`);
-    this._host.onTabNote(this.key, `### Tab not responding\n${url} is stuck (a script that does not stop, most likely) and is ` +
-      `left out of your browser session until it answers again; if it stays silent for ${silentTabCloseMs / 1000} s it is closed.`);
+    this._host.onTabNote(this.key, `### Tab not responding\n${url} does not answer (a script that does not stop, or a dialog left ` +
+      'open while the browser connection was lost, which nothing can answer any more) and is left out of your browser session ' +
+      `until it answers again; if it stays silent for ${silentTabCloseMs / 1000} s it is closed.`);
     const silent = { sessionId, since: Date.now(), timer: undefined as NodeJS.Timeout | undefined };
     this._silent.set(targetId, silent);
     const retry = async () => {
@@ -450,7 +451,7 @@ class ProxyClient {
         this._silent.delete(targetId);
         console.error(`proxy ${this.key}: tab ${targetId.slice(0, 8)} silent for ${silentTabCloseMs / 1000} s; closing it`);
         await this._shared.closeTarget(targetId);
-        this._host.onTabNote(this.key, `### Closed tabs\n${url} did not answer for ${silentTabCloseMs / 1000} s (stuck in a script) and was closed. Open the page again if you still need it.`);
+        this._host.onTabNote(this.key, `### Closed tabs\n${url} did not answer for ${silentTabCloseMs / 1000} s and was closed. Open the page again if you still need it.`);
         return;
       }
       silent.timer = setTimeout(() => void retry(), tabRetryMs);

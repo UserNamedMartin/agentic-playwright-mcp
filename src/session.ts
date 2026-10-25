@@ -89,6 +89,7 @@ export type SavedNetworkState = {
   lostRoutes: boolean;
   tracing?: boolean;
   recording?: boolean;
+  notes?: string[];
 };
 
 let knownPorts: { at: number; ports: string[] } | undefined;
@@ -648,6 +649,8 @@ export class AgentSession {
       lostRoutes: this._lostRoutes || this._codeRoutes,
       tracing: this._running.has('tracing'),
       recording: this._running.has('recording'),
+      // Notes not delivered yet (the agent hears them after the restart).
+      notes: [...this._notes],
     };
   }
 
@@ -657,6 +660,7 @@ export class AgentSession {
     this.offline = saved.offline;
     this._routes = saved.routes;
     this.emulation = new Map(saved.emulation);
+    this._notes.push(...saved.notes ?? []);
     if (saved.tracing)
       this._notes.push('### Tracing\nTracing stopped: the browser gateway restarted. Start it again if you still need it.');
     if (saved.recording)

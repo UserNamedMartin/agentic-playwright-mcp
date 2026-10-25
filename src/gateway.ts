@@ -235,6 +235,10 @@ export class Gateway implements SessionHost, ProxyHost {
     for (const { transport } of this._transports.values())
       await transport.close().catch(() => {});
     if (keepBrowser) {
+      // A dialog left open could never be answered after the restart: a new
+      // DevTools connection neither sees nor dismisses it (checked on Chrome
+      // 155), and its page answers nothing until it is gone.
+      await this._dismissOwnedDialogs();
       this._saveState();
     } else {
       for (const session of this.sessions.values())
@@ -246,6 +250,15 @@ export class Gateway implements SessionHost, ProxyHost {
     fs.rmSync(this._socketPath, { force: true });
     // Only disconnects; the supervisor closes the browser.
     this.shared?.dispose();
+  }
+
+  private async _dismissOwnedDialogs() {
+    for (const [targetId, owner] of this.owners) {
+      const dialog = await this.shared?.dismissDialog(targetId).catch(() => undefined);
+      if (dialog)
+        this.sessions.get(owner)?.note(`### Dialog dismissed\nThe ${dialog.type} dialog "${dialog.message.slice(0, 200)}" on ` +
+          `${this.shared.info(targetId)?.url || targetId.slice(0, 8)} was still open when the browser gateway restarted and was dismissed.`);
+    }
   }
 
   // Connects to the browser and sets everything up on it. Runs at startup

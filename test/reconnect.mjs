@@ -187,7 +187,13 @@ try {
   // The browser still runs an older copy of the extension (as after an
   // update): the new gateway reloads it and finds the groups again.
   const beforeRestart = tabIds(withLink);
+  // A dialog open across the restart: the new gateway never saw it open, and
+  // a page waiting on a dialog answers nothing. It must not be taken for a
+  // stuck page (left out, then closed).
+  // (After the test's own direct connection, which would wait on it too.)
   await inExtension(() => { self.apmVersion = 1; });
+  await a.call('browser_evaluate', { function: '() => { setTimeout(() => alert("across restart"), 100); return 1; }' });
+  await sleep(500);
   const stateFile = path.join(home, 'profiles', 'test', 'sessions.json');
   gateway.kill('SIGTERM');
   await new Promise(r => gateway.on('exit', r));
@@ -199,8 +205,11 @@ try {
     'x-agent-claude-session': claudeSession,
     'x-agent-config-dir': encodeURIComponent(configDir),
   });
-  const afterRestart = tabIds(await a2.call('browser_tabs', { action: 'list' }));
+  const afterRestartText = await a2.call('browser_tabs', { action: 'list' });
+  const afterRestart = tabIds(afterRestartText);
   check('tabs kept after a gateway restart', afterRestart.join() === beforeRestart.join(), afterRestart.join(' '));
+  check('a dialog open across the restart is dismissed, its tab kept', /### Dialog dismissed\nThe alert dialog "across restart"/.test(afterRestartText),
+    afterRestartText.split('\n### ').filter(p => /Dialog|Tab not/.test(p)).join(' | ').slice(0, 160));
   const versionNow = await inExtension(() => self.apmVersion);
   const versionOnDisk = Number(fs.readFileSync(new URL('../extension/sw.js', import.meta.url), 'utf8').match(/self\.apmVersion = (\d+)/)[1]);
   check('an older extension is reloaded', versionNow === versionOnDisk, `extension version ${versionNow}, on disk ${versionOnDisk}`);
