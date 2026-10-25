@@ -97,6 +97,31 @@ try {
   await call('browser_tabs', { action: 'close', index: 1 });
   await call('browser_tabs', { action: 'select', index: 0 });
 
+  // Agent code given up at its timeout must stop: a polling loop in run_code
+  // kept hammering a site for half an hour after "gave up" (live, 2026-10-25).
+  const counter = '() => window.__n || 0';
+  await call('browser_evaluate', { function: '() => { window.__n = 0; }' });
+  const loop = `async (page) => { for (;;) { await page.evaluate(() => { window.__n = (window.__n || 0) + 1; }); await page.waitForTimeout(100); } }`;
+  const gaveUp = await call('browser_run_code_unsafe', { code: loop, timeout: 2 });
+  await sleep(500);
+  const n1 = Number((await call('browser_evaluate', { function: counter })).match(/### Result\n(\d+)/)?.[1]);
+  await sleep(1500);
+  const n2 = Number((await call('browser_evaluate', { function: counter })).match(/### Result\n(\d+)/)?.[1]);
+  check('run_code given up at its timeout stops running', /did not finish within 2 s/.test(gaveUp) && n1 > 0 && n1 === n2, `counter ${n1} -> ${n2}`);
+  check('... and says its code was stopped', /code was stopped/.test(gaveUp), gaveUp.split('\n')[0]);
+  const cancelCode = new AbortController();
+  const cancelledCode = call('browser_run_code_unsafe', { code: loop }, { signal: cancelCode.signal }).catch(() => {});
+  await sleep(1000);
+  cancelCode.abort('agent interrupted');
+  await cancelledCode;
+  await sleep(500);
+  const c1 = Number((await call('browser_evaluate', { function: counter })).match(/### Result\n(\d+)/)?.[1]);
+  await sleep(1500);
+  const c2 = Number((await call('browser_evaluate', { function: counter })).match(/### Result\n(\d+)/)?.[1]);
+  check('cancelled run_code stops running', c1 > n2 && c1 === c2, `counter ${c1} -> ${c2}`);
+  const tabsLeft = await call('browser_tabs', { action: 'list' });
+  check('tabs survive stopping the code', /hangs|t1/.test(tabsLeft), tabsLeft.split('\n').slice(0, 3).join(' '));
+
   const slow = call('browser_evaluate', { function: '() => new Promise(r => setTimeout(() => r("slow"), 3000))' });
   await sleep(200);
   const waiting = await call('browser_evaluate', { function: '() => 1 + 1' });

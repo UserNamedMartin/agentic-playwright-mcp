@@ -397,8 +397,18 @@ export class AgentSession {
     const state = { abandoned: false as boolean, id: 0 };
     const call = this._callTool(name, args, state);
     call.catch(() => {});
+    // The agent's own code runs in the session's thread and would go on
+    // acting on sites after the agent was told it was given up (a polling
+    // loop kept hitting a site for half an hour): end the thread, as for code
+    // that never yields. Tabs stay; the next call starts a new thread.
+    const stopsCode = name === 'browser_run_code_unsafe';
     const giveUp = () => {
       state.abandoned = true;
+      if (stopsCode && this._thread) {
+        console.error(`${this.info.title}: ${name} given up; ending the thread so the code stops`);
+        this._retire();
+        return;
+      }
       this._thread?.worker.postMessage({ type: 'abandon', id: state.id } satisfies ToWorker);
     };
     const timedOut = new Promise<any>(resolve => {
@@ -406,7 +416,11 @@ export class AgentSession {
         giveUp();
         const url = this._currentUrl;
         console.error(`${name} from ${this.info.title} gave up after ${seconds} s`);
-        resolve(errorResult(`${name} did not finish within ${seconds} s and was given up, so your next calls are not ` +
+        resolve(errorResult(stopsCode
+          ? `${name} did not finish within ${seconds} s and was given up; your code was stopped (the browser session ` +
+            'restarts on your next call, your tabs stay open). Anything it started in the page itself (timers, ' +
+            'fetches) may still run. If code really needs longer, pass "timeout" in seconds.'
+          : `${name} did not finish within ${seconds} s and was given up, so your next calls are not ` +
           'blocked by it. It may still be running in the page (for example an evaluate waiting on a promise that ' +
           `never resolves): check the page before repeating it.${url ? ` Your current tab is ${url}; if that page ` +
           'itself is stuck (a busy script), close it with browser_tabs action "close".' : ''} If a call really needs ` +
