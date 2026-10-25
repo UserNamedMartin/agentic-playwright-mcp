@@ -4,7 +4,7 @@ area: subagents
 found: 2026-10-25
 filed: 2026-10-25
 reproducible: yes
-fixed-in: 9d17f01 (test/subagent-transcripts.mjs, late-transcript and parallel cases)
+fixed-in: 9e43c5f (root; 9d17f01 was a mitigation) — test/subagent-transcripts.mjs late, parallel, idle and unnamed-call cases
 ---
 
 # Subagent calls go to the parent chat when Claude Code writes the tool_use to its transcript after the call arrives
@@ -73,3 +73,12 @@ subagent of the chat wrote its transcript in the last 10 minutes (`subagentsAliv
 answers at once, so the chat's own calls wait only for Claude Code's write. `_autoTarget` logs every miss that
 happens while subagents are alive. Without the fix the new cases fail exactly like the live chat: every subagent's
 navigation lands in the chat's one tab.
+
+## Root fix
+
+9d17f01 only widened the guess. Its "subagent wrote its transcript in the last 10 minutes" rule still sent a subagent
+that had been quiet (a long shell command) to the parent after 250 ms, and any line later than 5 s still landed in the
+parent. The real defect was the fallback itself: an unidentified call ran in the chat's session. 9e43c5f: every call of a
+chat is written to one of its transcripts, so the lookup waits for the line (30 s cap) and a call that is never named is
+refused ("repeat the call"); only a chat whose transcripts cannot be found at all keeps routing to itself. Cost: each
+browser call in Claude Code waits for its own line (0.1–1 s measured).
