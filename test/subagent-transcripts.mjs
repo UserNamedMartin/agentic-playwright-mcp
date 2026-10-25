@@ -45,7 +45,8 @@ const chatsDir = path.join(appSupport, 'Claude-test', 'claude-code-sessions', 'a
 fs.mkdirSync(chatsDir, { recursive: true });
 const writeChat = (id, chat) => fs.writeFileSync(path.join(chatsDir, `${id}.json`), JSON.stringify({ sessionId: id, title: id, ...chat }));
 const cli = path.resolve(path.dirname(self), '..', 'dist', 'cli.js');
-const env = { ...process.env, AGENTIC_PLAYWRIGHT_HOME: home, AGENTIC_CLAUDE_APP_SUPPORT: appSupport };
+// A short cap for the call whose line never comes (30 s otherwise).
+const env = { ...process.env, AGENTIC_PLAYWRIGHT_HOME: home, AGENTIC_CLAUDE_APP_SUPPORT: appSupport, AGENTIC_TRANSCRIPT_WAIT_MS: '4000' };
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 let failures = 0;
 const check = (name, ok, detail = '') => {
@@ -128,6 +129,27 @@ try {
   check('parallel subagents with late transcripts each keep their own tabs',
     par.every(r => own(r, r.tag)) && parMain.length === 1 && parMain[0].includes('who=main'),
     par.map(r => `${r.tag}: ${r.tabs.join(' ')}`).join('; ') + `; chat: ${parMain.join(' ')}`);
+
+  // 2e. A subagent that wrote nothing for a long time (a long shell command)
+  // is still a subagent: no "recently alive" guess may send it to the chat.
+  // Its own chat, so the gateway has never seen the subagent's file fresh.
+  writeChat('local_idle', { cliSessionId: 'sid-idle' });
+  const idleChat = await connect({ 'x-agent-session-id': 'local_idle', 'x-agent-desktop-chat': 'local_idle', 'x-agent-title': 'Idle',
+    'x-agent-pid': String(process.pid), 'x-agent-config-dir': encodeURIComponent(configDir) });
+  const idleFiles = transcripts(configDir, 'sid-idle', ['i1']);
+  const old = new Date(Date.now() - 30 * 60 * 1000);
+  fs.utimesSync(idleFiles.i1, old, old);
+  await idleChat(idleFiles.main, 'browser_navigate', { url: `${base}/?who=main` });
+  const idle = await who((file, name, args) => idleChat(file, name, args, 1200), idleFiles.i1, 'i1');
+  const idleMain = tabUrls(await idleChat(idleFiles.main, 'browser_tabs', { action: 'list' }));
+  check('a subagent idle for 30 min, its line 1.2 s late, gets its own tabs',
+    own(idle, 'i1') && idleMain.length === 1 && idleMain[0].includes('who=main'), `i1: ${idle.tabs.join(' ')}; chat: ${idleMain.join(' ')}`);
+
+  // 2f. A call whose line never appears is refused, not run in the chat.
+  const ghost = await late(path.join(path.dirname(lateFiles.main), 'nowhere.jsonl'), 'browser_navigate', { url: `${base}/?who=ghost` });
+  const ghostMain = tabUrls(await late(lateFiles.main, 'browser_tabs', { action: 'list' }));
+  check('a call nobody\'s transcript names is refused', /could not tell which agent/.test(ghost), ghost.split('\n')[0]);
+  check('... and the chat\'s tab is untouched', ghostMain.length === 1 && ghostMain[0].includes('who=main'), ghostMain.join(' '));
 
   // 3. No config dir in the headers: taken from the agent's environment.
   writeChat('local_envdir', { cliSessionId: 'sid-env' });

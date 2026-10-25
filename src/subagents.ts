@@ -8,22 +8,27 @@
 //
 // The line is written asynchronously and often reaches the disk after the
 // call has arrived (measured with Claude Code 2.1.267: 0.1-1 s, the first call
-// of a parallel batch slowest). So a lookup waits for it while any subagent may
-// be calling; giving up early sent subagents' calls to the parent chat.
+// of a parallel batch slowest). Every call of a chat, the chat's own included,
+// is written to one of these files, so a lookup waits until the line appears.
+// It never guesses: a call whose line does not appear is refused by the
+// gateway rather than run in some agent's session (guessing "the chat" put
+// subagents' calls into the parent's tabs three times, each time for another
+// reason).
+
 import fs from 'node:fs';
 import path from 'node:path';
 
 const scanChunkBytes = 4 * 1024 * 1024;
 // Tool calls remembered per chat; a lookup is for a call made just now.
 const maxCallers = 5000;
-// While subagents are alive, a call waits this long for its tool_use line.
-const liveSubagentWaitMs = 5000;
-// Without live subagents only the chat itself can be calling.
-const quickWaitMs = 250;
-const rescanMs = 25;
-// A subagent whose transcript was written this recently may still be calling
-// (subagents write their transcript on every turn).
-const subagentAliveMs = 10 * 60 * 1000;
+// How long a call waits for its tool_use line before it is refused. The
+// write normally lands within a second; this only bounds a line that never
+// comes (a transcript layout this code does not know).
+const lookupCapMs = Number(process.env.AGENTIC_TRANSCRIPT_WAIT_MS) || 30_000;
+const fastRescanMs = 25;
+const slowRescanMs = 200;
+// Rescan quickly at first, when the line is due.
+const fastPhaseMs = 3_000;
 
 export type Caller = { kind: 'main' } | { kind: 'subagent'; agentId: string; description: string };
 
@@ -36,7 +41,6 @@ export class TranscriptIndex {
   private _descriptions = new Map<string, string>();
   private _customTitle: string | undefined;
   private _scanning: Promise<void> | undefined;
-  private _newestSubagentWrite = 0;
 
   private _onTitleChange: (() => void) | undefined;
 
@@ -47,24 +51,26 @@ export class TranscriptIndex {
     this._onTitleChange = onTitleChange;
   }
 
-  // Waits for the call's tool_use line; a found id answers at once, so the
-  // chat's own calls wait only for the write itself.
-  async lookup(toolUseId: string): Promise<Caller | undefined> {
+  // Whether the chat's transcripts were found; without them nothing can be
+  // told apart, and every call is the chat's.
+  located(): boolean {
+    return !!this._findDir();
+  }
+
+  // Waits for the call's tool_use line in the chat's transcripts; undefined
+  // if it did not appear within the cap (or the wait was aborted).
+  async lookup(toolUseId: string, signal?: AbortSignal): Promise<Caller | undefined> {
     const start = Date.now();
     for (;;) {
       await this._scanSoon();
       const caller = this._callers.get(toolUseId);
       if (caller)
         return caller;
-      if (Date.now() - start >= (this.subagentsAlive() ? liveSubagentWaitMs : quickWaitMs))
+      const waited = Date.now() - start;
+      if (waited >= lookupCapMs || signal?.aborted)
         return undefined;
-      await new Promise(r => setTimeout(r, rescanMs));
+      await new Promise(r => setTimeout(r, waited < fastPhaseMs ? fastRescanMs : slowRescanMs));
     }
-  }
-
-  // Whether a subagent of this chat wrote its transcript recently.
-  subagentsAlive(): boolean {
-    return Date.now() - this._newestSubagentWrite < subagentAliveMs;
   }
 
   // The chat's title as set with /rename in the Claude Code CLI, if any.
@@ -113,10 +119,7 @@ export class TranscriptIndex {
   private async _scanFile(file: string, caller: Caller) {
     let size: number;
     try {
-      const stat = await fs.promises.stat(file);
-      size = stat.size;
-      if (caller.kind === 'subagent')
-        this._newestSubagentWrite = Math.max(this._newestSubagentWrite, stat.mtimeMs);
+      size = (await fs.promises.stat(file)).size;
     } catch {
       return;
     }

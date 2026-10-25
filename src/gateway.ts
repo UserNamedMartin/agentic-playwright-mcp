@@ -1004,9 +1004,12 @@ export class Gateway implements SessionHost, ProxyHost {
       if (request.params.name === subagentTool.name)
         return this._startSubagent(session, String(args.label ?? 'subagent'));
       const toolUseId = (request.params._meta as any)?.['claudecode/toolUseId'];
-      const target = agent === undefined
-        ? await this._autoTarget(session, toolUseId)
+      const routed = agent === undefined
+        ? await this._autoTarget(session, toolUseId, extra.signal)
         : this.sessions.get(`${session.info.id}#${agent}`);
+      if (routed && 'error' in routed)
+        return routed.error;
+      const target = routed;
       if (!target)
         return errorResult(`Unknown agent "${agent}". Call ${subagentTool.name} first and pass the id it returns.`);
       if (request.params.name === tabLinkTool.name)
@@ -1059,22 +1062,32 @@ export class Gateway implements SessionHost, ProxyHost {
   }
 
   // Claude Code subagents are recognized from the chat's transcripts, so they
-  // get their own sub-session without passing anything.
-  private async _autoTarget(session: AgentSession, toolUseId: unknown): Promise<AgentSession> {
+  // get their own sub-session without passing anything. A call is run only in
+  // the session of the agent its transcript line names; one whose line never
+  // appears is refused, never given to the chat (that is how subagents' calls
+  // ended up in their parent's tabs).
+  private async _autoTarget(session: AgentSession, toolUseId: unknown, signal?: AbortSignal): Promise<AgentSession | { error: any }> {
     if (typeof toolUseId !== 'string')
       return session;
     const index = this._transcriptIndex(session);
-    const caller = await index?.lookup(toolUseId).catch(() => undefined);
-    // A miss while subagents are alive may be a subagent's call run in the
-    // chat: always logged. Otherwise only the first, to show a chat whose
-    // transcripts cannot be found at all.
-    const alive = index?.subagentsAlive() ?? false;
-    if (!caller && (alive || !this._missLogged.has(session.info.id))) {
-      this._missLogged.add(session.info.id);
-      console.error(`subagent lookup: tool_use ${toolUseId} of ${session.info.title} not found ` +
-        `(${index ? `not in its transcripts${alive ? ' after waiting, subagents alive' : ''}` : 'transcripts unknown'}); the call goes to the chat`);
+    if (!index?.located()) {
+      if (!this._missLogged.has(session.info.id)) {
+        this._missLogged.add(session.info.id);
+        console.error(`subagent lookup: transcripts of ${session.info.title} unknown; its calls go to the chat`);
+      }
+      return session;
     }
-    if (caller?.kind !== 'subagent')
+    const started = Date.now();
+    const caller = await index.lookup(toolUseId, signal).catch(() => undefined);
+    if (!caller) {
+      if (signal?.aborted)
+        return session;
+      console.error(`subagent lookup: tool_use ${toolUseId} of ${session.info.title} not in its transcripts after ` +
+        `${Math.round((Date.now() - started) / 1000)} s; refused`);
+      return { error: errorResult('The browser could not tell which agent of this chat made this call (its record did not ' +
+        'appear in the chat\'s transcripts), so it was not run, to keep it out of another agent\'s tabs. Repeat the call.') };
+    }
+    if (caller.kind !== 'subagent')
       return session;
     const id = `${session.info.id}#${caller.agentId}`;
     let sub = this.sessions.get(id);
