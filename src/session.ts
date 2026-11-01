@@ -113,8 +113,11 @@ const lostOnReconnect: Record<string, string> = {
   tracing: '### Tracing\nTracing stopped: the browser connection dropped and was restored. Start it again if you still need it.',
 };
 
-// A thread that does not answer a ping for this long while a call runs is
-// stuck (a busy loop in an agent's code) and is ended.
+// A thread whose event loop does not yield for this long while a call runs is
+// stuck (a busy loop in an agent's code) and is ended. Counted in the
+// gateway's own running time, not by the clock: on a loaded machine (or a
+// suspended process) neither thread runs and pongs come late, though nothing
+// is stuck.
 const stuckMs = 10_000;
 const pingMs = 2_000;
 // A thread with nothing to do for this long is ended (it is started again on
@@ -452,10 +455,23 @@ export class AgentSession {
   private async _send(thread: Thread, name: string, args: any, tab: string | undefined, state: { id: number }) {
     const id = state.id = ++this._lastId;
     const answer = new Promise<FromWorker & { type: 'result' }>(resolve => thread.calls.set(id, resolve));
-    thread.lastPong = Date.now();
     let n = 0;
+    let lastPong = thread.lastPong = Date.now();
+    let lastTick = lastPong;
+    let idle = thread.worker.performance.eventLoopUtilization().idle;
+    let silentMs = 0;
     const pinger = setInterval(() => {
-      if (Date.now() - thread.lastPong > stuckMs) {
+      // A late tick: the gateway did not run in between, so neither did the
+      // thread's chance to answer; that time does not count against it.
+      const now = Date.now();
+      const ran = Math.min(now - lastTick, pingMs);
+      lastTick = now;
+      // It answered, or its event loop waited for something (idle time grew).
+      const nowIdle = thread.worker.performance.eventLoopUtilization().idle;
+      silentMs = thread.lastPong !== lastPong || nowIdle > idle ? 0 : silentMs + ran;
+      lastPong = thread.lastPong;
+      idle = nowIdle;
+      if (silentMs >= stuckMs) {
         console.error(`${this.info.title}: browser thread stopped answering during ${name}; ending it`);
         thread.stuck = true;
         this._retire();

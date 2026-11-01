@@ -124,6 +124,25 @@ try {
   const tabsLeft = await call('browser_tabs', { action: 'list' });
   check('tabs survive stopping the code', /hangs|t1/.test(tabsLeft), tabsLeft.split('\n').slice(0, 3).join(' '));
 
+  // Code that never yields ends its thread after about 10 s.
+  const loopStarted = Date.now();
+  const busy = await call('browser_run_code_unsafe', { code: 'async () => { for (;;) {} }', timeout: 60 });
+  const busyMs = Date.now() - loopStarted;
+  check('code that never yields ends its thread', /never gave the browser session a chance/.test(busy) && busyMs < 20000, `${busyMs} ms`);
+  const afterBusy = await quick();
+  check('... and the next call runs', afterBusy.answered, `${afterBusy.ms} ms`);
+
+  // A gateway that gets no CPU (a loaded machine, here: suspended) is not a
+  // thread that never yields: a waiting call must not be ended for it. Live,
+  // 2026-10-28: under load ~40 a plain browser_navigate was ended as stuck.
+  const waitCall = call('browser_wait_for', { time: 14 });
+  await sleep(1000);
+  process.kill(gateway.pid, 'SIGSTOP');
+  await sleep(12000);
+  process.kill(gateway.pid, 'SIGCONT');
+  const waited = await waitCall;
+  check('a suspended gateway does not end a waiting thread', !/never gave/.test(waited) && /Waited for 14/.test(waited), waited.split('\n')[0]);
+
   // A tab stuck in a script kept a new thread from connecting: every call of
   // the session failed with connectOverCDP's timeout, closing that tab too.
   // The proxy leaves a silent tab out until it answers, brings back one that
