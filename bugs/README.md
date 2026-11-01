@@ -7,7 +7,7 @@ open ones before they start; an agent that hits a problem while using the browse
 
 | File | Status | Area | Found | Summary |
 |---|---|---|---|---|
-| [2026-11-01-starved-gateway-kills-healthy-thread.md](2026-11-01-starved-gateway-kills-healthy-thread.md) | open | sessions | 2026-10-28 | Under heavy machine load a healthy session thread is ended as "stuck" and the reconnect then times out (connectOverCDP 15 s) |
+| [2026-11-01-starved-gateway-kills-healthy-thread.md](2026-11-01-starved-gateway-kills-healthy-thread.md) | fixed | sessions | 2026-10-28 | Under heavy machine load a healthy session thread is ended as "stuck" and the reconnect then times out (connectOverCDP 15 s) |
 | [2026-10-25-dialog-across-restart-closes-tab.md](2026-10-25-dialog-across-restart-closes-tab.md) | fixed | sessions | 2026-10-25 | A dialog open across a gateway restart cannot be seen or dismissed by the new connection; its tab looks stuck and is closed |
 | [2026-10-25-waiting-input-file-hides-title.md](2026-10-25-waiting-input-file-hides-title.md) | fixed | sessions | 2026-10-25 | The desktop app's waiting-input/<id>.json marker is read as the chat itself: tab groups lose their title and the chat's CLI session id while it waits |
 | [2026-10-25-stuck-tab-blocks-reconnect.md](2026-10-25-stuck-tab-blocks-reconnect.md) | fixed | proxy | 2026-10-25 | A tab stuck in a script keeps a new session thread from connecting: every call, even closing that tab, fails with connectOverCDP's 15 s timeout |

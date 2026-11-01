@@ -1,11 +1,11 @@
 ---
-status: open
+status: fixed
 area: sessions
 found: 2026-10-28
 filed: 2026-11-01
 reproducible: yes (under heavy machine load; see Steps)
 suspect: gateway
-fixed-in:
+fixed-in: 70b2123 (pinger, test/hangs.mjs suspended-gateway case), c1d7af8 (ProcessType, test/service.mjs)
 ---
 
 # Under heavy machine load the gateway ends a healthy session thread as "stuck", and the reconnect then times out
@@ -73,6 +73,21 @@ Two parts (hypothesis backed by the evidence above):
    `test/hangs.mjs`; the call must finish normally, and the existing busy-loop case must still end its thread.
 2. Write `ProcessType` `Interactive` into the service plist (src/service.ts), so the gateway is scheduled like the
    apps it serves. Check after installing: `ps -o pri` of the gateway is 31, not 20.
+
+## Fix
+
+- 70b2123: the pinger counts silence in the gateway's own running time (a late tick counts at most one ping
+  interval) and resets it whenever the worker's event loop shows idle time
+  (`worker.performance.eventLoopUtilization()`), so only code that never yields is ended. test/hangs.mjs: a waiting
+  call survives the gateway being suspended for 12 s (failed before: "never gave the browser session a chance");
+  code that never yields still ends its thread (~12 s; that case had no test before).
+- c1d7af8: the service plist asks for `ProcessType` `Interactive` (`servicePlist()`, test/service.mjs). Takes effect
+  when the service is installed again (`service install <profile>`); check `ps -o pri` of the gateway: 31.
+
+Not covered: a worker thread starved while the gateway's main thread runs on time still looks stuck after 10 s of
+silence (from outside a waiting event loop and a busy one look the same until the loop returns); the Interactive
+process type is what keeps that from happening. Renderers of agent tabs at background priority are Chrome's choice;
+a tab that goes silent under load is left out and comes back (2026-10-25-stuck-tab-blocks-reconnect).
 
 ## Workaround
 
