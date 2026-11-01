@@ -7,7 +7,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homeDir, type Profile } from './profiles.js';
 
-function label(profile: Profile) {
+function label(profile: Pick<Profile, 'name'>) {
   return `dev.agentic-playwright-mcp.${profile.name}`;
 }
 
@@ -18,11 +18,24 @@ function plistPath(profile: Profile) {
 export function installService(profile: Profile) {
   if (process.platform !== 'darwin')
     throw new Error('service install currently supports macOS only; run "agentic-playwright-mcp start <profile>" with your own supervisor.');
-  const cli = fileURLToPath(new URL('./cli.js', import.meta.url));
   const log = path.join(homeDir, 'profiles', profile.name, 'gateway.log');
   fs.mkdirSync(path.dirname(log), { recursive: true });
+  const file = plistPath(profile);
+  if (fs.existsSync(file))
+    launchctl(['bootout', `gui/${process.getuid!()}`, file], true);
+  fs.writeFileSync(file, servicePlist(profile));
+  launchctl(['bootstrap', `gui/${process.getuid!()}`, file]);
+  console.log(`Installed ${label(profile)}; logs: ${log}`);
+}
+
+// Interactive: without a ProcessType launchd throttles the job below the
+// user's own work, and on a loaded machine the gateway starved (its sessions'
+// calls timed out) while the chats it serves kept running.
+export function servicePlist(profile: Pick<Profile, 'name'>) {
+  const cli = fileURLToPath(new URL('./cli.js', import.meta.url));
+  const log = path.join(homeDir, 'profiles', profile.name, 'gateway.log');
   const args = [process.execPath, cli, 'start', profile.name].map(a => `    <string>${escapeXml(a)}</string>`).join('\n');
-  const plist = `<?xml version="1.0" encoding="UTF-8"?>
+  return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
@@ -33,7 +46,8 @@ ${args}
   </array>
 ${process.env.AGENTIC_PLAYWRIGHT_HOME ? `  <key>EnvironmentVariables</key>
   <dict><key>AGENTIC_PLAYWRIGHT_HOME</key><string>${escapeXml(homeDir)}</string></dict>
-` : ''}  <key>RunAtLoad</key><true/>
+` : ''}  <key>ProcessType</key><string>Interactive</string>
+  <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>10</integer>
   <key>StandardOutPath</key><string>${escapeXml(log)}</string>
@@ -41,12 +55,6 @@ ${process.env.AGENTIC_PLAYWRIGHT_HOME ? `  <key>EnvironmentVariables</key>
 </dict>
 </plist>
 `;
-  const file = plistPath(profile);
-  if (fs.existsSync(file))
-    launchctl(['bootout', `gui/${process.getuid!()}`, file], true);
-  fs.writeFileSync(file, plist);
-  launchctl(['bootstrap', `gui/${process.getuid!()}`, file]);
-  console.log(`Installed ${label(profile)}; logs: ${log}`);
 }
 
 export function isServiceInstalled(profile: Profile) {
