@@ -57,7 +57,9 @@ const url = p => `http://127.0.0.1:${site.address().port}/${p}`;
 fs.mkdirSync(path.join(home, 'browser-data', 'Default'), { recursive: true });
 fs.writeFileSync(path.join(home, 'browser-data', 'Default', 'Preferences'), JSON.stringify({ download: { default_directory: path.join(home, 'browser-downloads'), prompt_for_download: false } }));
 const browser = spawn(executable, [`--remote-debugging-port=${browserPort}`, `--user-data-dir=${path.join(home, 'browser-data')}`,
-  '--enable-unsafe-extension-debugging', '--no-first-run', '--no-default-browser-check', '--headless=new', 'about:blank'], { stdio: 'ignore' });
+  '--enable-unsafe-extension-debugging', '--no-first-run', '--no-default-browser-check', '--headless=new',
+  // Killed with SIGKILL at the end: no Chrome code-sign clone to leave behind.
+  '--disable-features=MacAppCodeSignClone', 'about:blank'], { stdio: 'ignore' });
 const sockets = new Set();
 const proxy = net.createServer(client => {
   const upstream = net.connect(browserPort, '127.0.0.1');

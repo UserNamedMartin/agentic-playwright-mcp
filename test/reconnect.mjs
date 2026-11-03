@@ -36,7 +36,9 @@ fs.writeFileSync(path.join(home, 'browser-data', 'Default', 'Preferences'), JSON
 // Browser, headless, on its own port.
 const browserProc = spawn(executable, [
   `--remote-debugging-port=${browserPort}`, `--user-data-dir=${path.join(home, 'browser-data')}`,
-  '--enable-unsafe-extension-debugging', '--no-first-run', '--no-default-browser-check', '--headless=new', 'about:blank',
+  '--enable-unsafe-extension-debugging', '--no-first-run', '--no-default-browser-check', '--headless=new',
+  // Killed with SIGKILL at the end: no Chrome code-sign clone to leave behind.
+  '--disable-features=MacAppCodeSignClone', 'about:blank',
 ], { stdio: 'ignore' });
 
 // Proxy that can drop every connection on demand.

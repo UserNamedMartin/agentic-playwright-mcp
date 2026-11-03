@@ -148,7 +148,10 @@ Read README.md first for what the project does. This file is about changing it.
 - Tests must never put anything on the user's screen: quitting Chrome while a
   download runs shows a "Download is in progress" prompt even for a headless
   browser, so tests end their downloads and kill their own browser with
-  SIGKILL. `browser_annotate` opens the Playwright Dashboard (its own visible
+  SIGKILL. A browser a test spawns itself gets
+  `--disable-features=MacAppCodeSignClone` (headless profiles get it from
+  `browserArgs`): otherwise every kill leaves a ~2 GB Chrome code-sign clone
+  in `$TMPDIR/../X/`. `browser_annotate` opens the Playwright Dashboard (its own visible
   browser, which outlives the gateway) and `browser_show_tab` raises the
   window: tests do not call them.
 - Tests must not write into the user's folders: a test that starts its own
@@ -245,7 +248,7 @@ chat gets for another chat's secret.
 ## Checking changes
 
 `npm run build`, then `node test/reconnect.mjs`, `node test/permissions.mjs`,
-`node test/passkeys.mjs`, `node test/forks.mjs`, `node test/subagent-transcripts.mjs`, `node test/downloads.mjs`, `node test/paths.mjs`, `node test/front.mjs`, `node test/hangs.mjs`, `node test/matrix.mjs`, `node test/robustness.mjs`, `node test/reconnect-stall.mjs`, `node test/leaks.mjs`, `node test/config.mjs`, `node test/titles.mjs`, `node test/service.mjs` and `node test/canary.mjs`
+`node test/passkeys.mjs`, `node test/forks.mjs`, `node test/subagent-transcripts.mjs`, `node test/downloads.mjs`, `node test/paths.mjs`, `node test/front.mjs`, `node test/hangs.mjs`, `node test/matrix.mjs`, `node test/robustness.mjs`, `node test/reconnect-stall.mjs`, `node test/leaks.mjs`, `node test/config.mjs`, `node test/titles.mjs`, `node test/service.mjs`, `node test/code-sign-clone.mjs` and `node test/canary.mjs`
 (self-contained, headless; headless Chrome grants some permissions by itself,
 so check permission changes in a headed profile too; `APM_PROXY_DEBUG=1` logs
 every command the proxy refuses)

@@ -4,7 +4,7 @@ Two kinds of scripts:
 
 - self-contained pass/fail tests (`canary`, `matrix`, `robustness`,
   `reconnect-stall`, `leaks`, `config`, `hangs`, `reconnect`, `permissions`,
-  `passkeys`, `forks`, `downloads`, `paths`, `front`, `headed`): each starts its own browser, gateway and scratch
+  `passkeys`, `forks`, `downloads`, `paths`, `front`, `code-sign-clone`, `headed`): each starts its own browser, gateway and scratch
   `AGENTIC_PLAYWRIGHT_HOME`, prints one line per check and exits non-zero on
   failure. All but `headed` are headless; `headed` shows a window (macOS).
 - scripts used while developing the gateway: they talk to a running gateway
@@ -37,6 +37,7 @@ node dist/cli.js start test
 | `leaks.mjs [browser]` | self-contained, pass/fail (gateway in-process): a 120 MB transcript is read without blocking the process, remembered tool calls are bounded; closed tabs, ended chats' proxy clients, connections, tabs and title files are forgotten; a tab created as its chat ends is closed |
 | `config.mjs [browser]` | self-contained, pass/fail: a Playwright MCP config file (`--config`) and `PLAYWRIGHT_MCP_*` variables reach the gateway: initScript, allowed/blocked origins, testIdAttribute, secrets, timeouts, default capabilities |
 | `screenshot-diagnostics.mjs` | pass/fail with a fake clock: CDP screenshot sent/reply, pending command, connection close and error redaction; `matrix.mjs` checks the live hook in a headless gateway |
+| `code-sign-clone.mjs [browser]` | self-contained, pass/fail (macOS): a headless profile's browser killed with SIGKILL leaves no Chrome code-sign clone in `$TMPDIR/../X/` |
 | `subagent-transcripts.mjs [browser]` | self-contained, pass/fail: subagents get their own session when the chat's CLI session id appears after connect or changes, the header is stale, or the config dir is only in the agent's environment; the transcript line is written after the call starts (0.9 s, 2.5 s, parallel subagents, a subagent idle for 30 min), as Claude Code does; a call no transcript names is refused (`AGENTIC_TRANSCRIPT_WAIT_MS` shortens the wait) |
 | `titles.mjs` | self-contained, no browser: a desktop chat's title and CLI session id come from `<account>/<org>/<id>.json`, not from a newer `waiting-input/<id>.json` |
 | `service.mjs` | self-contained, no browser: the launchd plist asks for `ProcessType` `Interactive` (a throttled gateway starved on a loaded machine) |

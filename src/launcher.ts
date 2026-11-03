@@ -5,7 +5,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { activatePid, frontmostPid } from './macos.js';
 import type { Profile } from './profiles.js';
-import { gateEnv } from './gatedbrowser.js';
+import { gateEnv, gateLibraryFor } from './gatedbrowser.js';
+
+export const noCodeSignClone = '--disable-features=MacAppCodeSignClone';
 
 export function cdpEndpoint(profile: Profile) {
   return `http://127.0.0.1:${profile.cdpPort}`;
@@ -39,6 +41,13 @@ export function browserArgs(profile: Profile) {
     // Tests with a freshly signed browser: keep it away from the user's
     // keychain, which would ask on screen for access to "Chrome Safe Storage".
     ...(process.env.AGENTIC_MOCK_KEYCHAIN ? ['--use-mock-keychain'] : []),
+    // Chrome on macOS clones its whole app bundle into a temp folder at every
+    // start and removes the clone only on a clean exit; every browser killed
+    // (tests do it on purpose, a crash does it too) left ~2 GB behind. The clone
+    // keeps a running browser valid while an update replaces its bundle: a
+    // gated copy is never replaced while it runs, and a headless profile is a
+    // test or throwaway one, so neither needs it.
+    ...(profile.headless || gateLibraryFor(profile.executablePath) ? [noCodeSignClone] : []),
     // No window at startup: the gateway creates the first one already
     // minimized and unfocused (see Gateway._setUpHomeTab).
     ...(profile.headless ? ['--headless=new'] : ['--no-startup-window']),
