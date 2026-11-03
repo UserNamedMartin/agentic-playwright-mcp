@@ -140,6 +140,14 @@ requests" in your tool results; answer with `browser_permission` ("allow" or
   `[Open the results](http://127.0.0.1:8931/focus?target=…&t=…)` (pass the link on exactly as given: it is signed). Clicking it
   brings the browser window to the front on that tab; nothing opens until they
   click.
+- The Claude desktop app draws every `browser_tab_link` result as a "Browser
+  tab link" widget whose Open button does not work ("IPC not available for MCP
+  tool call"), and the user does not want that widget. The link only counts
+  once it is in your reply text: write it there as a plain markdown link in the
+  same turn, right after the call.
+- When the user can do the step in their own browser (a sign-in or consent
+  page, an OAuth URL whose redirect goes to localhost on this machine), give
+  them that page's URL directly as a markdown link instead of a tab link.
 - `browser_show_tab` opens the window immediately, without asking. Use it only
   when the user explicitly asks to see a page right now ("покажи").
 
