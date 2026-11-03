@@ -1,11 +1,11 @@
 ---
-status: open
+status: fixed
 area: launcher
 found: 2026-11-03
 filed: 2026-11-03
 reproducible: yes
 suspect: gateway
-fixed-in:
+fixed-in: 35eff94 (test/code-sign-clone.mjs)
 ---
 
 # Every browser killed without a clean exit leaves a ~2 GB Chrome code-sign clone on disk
@@ -49,6 +49,13 @@ Pass `--disable-features=MacAppCodeSignClone` where the clone protects nothing: 
 replaced while a browser runs from it) and a headless profile (tests and throwaway profiles), and
 in the tests' own spawns. Keep it for a headed profile on a stock Chrome, which an update replaces
 in place. Test: a headless profile's browser killed with SIGKILL leaves no new clone.
+
+## Fix
+35eff94: `browserArgs` passes `--disable-features=MacAppCodeSignClone` for a gated copy and for a
+headless profile; test/robustness.mjs and test/reconnect.mjs pass it to the browser they spawn.
+Headed profiles on a stock Chrome keep the clone (an update replaces their bundle in place) and
+still leave one if killed. test/code-sign-clone.mjs kills a headless profile's browser and checks
+that no clone appeared.
 
 ## Workaround
 Delete the clone folders no running Chrome started (compare their creation time with the start
