@@ -32,7 +32,7 @@ Read README.md first for what the project does. This file is about changing it.
   which transcripts comes from `Gateway._transcriptLocation` (the desktop chat
   file's current CLI session id wins over the connect-time header).
 - `src/files.ts` — per-chat file folders and their weekly cleanup.
-- `src/apps.ts` — MCP Apps tab-link widget; `src/tools.ts` — extra tools
+- `src/apps.ts` — MCP Apps tab-link widget (served, but not attached to `browser_tab_link`); `src/tools.ts` — extra tools
   (show_tab, emulate_device with per-tab settings kept by the session,
   permission); they reach the gateway through `ToolHost` (messages to the
   main thread).

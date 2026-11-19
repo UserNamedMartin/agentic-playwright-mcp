@@ -194,11 +194,13 @@ open -a Finicky        # then make it the default browser in System Settings
 The rule only matches `/focus` on your profiles' ports, so links to real sites
 always open in your normal browser, even if an agent has the same page open.
 
-`browser_tab_link` also declares an [MCP Apps](https://github.com/modelcontextprotocol/ext-apps)
-UI: hosts that render MCP Apps show a card with an Open button that opens the
-tab through the host, with no browser or router involved. As of September 2026
-the Claude desktop app's Code tab does not yet render MCP Apps from
-user-configured servers; once it does, prefer the button over the router.
+`browser_tab_link` declares no [MCP Apps](https://github.com/modelcontextprotocol/ext-apps)
+UI. Since November 2026 the Claude desktop app's Code tab renders MCP Apps from
+user-configured servers, but the card's Open button fails there ("IPC not
+available for MCP tool call") and the card only adds noise, so the tool returns
+the link alone and the agent writes it into its reply. The widget
+(`tabLinkResource`, `browser_open_tab_window`) is still served, unreferenced,
+in case a host ever makes it work.
 
 ## Files
 

@@ -1,18 +1,17 @@
-// MCP Apps (SEP-1865) UI for tab links. browser_tab_link declares a ui://
-// resource; hosts that render MCP Apps show it in the chat as a small card with
-// an "Open" button, which calls browser_open_tab_window (app-only) through the
-// host, so opening the tab never goes through the user's everyday browser.
-// As of September 2026 the Claude desktop Code tab does not render MCP Apps from
-// user-configured servers (it never reads the resource), so there the agent
-// gives the http link from the result instead; see README "Tab links".
+// MCP Apps (SEP-1865) UI for tab links: a small card with an "Open" button
+// that calls browser_open_tab_window (app-only) through the host. Not attached
+// to browser_tab_link any more: since November 2026 the Claude desktop Code tab
+// renders it, but its button fails there ("IPC not available for MCP tool
+// call") and the user does not want the card. The resource stays served,
+// unreferenced; the agent gives the http link from the result; see README
+// "Tab links".
 
 export const tabLinkResourceUri = 'ui://agentic-browser/tab-link.html';
 export const appMimeType = 'text/html;profile=mcp-app';
 
 export const tabLinkTool = {
   name: 'browser_tab_link',
-  description: 'Get a link for the user that opens the shared browser window on one of your tabs (hosts that ' +
-    'support MCP Apps also show it as a button). The browser runs minimized in the background; call this whenever ' +
+  description: 'Get a link for the user that opens the shared browser window on one of your tabs. The browser runs minimized in the background; call this whenever ' +
     'the user may want to look at or act in a page (a login, a captcha, a result to review), give them the link and ' +
     'let them decide whether to click. Nothing opens until they do.',
   inputSchema: {
@@ -20,7 +19,9 @@ export const tabLinkTool = {
     properties: { index: { type: 'number', description: 'Tab index from browser_tabs. Defaults to the current tab.' } },
   },
   annotations: { title: 'Link to a tab', readOnlyHint: true, destructiveHint: false, openWorldHint: false },
-  _meta: { 'ui': { resourceUri: tabLinkResourceUri }, 'ui/resourceUri': tabLinkResourceUri },
+  // No `_meta.ui`: the Claude desktop app now renders the card, its Open button
+  // fails there ("IPC not available for MCP tool call") and the user does not
+  // want the widget. The agent writes the http link into its reply instead.
 };
 
 export const openTabWindowTool = {
