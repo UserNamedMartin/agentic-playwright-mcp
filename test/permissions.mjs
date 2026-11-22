@@ -95,6 +95,8 @@ try {
     mic = (await pageLog()).match(/mic=(\S+)/)?.[1];
   }
   check('allow reaches the waiting page', mic && mic !== 'NotAllowedError', `mic=${mic}; request: ${micNote.split('\n')[1]}; answer: ${allowed.split('\n')[1]}`);
+  const devices = await call('browser_evaluate', { function: '() => navigator.mediaDevices.enumerateDevices().then(d => d.filter(x => x.kind === "audioinput").map(x => x.label).join(", "))' });
+  check('the microphone is Chrome\'s fake device, never the machine\'s', /Fake/.test(devices) && !/AirPods|Headphones|MacBook|Built-in/i.test(devices), devices.split('\n')[1]);
 
   // Not held (needs a fresh click): refused at once, reported, works after allowing.
   const fontsClick = await click('fonts');

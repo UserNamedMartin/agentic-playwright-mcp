@@ -154,6 +154,10 @@ Read README.md first for what the project does. This file is about changing it.
   in `$TMPDIR/../X/`. `browser_annotate` opens the Playwright Dashboard (its own visible
   browser, which outlives the gateway) and `browser_show_tab` raises the
   window: tests do not call them.
+- Tests must never use the machine's microphone or camera: opening the mic
+  of a Bluetooth headset switches off its noise cancelling for the user.
+  Headless profiles get Chrome's fake media devices (`browserArgs`); a test
+  that starts a browser itself passes `--use-fake-device-for-media-stream`.
 - Tests must not write into the user's folders: a test that starts its own
   browser gives it a default download folder in its scratch home (Chrome
   falls back to it whenever a DevTools client that set a download folder

@@ -51,6 +51,11 @@ export function browserArgs(profile: Profile) {
     // No window at startup: the gateway creates the first one already
     // minimized and unfocused (see Gateway._setUpHomeTab).
     ...(profile.headless ? ['--headless=new'] : ['--no-startup-window']),
+    // A headless profile is a test or throwaway one: a page asking for the
+    // microphone or camera gets Chrome's fake devices, never the machine's
+    // (a test once took over the user's Bluetooth headset and its noise
+    // cancelling switched off).
+    ...(profile.headless ? ['--use-fake-device-for-media-stream'] : []),
   ];
 }
 
