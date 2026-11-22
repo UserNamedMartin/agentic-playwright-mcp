@@ -2,8 +2,8 @@
 // The browser's passkey prompt needs someone at the window. In the hidden
 // browser nobody sees it, so the request used to hang until the site gave up
 // ("the request timed out") and the agent never learned why; the page's other
-// buttons often do nothing meanwhile. Instead a page script asks the gateway
-// first (through the page bridge, see browser.ts):
+// buttons often do nothing meanwhile. Instead the page hook (pagehooks.ts) asks the gateway
+// first:
 // - nobody can see the browser (hidden, minimized or headless): the request is
 //   cancelled at once, as if the prompt was dismissed (NotAllowedError), so the
 //   site offers its other ways to sign in right away;
@@ -41,26 +41,4 @@ export function describePasskeyRequests(requests: PasskeyRequest[]): string | un
     'wants to use their passkey, give them a browser_tab_link to the page and let them start the sign-in there.';
 }
 
-// Wraps CredentialsContainer.get/create. The gateway answers 'cancel' or
-// 'proceed'; without the gateway the call goes through unchanged.
-export const passkeyScript = `(() => {
-  if (window.__agenticPasskeyHooks)
-    return;
-  window.__agenticPasskeyHooks = true;
-  const proto = window.CredentialsContainer && CredentialsContainer.prototype;
-  for (const kind of ['get', 'create']) {
-    const original = proto && proto[kind];
-    if (typeof original !== 'function')
-      continue;
-    const wrapped = function(options, ...rest) {
-      if (!options || !options.publicKey || options.mediation === 'conditional' || !window.__agenticBridge)
-        return original.call(this, options, ...rest);
-      return window.__agenticBridge.call('passkey', { kind }).catch(() => 'proceed').then(answer => answer === 'cancel'
-        ? Promise.reject(new DOMException('Passkeys cannot be used in this browser: nobody can see its prompt.', 'NotAllowedError'))
-        : original.call(this, options, ...rest));
-    };
-    try {
-      Object.defineProperty(proto, kind, { value: wrapped, writable: true, configurable: true });
-    } catch {}
-  }
-})();`;
+// The page side lives in the page hook (pagehooks.ts).

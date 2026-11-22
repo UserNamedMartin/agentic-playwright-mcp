@@ -9,6 +9,7 @@
 //   passkey requests), talking back through one raw binding;
 // - browser-level work: background tabs, window state, activation, focus
 //   guard, permissions, the Dock icon, the companion extension.
+import { consoleText, type HookNames } from './pagehooks.js';
 import fs from 'node:fs';
 import { CdpConnection, type CdpMessage } from './cdp.js';
 import { activatePid, frontmostPid, hidePid, isHiddenPid, mainScreen, unhidePid } from './macos.js';
@@ -25,6 +26,11 @@ export type TargetInfo = {
 // What a page script sends through the bridge (see bridgeScript).
 export type PageCall = { kind: string; payload: any; url: string };
 
+// The scripts the gateway adds to every page (see pagehooks.ts): the ones in
+// its isolated world, the page hook in the page's own world, and the hook a
+// dedicated worker gets before its code runs.
+export type PageScripts = { isolated: string[]; main: string[]; worker: string; names: HookNames };
+
 export type BrowserEvents = {
   // A new tab whose owner is known: the owner's Playwright should take it over
   // and call release() once it has (the tab waits until then).
@@ -32,6 +38,9 @@ export type BrowserEvents = {
   onTargetDestroyed(targetId: string): void;
   onTargetChanged(targetId: string): void;
   onPageCall(targetId: string, call: PageCall): Promise<unknown>;
+  // A console message or page error the page hook saw, as the DevTools event
+  // the tab owner's Playwright gets (Log.entryAdded, Runtime.exceptionThrown).
+  onPageEvent(targetId: string, method: string, params: any): void;
   // Whether a session still exists (a tab created for one that has ended
   // meanwhile is closed, not left behind unowned).
   isOwnerAlive(owner: string): boolean;
@@ -45,19 +54,43 @@ export type BrowserEvents = {
   onUserFocus(targetId: string): Promise<void>;
 };
 
-// The binding page scripts reach the gateway through, and the object they use.
-// The binding is taken off the page's global object right away; only the
-// bridge (non-enumerable, frozen) stays.
+// The gateway's page scripts run in an isolated world of their own, never in
+// the page's: a site's scripts cannot see them, their globals or the binding
+// (a wrapped function or an extra global is what bot checks look for). The
+// binding is added to that world's context by id once the frame has it
+// (`_bindFrame`): bindings scoped that way reach the gateway without
+// Runtime.enable, whose console reporting sites can detect.
+const worldName = '__apm_world';
 const bindingName = '__agenticGatewayBinding';
 export const bridgeScript = `(() => {
   if (window.__agenticBridge)
     return;
-  const send = globalThis[${JSON.stringify(bindingName)}];
-  if (typeof send !== 'function')
-    return;
-  try { delete globalThis[${JSON.stringify(bindingName)}]; } catch {}
   const pending = new Map();
   let seq = 0;
+  // The binding arrives a moment after the document starts (see _bindFrame):
+  // messages wait for it in order.
+  const queue = [];
+  let tries = 0;
+  // Also called by the gateway right after it added the binding.
+  const flush = () => {
+    const binding = globalThis[${JSON.stringify(bindingName)}];
+    if (typeof binding !== 'function') {
+      if (tries++ < 250)
+        setTimeout(flush, 20);
+      return 0;
+    }
+    let sent = 0;
+    while (queue.length) {
+      binding(queue.shift());
+      sent++;
+    }
+    return sent;
+  };
+  const send = message => {
+    queue.push(message);
+    if (queue.length === 1)
+      flush();
+  };
   Object.defineProperty(window, '__agenticBridge', { value: Object.freeze({
     call: (kind, payload) => new Promise(resolve => {
       const id = ++seq;
@@ -70,8 +103,15 @@ export const bridgeScript = `(() => {
       if (resolve)
         resolve(value);
     },
+    flush,
   }) });
 })();`;
+
+// A RemoteObject id is "<isolate>.<context id>.<n>": the context it lives in.
+function contextIdOf(objectId: string | undefined): number | undefined {
+  const id = Number(objectId?.split('.')[1]);
+  return Number.isInteger(id) ? id : undefined;
+}
 
 // Longest a new tab waits for its owner's Playwright before it runs anyway.
 const holdMs = 10_000;
@@ -88,7 +128,7 @@ export class SharedBrowser {
   // dropped connection.
   readonly owners: Map<string, string>;
   private _events: BrowserEvents;
-  private _scripts: string[];
+  private _scripts: PageScripts;
   private _targets = new Map<string, Entry>();
   // Master session id -> the page target it belongs to (pages and their
   // out-of-process frames).
@@ -117,16 +157,16 @@ export class SharedBrowser {
   private _canary: any;
   private _canaryClosed: string | undefined;
 
-  private constructor(cdp: CdpConnection, owners: Map<string, string>, events: BrowserEvents, scripts: string[]) {
+  private constructor(cdp: CdpConnection, owners: Map<string, string>, events: BrowserEvents, scripts: PageScripts) {
     this.cdp = cdp;
     this.owners = owners;
     this._events = events;
-    this._scripts = [bridgeScript, ...scripts];
+    this._scripts = { ...scripts, isolated: [bridgeScript, ...scripts.isolated] };
   }
 
   // onConnected hears of the connection as soon as it exists, so a caller
   // that gives up on a stalled setup can close it.
-  static async connect(cdpEndpoint: string, owners: Map<string, string>, events: BrowserEvents, scripts: string[],
+  static async connect(cdpEndpoint: string, owners: Map<string, string>, events: BrowserEvents, scripts: PageScripts,
     onConnected?: (cdp: CdpConnection) => void): Promise<SharedBrowser> {
     const url = await CdpConnection.browserUrl(cdpEndpoint);
     const cdp = await CdpConnection.connect(url);
@@ -258,6 +298,8 @@ export class SharedBrowser {
         return;
       }
       case 'Target.targetDestroyed': {
+        this._unreadyFrames.delete(params.targetId);
+        this._heldEntries.delete(params.targetId);
         const entry = this._targets.get(params.targetId);
         clearTimeout(entry?.holdTimer);
         this._targets.delete(params.targetId);
@@ -272,10 +314,24 @@ export class SharedBrowser {
           entry.dialog = method === 'Page.javascriptDialogOpening' ? { type: params.type, message: params.message } : undefined;
         return;
       }
+      case 'Page.frameNavigated':
+        if (sessionId && this._sessionPage.has(sessionId) && params.frame?.id) {
+          this._hookState.delete(`${sessionId}|${params.frame.id}`);
+          void this._bindFrame(sessionId, params.frame.id);
+        }
+        return;
       case 'Runtime.bindingCalled':
         if (params.name === bindingName)
           await this._onBindingCalled(sessionId!, params);
+        else if (params.name === this._scripts.names.workerBinding && sessionId)
+          this._onWorkerMessage(sessionId, params.payload);
         return;
+      case 'Log.entryAdded': {
+        const targetId = sessionId ? this._sessionPage.get(sessionId) : undefined;
+        if (targetId && params?.entry && params.entry.source !== 'worker')
+          this._inOrder(targetId, Number(params.entry.timestamp) || 0, () => this._enqueue(targetId, Promise.resolve(), () => this._events.onPageEvent(targetId, 'Log.entryAdded', params)));
+        return;
+      }
       case 'Page.downloadWillBegin': {
         // Chrome sends this on the session of the page or out-of-process
         // frame that downloads, before the browser-wide event: which tab a
@@ -331,19 +387,101 @@ export class SharedBrowser {
     if (params.targetInfo?.type === 'iframe' && pageTarget) {
       this._sessionPage.set(params.sessionId, pageTarget);
       await this._installScripts(params.sessionId, params.targetInfo);
+    } else if (params.targetInfo?.type === 'worker' && pageTarget) {
+      this._sessionPage.set(params.sessionId, pageTarget);
+      await this._installWorkerHook(params.sessionId);
     }
     await this.cdp.send('Runtime.runIfWaitingForDebugger', {}, params.sessionId).catch(() => {});
   }
 
+  // Never Runtime.enable here: see bridgeScript.
   private async _installScripts(session: string, info: { type: string; targetId: string; url: string }) {
-    // (The binding and the scripts need the Runtime and Page domains on.)
     await Promise.all([
       this.cdp.send('Page.enable', {}, session),
-      this.cdp.send('Runtime.enable', {}, session),
-      this.cdp.send('Runtime.addBinding', { name: bindingName }, session),
-      ...this._scripts.map(source => this.cdp.send('Page.addScriptToEvaluateOnNewDocument', { source, runImmediately: true }, session)),
+      // Console entries the browser itself adds (failed loads, CSP, ...)
+      // reach the tab's owner from here, in order with the page hook's.
+      this.cdp.send('Log.enable', {}, session),
+      ...this._scripts.isolated.map(source => this.cdp.send('Page.addScriptToEvaluateOnNewDocument', { source, worldName, runImmediately: true }, session)),
+      ...this._scripts.main.map(source => this.cdp.send('Page.addScriptToEvaluateOnNewDocument', { source, runImmediately: true }, session)),
       this.cdp.send('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: true, flatten: true }, session),
     ]).catch(e => console.error(`page scripts (${info.type} ${info.targetId.slice(0, 8)} ${info.url.slice(0, 120)}): ${(e as Error).message}`));
+    // Documents already there (a reconnect): their frames get the binding now,
+    // new documents when they commit (Page.frameNavigated).
+    void this.cdp.send('Page.getFrameTree', {}, session).then(({ frameTree }) => {
+      const frames: string[] = [];
+      const walk = (node: any) => {
+        frames.push(node.frame.id);
+        for (const child of node.childFrames ?? [])
+          walk(child);
+      };
+      walk(frameTree);
+      return Promise.all(frames.map(frameId => this._bindFrame(session, frameId)));
+    }).catch(() => {});
+  }
+
+  // Gives the frame's isolated world (made by the document-start scripts, or
+  // made here first; Page.createIsolatedWorld returns the existing world of
+  // that name) the binding to the gateway.
+  private async _bindFrame(session: string, frameId: string) {
+    const targetId = this._sessionPage.get(session);
+    const key = `${session}|${frameId}`;
+    if (targetId)
+      this._unready(targetId).add(key);
+    try {
+      const { executionContextId } = await this.cdp.send('Page.createIsolatedWorld', { frameId, worldName }, session);
+      this._worldFrames.set(`${session}:${executionContextId}`, frameId);
+      await this.cdp.send('Runtime.addBinding', { name: bindingName, executionContextId }, session);
+      // What the page hook said before the binding was there arrives now,
+      // before this answer (same connection).
+      await this.cdp.send('Runtime.evaluate', { expression: 'window.__agenticBridge && window.__agenticBridge.flush()', contextId: executionContextId }, session, 5000);
+      // Found now, so the document's first console message is told without
+      // a wait.
+      void this._hookStore(session, frameId);
+    } catch {
+      // A frame in another process (it has a session of its own) or one gone.
+    } finally {
+      if (targetId)
+        this._frameReady(targetId, key);
+    }
+  }
+
+  // Frames of a tab whose page hook cannot reach the gateway yet (just
+  // navigated). While there are any, the tab's console entries wait and are
+  // then told in the order they happened in the page.
+  private _unreadyFrames = new Map<string, Set<string>>();
+  private _heldEntries = new Map<string, { t: number; tell: () => void }[]>();
+
+  private _unready(targetId: string) {
+    let frames = this._unreadyFrames.get(targetId);
+    if (!frames)
+      this._unreadyFrames.set(targetId, frames = new Set());
+    return frames;
+  }
+
+  private _frameReady(targetId: string, key: string) {
+    const frames = this._unreadyFrames.get(targetId);
+    frames?.delete(key);
+    if (frames?.size)
+      return;
+    this._unreadyFrames.delete(targetId);
+    const held = this._heldEntries.get(targetId) ?? [];
+    this._heldEntries.delete(targetId);
+    held.sort((a, b) => a.t - b.t);
+    for (const entry of held)
+      entry.tell();
+  }
+
+  // Tells a console entry now, or holds it while the tab has frames that are
+  // not ready (see _unreadyFrames).
+  private _inOrder(targetId: string, t: number, tell: () => void) {
+    if (this._unreadyFrames.get(targetId)?.size) {
+      let held = this._heldEntries.get(targetId);
+      if (!held)
+        this._heldEntries.set(targetId, held = []);
+      held.push({ t, tell });
+      return;
+    }
+    tell();
   }
 
   private async _onBindingCalled(session: string, params: any) {
@@ -356,12 +494,214 @@ export class SharedBrowser {
     }
     if (!targetId || typeof call?.kind !== 'string')
       return;
-    const value = await this._events.onPageCall(targetId, { kind: call.kind, payload: call.payload, url: String(call.url ?? '') })
-        .catch(e => ({ error: String((e as Error).message ?? e) }));
+    if (process.env.APM_HOOK_DEBUG && (call.kind === 'console' || call.kind === 'pageerror'))
+      console.error(`page hook call ${call.kind} #${call.payload?.id} session ${session.slice(0, 6)} context ${params.executionContextId}`);
+    const value = call.kind === 'console' || call.kind === 'pageerror'
+      ? await this._onHookMessage(targetId, session, this._worldFrames.get(`${session}:${params.executionContextId}`), call.kind, call.payload).then(() => null)
+      : await this._events.onPageCall(targetId, { kind: call.kind, payload: call.payload, url: String(call.url ?? '') })
+          .catch(e => ({ error: String((e as Error).message ?? e) }));
     await this.cdp.send('Runtime.evaluate', {
       expression: `window.__agenticBridge && window.__agenticBridge.reply(${Number(call.id)}, ${JSON.stringify(value ?? null)})`,
       contextId: params.executionContextId,
     }, session).catch(() => {});
+  }
+
+  // Isolated world context ("session:contextId") -> its frame, for the page
+  // hook's messages (see _bindFrame).
+  private _worldFrames = new Map<string, string>();
+  // Where the page hook keeps its messages, per "session|frameId" (or
+  // "session|worker"): the object id of its message store.
+  private _hookState = new Map<string, Promise<string | undefined>>();
+  // A worker's global object, by its session.
+  private _workerGlobals = new Map<string, string>();
+  // Messages of a tab are told to its owner in the order the page made them.
+  private _hookQueues = new Map<string, Promise<unknown>>();
+  private _errorIds = 0;
+
+  // Runs the worker hook (pagehooks.ts) while the worker still waits for the
+  // debugger, then lets it start. The binding is added for the worker's own
+  // context id (a binding reaches us without Runtime.enable that way); the
+  // hook takes it off the global object before the worker's code runs.
+  private async _installWorkerHook(session: string) {
+    try {
+      const { result } = await this.cdp.send('Runtime.evaluate', { expression: 'this', serializationOptions: { serialization: 'idOnly' } }, session, 5000);
+      const executionContextId = contextIdOf(result?.objectId);
+      if (executionContextId === undefined)
+        return;
+      await this.cdp.send('Runtime.addBinding', { name: this._scripts.names.workerBinding, executionContextId }, session, 5000);
+      await this.cdp.send('Runtime.evaluate', { expression: this._scripts.worker }, session, 5000);
+      this._workerGlobals.set(session, result.objectId);
+      void this._hookStore(session, undefined);
+    } catch (e) {
+      console.error(`worker hook: ${(e as Error).message}`);
+    }
+  }
+
+  private _onWorkerMessage(session: string, payload: string) {
+    if (process.env.APM_HOOK_DEBUG)
+      console.error(`page hook worker call ${payload.slice(0, 60)} session ${session.slice(0, 6)}`);
+    const targetId = this._sessionPage.get(session);
+    let message: any;
+    try {
+      message = JSON.parse(payload);
+    } catch {
+      return;
+    }
+    if (targetId && (message?.kind === 'console' || message?.kind === 'pageerror'))
+      void this._onHookMessage(targetId, session, undefined, message.kind, { id: message.id, ...message.body });
+  }
+
+  // A console message or uncaught error the page hook kept: its values are
+  // read over DevTools (V8 describes them as it does for DevTools, without
+  // running page code) and the owner's Playwright gets the event it would
+  // have got from Runtime/Log.
+  // Values are read at once (reads run side by side); messages are told to
+  // the owner in the order the page made them (see _inOrder).
+  private _onHookMessage(targetId: string, session: string, frameId: string | undefined, kind: string, body: any): Promise<void> {
+    if (typeof body?.id !== 'number')
+      return Promise.resolve();
+    const started = Date.now();
+    const values = this._hookValues(session, frameId, body.id, !!body.safe).catch(e => {
+      console.error(`page hook (${kind} in ${targetId.slice(0, 8)}): ${(e as Error).message}`);
+      return undefined;
+    });
+    return new Promise<void>(resolve => this._inOrder(targetId, Number(body.t) || 0, () => {
+      void this._enqueue(targetId, values, v => {
+        if (process.env.APM_HOOK_DEBUG)
+          console.error(`page hook ${kind} #${body.id} in ${targetId.slice(0, 8)}: ${Date.now() - started} ms`);
+        this._tellHookMessage(targetId, kind, body, v);
+      }).then(resolve);
+    }));
+  }
+
+  // The tab's console entries are told one after another.
+  private _enqueue<T>(targetId: string, value: Promise<T>, tell: (value: T) => void): Promise<void> {
+    const previous = this._hookQueues.get(targetId) ?? Promise.resolve();
+    const next = previous.then(() => value).then(tell).catch(e => console.error(`page hook (${targetId.slice(0, 8)}): ${(e as Error).message}`));
+    this._hookQueues.set(targetId, next);
+    void next.then(() => {
+      if (this._hookQueues.get(targetId) === next)
+        this._hookQueues.delete(targetId);
+    });
+    return next;
+  }
+
+  private _tellHookMessage(targetId: string, kind: string, body: any, values: any[] | undefined) {
+    const errors: Record<string, string> = body.errors && typeof body.errors === 'object' ? body.errors : {};
+    const timestamp = Number(body.t) || Date.now();
+    if (kind === 'console') {
+      const args = (values ?? []).map((value, i) => i in errors ? { type: 'string', value: errors[i] } : value);
+      this._events.onPageEvent(targetId, 'Log.entryAdded', { entry: {
+        source: 'javascript', level: String(body.type), text: consoleText(args), timestamp,
+        url: String(body.url ?? ''), lineNumber: Number(body.line) || 0,
+      } });
+      return;
+    }
+    const exceptionDetails: any = {
+      exceptionId: ++this._errorIds, text: 'Uncaught', lineNumber: Number(body.line) || 0, columnNumber: Number(body.col) || 0,
+      url: String(body.url ?? ''),
+    };
+    if ('0' in errors)
+      exceptionDetails.exception = { type: 'string', value: errors['0'] };
+    else if (values && values.length && values[0].type !== 'undefined')
+      exceptionDetails.exception = values[0];
+    else
+      exceptionDetails.text = String(body.message || 'Uncaught');
+    this._events.onPageEvent(targetId, 'Runtime.exceptionThrown', { timestamp, exceptionDetails });
+  }
+
+  // The values the hook kept for a message, as RemoteObjects (with previews
+  // unless the page could run code while V8 formats an error's stack).
+  private async _hookValues(session: string, frameId: string | undefined, id: number, preview: boolean): Promise<any[] | undefined> {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const key = `${session}|${frameId ?? 'worker'}`;
+      const store = await this._hookStore(session, frameId);
+      if (!store) {
+        this._hookState.delete(key);
+        continue;
+      }
+      const listed = await this.cdp.send('Runtime.getProperties', { objectId: store, ownProperties: true }, session, 5000).catch(() => undefined);
+      if (!listed) {
+        this._hookState.delete(key);
+        continue;
+      }
+      const entry = listed.result?.find((p: any) => p.name === String(id))?.value;
+      const release = (objectId?: string) => objectId && void this.cdp.send('Runtime.releaseObject', { objectId }, session).catch(() => {});
+      for (const p of listed.result ?? []) {
+        if (p.value?.objectId && p.value !== entry)
+          release(p.value.objectId);
+      }
+      if (!entry?.objectId)
+        return undefined;
+      const { result } = await this.cdp.send('Runtime.getProperties', { objectId: entry.objectId, ownProperties: true, generatePreview: preview }, session, 5000);
+      release(entry.objectId);
+      const values = (result ?? []).filter((p: any) => /^\d+$/.test(p.name)).sort((a: any, b: any) => +a.name - +b.name).map((p: any) => p.value);
+      // Released once Playwright has them as text; nothing keeps them.
+      for (const value of values)
+        release(value?.objectId);
+      return values;
+    }
+    return undefined;
+  }
+
+  // The hook's store of a frame (or worker), found once per document.
+  private _hookStore(session: string, frameId: string | undefined): Promise<string | undefined> {
+    const key = `${session}|${frameId ?? 'worker'}`;
+    let state = this._hookState.get(key);
+    if (!state) {
+      const started = Date.now();
+      state = this._findHookStore(session, frameId).catch(() => undefined).then(found => {
+        if (process.env.APM_HOOK_DEBUG)
+          console.error(`page hook store ${found ? 'found' : 'not found'} in ${Date.now() - started} ms`);
+        return found;
+      });
+      this._hookState.set(key, state);
+    }
+    return state;
+  }
+
+  // The page hook's message store in a frame's (or a worker's) own world:
+  // global object -> Function.prototype.toString (the hook's Proxy) -> its
+  // handler -> the hook's state -> msgs. Read with Runtime.getProperties
+  // only, which runs no page code (no getters, no Proxy traps).
+  private async _findHookStore(session: string, frameId: string | undefined): Promise<string | undefined> {
+    let global: string | undefined;
+    if (!frameId) {
+      global = this._workerGlobals.get(session);
+    } else {
+      let backendNodeId: number | undefined;
+      const owner = await this.cdp.send('DOM.getFrameOwner', { frameId }, session, 5000).catch(() => undefined);
+      if (owner?.backendNodeId) {
+        const { node } = await this.cdp.send('DOM.describeNode', { backendNodeId: owner.backendNodeId }, session, 5000);
+        backendNodeId = node?.contentDocument?.backendNodeId;
+      } else {
+        const { root } = await this.cdp.send('DOM.getDocument', { depth: 0 }, session, 5000);
+        backendNodeId = root?.backendNodeId;
+      }
+      if (!backendNodeId)
+        return undefined;
+      const { object } = await this.cdp.send('DOM.resolveNode', { backendNodeId }, session, 5000);
+      const contextId = contextIdOf(object?.objectId);
+      void this.cdp.send('Runtime.releaseObject', { objectId: object?.objectId }, session).catch(() => {});
+      if (contextId === undefined)
+        return undefined;
+      const { result } = await this.cdp.send('Runtime.evaluate', { expression: 'this', contextId, serializationOptions: { serialization: 'idOnly' } }, session, 5000);
+      global = result?.objectId;
+    }
+    if (!global)
+      return undefined;
+    // (Read from the global object with getProperties, not by evaluating
+    // "Function.prototype.toString": that would run in the page's world,
+    // where a page could watch the lookup.)
+    const prop = async (objectId: string | undefined, name: string, internal = false): Promise<string | undefined> => {
+      if (!objectId)
+        return undefined;
+      const r = await this.cdp.send('Runtime.getProperties', { objectId, ownProperties: true }, session, 5000);
+      return (internal ? r.internalProperties : r.result)?.find((p: any) => p.name === name)?.value?.objectId;
+    };
+    const toString = await prop(await prop(await prop(global, 'Function'), 'prototype'), 'toString');
+    const state = await prop(await prop(toString, '[[Handler]]', true), this._scripts.names.holder);
+    return await prop(state, 'msgs');
   }
 
   private async _creationsSettled() {

@@ -194,6 +194,13 @@ try {
   // stuck page (left out, then closed).
   // (After the test's own direct connection, which would wait on it too.)
   await inExtension(() => { self.apmVersion = 1; });
+  // A worker started before the restart: its console keeps reaching the
+  // agent, as the page's does (the page hook's channel and the worker hook
+  // are handed to the new gateway).
+  await a.call('browser_evaluate', { function: '() => { window.__w = new Worker(URL.createObjectURL(new Blob([`onmessage = e => console.log("worker says " + e.data)`], { type: "text/javascript" }))); window.__w.postMessage("before restart"); return 1; }' });
+  await sleep(500);
+  const consoleBefore = await a.call('browser_console_messages', { level: 'debug', all: true });
+  check('a worker\'s console reaches the agent', consoleBefore.includes('[LOG] worker says before restart'), consoleBefore.split('\n').slice(0, 6).join(' | '));
   await a.call('browser_evaluate', { function: '() => { setTimeout(() => alert("across restart"), 100); return 1; }' });
   await sleep(500);
   const stateFile = path.join(home, 'profiles', 'test', 'sessions.json');
@@ -208,6 +215,12 @@ try {
     'x-agent-config-dir': encodeURIComponent(configDir),
   });
   const afterRestartText = await a2.call('browser_tabs', { action: 'list' });
+  await a2.call('browser_evaluate', { function: '() => { console.log("page after restart", { r: 1 }); window.__w.postMessage("after restart"); return 1; }' });
+  await sleep(700);
+  const consoleAfter = await a2.call('browser_console_messages', { level: 'debug', all: true });
+  check('console of a page open across the restart still reaches the agent', consoleAfter.includes('[LOG] page after restart {r: 1}'), consoleAfter.split('\n').slice(0, 8).join(' | '));
+  check('... and of its worker', consoleAfter.includes('[LOG] worker says after restart'), consoleAfter.split('\n').slice(0, 8).join(' | '));
+  check('... each message once, none empty', /Total messages: 2 /.test(consoleAfter) && !/\[LOG\]  @/.test(consoleAfter), consoleAfter.split('\n').slice(0, 8).join(' | '));
   const afterRestart = tabIds(afterRestartText);
   check('tabs kept after a gateway restart', afterRestart.join() === beforeRestart.join(), afterRestart.join(' '));
   check('a dialog open across the restart is dismissed, its tab kept', /### Dialog dismissed\nThe alert dialog "across restart"/.test(afterRestartText),

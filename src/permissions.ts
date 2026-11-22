@@ -3,8 +3,8 @@
 // forever and the agent never learns why. Instead:
 // - the browser runs with --deny-permission-prompts, so no prompt is ever shown
 //   (and nothing hangs): a request without a decision is refused;
-// - a page script tells the gateway about each request before the browser sees
-//   it (through the page bridge, see browser.ts); the agent reads about it in its next tool result and answers with
+// - the page hook (pagehooks.ts) tells the gateway about each request before
+//   the browser sees it; the agent reads about it in its next tool result and answers with
 //   browser_permission, which sets the permission for that site;
 // - requests that can wait (camera, microphone, location, notifications,
 //   MIDI) are held until the agent answers, for up to holdMs, so the page then
@@ -64,55 +64,4 @@ export function describeRequests(requests: PermissionRequest[]): string | undefi
     'task needs; deny notifications unless the task is about them.';
 }
 
-// Wraps the web APIs that ask for permissions. Each request is reported to the
-// gateway first; "hold" requests wait for the agent's answer.
-export const permissionScript = `(() => {
-  if (window.__agenticPermissionHooks)
-    return;
-  window.__agenticPermissionHooks = true;
-  // Reported synchronously, so the agent usually reads about it in the result
-  // of the very call (a click) that caused it. The gateway knows which
-  // permissions were decided and answers those at once.
-  const ask = (permissions, api, hold) => {
-    if (!window.__agenticBridge)
-      return Promise.resolve();
-    return window.__agenticBridge.call('permission', { permissions, api, hold }).catch(() => {});
-  };
-  // kind: 'hold' (wait for the answer, API returns a promise), 'callback' (wait,
-  // API returns nothing), 'report' (tell the gateway and go ahead).
-  const hook = (target, name, permissions, kind) => {
-    const original = target && target[name];
-    if (typeof original !== 'function')
-      return;
-    const wrapped = function(...args) {
-      let names = [];
-      try {
-        names = typeof permissions === 'function' ? permissions(...args) : permissions;
-      } catch {}
-      if (!names.length)
-        return original.apply(this, args);
-      if (kind === 'report') {
-        ask(names, name, false);
-        return original.apply(this, args);
-      }
-      const call = ask(names, name, true).then(() => original.apply(this, args));
-      return kind === 'callback' ? undefined : call;
-    };
-    try {
-      Object.defineProperty(target, name, { value: wrapped, writable: true, configurable: true });
-    } catch {}
-  };
-  const media = c => [...(c && c.audio ? ['microphone'] : []), ...(c && c.video ? ['camera'] : [])];
-  hook(window.MediaDevices && MediaDevices.prototype, 'getUserMedia', media, 'hold');
-  hook(window.Geolocation && Geolocation.prototype, 'getCurrentPosition', ['geolocation'], 'callback');
-  hook(window.Geolocation && Geolocation.prototype, 'watchPosition', ['geolocation'], 'report');
-  hook(window.Notification, 'requestPermission', ['notifications'], 'hold');
-  hook(window.PushManager && PushManager.prototype, 'subscribe', ['notifications'], 'hold');
-  hook(window.Navigator && Navigator.prototype, 'requestMIDIAccess', ['midi'], 'hold');
-  hook(window.Clipboard && Clipboard.prototype, 'readText', ['clipboard-read'], 'report');
-  hook(window.Clipboard && Clipboard.prototype, 'read', ['clipboard-read'], 'report');
-  hook(window, 'queryLocalFonts', ['local-fonts'], 'report');
-  hook(window.IdleDetector, 'requestPermission', ['idle-detection'], 'report');
-  hook(window, 'getScreenDetails', ['window-management'], 'report');
-  hook(window.Document && Document.prototype, 'requestStorageAccess', ['storage-access'], 'report');
-})();`;
+// The page side lives in the page hook (pagehooks.ts).

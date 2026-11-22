@@ -13,7 +13,9 @@ Read README.md first for what the project does. This file is about changing it.
   few browser-level commands are listed; anything else browser-wide is refused.
 - `src/browser.ts` — the gateway's own raw DevTools connection: every tab and
   its owner, holding new tabs until their owner's Playwright has set them up,
-  the gateway's page scripts (one binding, `bridgeScript`), background tabs,
+  the gateway's page scripts (one binding, `bridgeScript`), the page hook's
+  messages (values read with `Runtime.getProperties`, told to the owner in
+  page order, `_inOrder`), background tabs,
   window state, focus guard, `focusTab`, the companion extension.
 - `src/cdp.ts` — a raw CDP connection (used by browser.ts and proxy.ts).
 - `src/screenshot-diagnostics.ts` — passive `Page.captureScreenshot` request,
@@ -42,8 +44,9 @@ Read README.md first for what the project does. This file is about changing it.
 - `src/urls.ts` — addresses agents may not reach: every profile's DevTools
   and gateway ports on any loopback name (chrome:// stays open).
 - `src/linktoken.ts` — tab links (/focus) are HMAC-signed.
-- `src/permissions.ts`, `src/passkeys.ts`, `src/popups.ts` — page scripts
-  (through the bridge in browser.ts) and the notes agents get.
+- `src/pagehooks.ts` — the page hook (page and worker worlds) and the
+  isolated world's channel to it; `src/permissions.ts`, `src/passkeys.ts` —
+  the notes agents get; `src/popups.ts` — new-tab links (isolated world).
 - `src/identity.ts` — `headersHelper` output (who is connecting).
 - `src/gatedbrowser.ts`, `native/show-gate/show_gate.m` — the gated browser
   (macOS): a re-signed copy of Google Chrome whose main process loads the show
@@ -100,6 +103,27 @@ Read README.md first for what the project does. This file is about changing it.
   Playwright lives in its worker (worker.ts), so one agent cannot stall the
   gateway or other chats. Keep it that way; what the tools need from the
   gateway goes through `ToolHost` messages.
+- Pages must not be able to tell they are driven. No `Runtime.enable` or
+  `Console.enable` on a page, frame or worker by anyone (a console call then
+  formats its arguments for DevTools, which sites detect with
+  `Error.prepareStackTrace`): that is why `playwright-core` is installed from
+  patchright-core (an npm alias of the same version). What agents need from
+  a page's own world comes from the page hook (`pagehooks.ts`), whose rules
+  are in its header: no globals; wrapped built-ins are Proxies that look
+  native (toString, name, length, error stacks, other realms, prototype
+  cycles); after start it calls only built-ins it saved; it never reads a
+  logged value (the gateway does, with `Runtime.getProperties`); it reads no
+  stack while the page has its own `Error.prepareStackTrace`. Everything else
+  of ours in pages runs in the gateway's isolated world (`bridgeScript`).
+  `test/stealth.mjs` compares what a page sees with the same page in a
+  browser no one is attached to and fails if the hook is not at work; a new
+  hook, CDP domain or upgrade must keep it green. `test/ab.mjs` compares what
+  agents get with a previous build (run it against a worktree of the last
+  release): outputs must match except the counters that depend on timing.
+- Console entries reach a tab's owner only from the gateway
+  (`SharedBrowser._inOrder`): the browser's own (Log.entryAdded, which the
+  proxy drops for Playwright) and the page hook's, in the order they
+  happened, held while a frame of the tab is not connected yet.
 - `playwright-core` is pinned exactly. Upgrading means re-checking the names in
   `internals.ts` and the few internals worker.ts uses (`Context._tabs`,
   `_currentTab`, `_onPageCreated`, `routes()`/`addRoute`, the backend's
@@ -252,9 +276,10 @@ chat gets for another chat's secret.
 ## Checking changes
 
 `npm run build`, then `node test/reconnect.mjs`, `node test/permissions.mjs`,
-`node test/passkeys.mjs`, `node test/forks.mjs`, `node test/subagent-transcripts.mjs`, `node test/downloads.mjs`, `node test/paths.mjs`, `node test/front.mjs`, `node test/hangs.mjs`, `node test/matrix.mjs`, `node test/robustness.mjs`, `node test/reconnect-stall.mjs`, `node test/leaks.mjs`, `node test/config.mjs`, `node test/titles.mjs`, `node test/service.mjs`, `node test/code-sign-clone.mjs` and `node test/canary.mjs`
+`node test/passkeys.mjs`, `node test/stealth.mjs`, `node test/forks.mjs`, `node test/subagent-transcripts.mjs`, `node test/downloads.mjs`, `node test/paths.mjs`, `node test/front.mjs`, `node test/hangs.mjs`, `node test/matrix.mjs`, `node test/robustness.mjs`, `node test/reconnect-stall.mjs`, `node test/leaks.mjs`, `node test/config.mjs`, `node test/titles.mjs`, `node test/service.mjs`, `node test/code-sign-clone.mjs` and `node test/canary.mjs`
 (self-contained, headless; headless Chrome grants some permissions by itself,
-so check permission changes in a headed profile too; `APM_PROXY_DEBUG=1` logs
+so check permission changes in a headed profile too; `APM_HOOK_DEBUG=1` logs
+how long each page hook message took to reach its owner; `APM_PROXY_DEBUG=1` logs
 every command the proxy refuses)
 and a throwaway headless profile with the other scripts in `test/` (see
 test/README.md). Anything that opens windows or moves focus needs

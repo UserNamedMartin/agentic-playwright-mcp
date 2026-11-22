@@ -208,6 +208,13 @@ empty 0×0 `div`. Take a fresh snapshot (or `browser_find` for `close`,
 `accept`, `dialog`), close the overlay, then click again. Do not click through
 it from JavaScript: a real user could not do that either.
 
+## Sites see a normal browser
+
+Pages cannot tell the browser is driven by DevTools; console messages,
+page errors, permission and passkey requests still reach you as usual. What
+sites can notice is behavior, so do not hammer a site with rapid repeated
+actions.
+
 ## Lessons learned
 
 Short lessons from real use. Add one when a mistake cost a session time.

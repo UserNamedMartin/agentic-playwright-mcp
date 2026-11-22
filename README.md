@@ -34,6 +34,18 @@ Stock Playwright MCP is built for one agent at a time:
 - **Isolation**: each session sees and controls only the tabs it opened, plus
   popups those tabs open, and everything Playwright MCP does is the session's
   own (routes, scripts, recordings, traces); see "Things to know".
+- **Pages cannot tell it is driven**: no DevTools domain that sites detect is
+  ever enabled on a page (Playwright comes from
+  [Patchright](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright), which
+  works without `Runtime.enable`), and agents still get every console message,
+  page error, permission and passkey request as before: a small page hook
+  hands them over through the gateway's isolated world, leaving no globals,
+  and the built-ins it wraps look native to the page, to other frames and to
+  lie detectors (source, name, length, errors and their stacks). What a page
+  sees is compared with the same page in a browser no one is attached to
+  (`test/stealth.mjs`); what agents get is compared with the previous build
+  (`test/ab.mjs`). Behavior (how fast an agent clicks and types) is another
+  matter; see "Things to know".
 - **One agent cannot stall the others**: each session runs in a thread of its
   own; code stuck in a busy loop gets only that session restarted, with its
   tabs kept.
@@ -265,8 +277,13 @@ the gateway created). Change the location or the retention with `filesDir` and
 - A small companion extension, loaded over CDP, manages the tab groups,
   duplicates tabs for forked chats, mutes tabs and keeps the status page in
   front of the window while it is out of sight.
-- Page scripts added to every tab report permission and passkey requests and
-  new-tab links to the gateway.
+- A page hook in every document (`src/pagehooks.ts`) reports console
+  messages, page errors, permission and passkey requests; the gateway reads
+  logged values over DevTools (`Runtime.getProperties`, which runs no page
+  code) and hands them to the chat's Playwright as the events it would have
+  got from DevTools, in the order they happened. Workers get the same hook
+  before their code runs. New-tab links are seen from the gateway's isolated
+  world.
 - Chat titles and forks come from the Claude desktop app's chat files.
 - A pinned status tab keeps the window alive and lists the sessions (the
   gateway writes it over DevTools; the gateway's address itself only shows a
@@ -298,7 +315,23 @@ the gateway created). Change the location or the retention with `filesDir` and
   a tab no chat owns (one you start in the window yourself) goes to
   `profiles/<name>/browser-downloads`, never to your Downloads folder.
 - `playwright-core` is pinned to an exact version because the gateway relies on
-  internal parts of it; startup fails loudly if they change.
+  internal parts of it; startup fails loudly if they change. It is installed
+  from patchright-core (same version). Two of Patchright's own changes are
+  turned back (`internals.ts`): it intercepts every request of every page and
+  rewrites HTML documents to inject init scripts; here, as upstream,
+  requests are intercepted only for routes and init scripts go in without
+  touching documents.
+- Sites see a normal Chrome: its own user agent, client hints, TLS and
+  `navigator.webdriver` false, no DevTools console reporting, no globals. The
+  page hook wraps console methods, permission APIs, WebAuthn and
+  `Function.prototype.toString` with Proxies made to look native; the
+  checks in `test/stealth.mjs` (source text, name, length, prototype,
+  descriptors, error messages and stacks, another frame's toString,
+  prototype cycles, getters and Proxy traps in logged values) find no
+  difference. A detector that targets these exact APIs harder (timing, a
+  window opened with `window.open()` and inspected before the hook is in)
+  could still notice. Behavior is visible as well: clicks without mouse
+  movement before them, instant typing, a window that is minimized.
 - With stock Google Chrome, a page's own `window.open()`, a popup window, a
   form with `target=_blank` or a link with `rel=opener` can still show the
   browser for about a second before the gateway hides it again. The gated
@@ -328,7 +361,7 @@ the gateway created). Change the location or the retention with `filesDir` and
 - Permission decisions are per site and shared by every session. The browser
   forgets decisions made over DevTools when the connection closes, so the
   gateway keeps them (in `sessions.json`) and sets them again. Requests the
-  page script cannot see (local network access, for example) are refused
+  page hook cannot see (local network access, for example) are refused
   silently; agents can allow them ahead of time with `browser_permission`.
 - A fork's copies are made when the fork first uses the browser, from the
   original chat's tabs at that moment, and only for forks made in the Claude

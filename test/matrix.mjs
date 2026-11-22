@@ -278,6 +278,7 @@ try {
   const consoleA = await A.call('browser_console_messages', { level: 'debug', all: true });
   works('browser_console_messages', consoleA);
   expect('browser_console_messages', 'no B messages in A', !consoleA.text.includes('B-CONSOLE'), consoleA.text);
+  record('browser_console_messages', 'A sees its own page\'s messages', consoleA.text.includes('A-CONSOLE') ? 'ok' : 'note', consoleA.text);
   const netA = await A.call('browser_network_requests', { static: true });
   works('browser_network_requests', netA);
   expect('browser_network_requests', 'no B requests in A', !netA.text.includes('b-only'), netA.text);

@@ -9,7 +9,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import path from 'node:path';
 import { parentPort, workerData } from 'node:worker_threads';
 import type { Browser, Page, Route } from 'playwright-core';
-import { playwright, pwTools, verifyContext } from './internals.js';
+import { evaluateInMainWorld, keepNetworkUpstream, playwright, pwTools, verifyContext } from './internals.js';
 import { agentCall, installNetGuard } from './netguard.js';
 import { scopeTools } from './scoped.js';
 import { applyEmulation, extraTools, type Emulation, type ToolHost } from './tools.js';
@@ -134,6 +134,9 @@ async function open() {
   // As upstream connects to a CDP endpoint: traces (and download temp files)
   // go to the output folder's "traces".
   browser = await playwright.chromium.connectOverCDP(start.endpoint, { timeout: 15_000, artifactsDir: path.join(start.filesDir, 'traces') });
+  evaluateInMainWorld(browser);
+  keepNetworkUpstream(browser);
+
   backend = new pwTools.BrowserBackend(config, browser.contexts()[0], tools, async () => {});
   await backend.initialize({ cwd: start.filesDir, clientName: start.title });
   const context = backend._context;

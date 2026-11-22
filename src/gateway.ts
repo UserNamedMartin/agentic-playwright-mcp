@@ -40,8 +40,9 @@ import { baseIcon, renderDockIcon } from './docktile.js';
 import { appMimeType, openTabWindowTool, tabLinkHtml, tabLinkResource, tabLinkResourceUri, tabLinkTool } from './apps.js';
 import { DesktopChatFile } from './titles.js';
 import { processEnv } from './identity.js';
-import { passkeyScript, type PasskeyRequest } from './passkeys.js';
-import { describeRequests, holdMs, permissionScript, permissionTypes, type PermissionRequest } from './permissions.js';
+import { type PasskeyRequest } from './passkeys.js';
+import { hookNames, isolatedChannel, mainWorldHook, workerHook } from './pagehooks.js';
+import { describeRequests, holdMs, permissionTypes, type PermissionRequest } from './permissions.js';
 
 export type GatewayOptions = {
   profile: string;
@@ -270,6 +271,7 @@ export class Gateway implements SessionHost, ProxyHost {
       onTargetDestroyed: targetId => this._onTargetDestroyed(targetId),
       onTargetChanged: () => {},
       onPageCall: (targetId, call) => this._onPageCall(targetId, call),
+      onPageEvent: (targetId, method, params) => this.proxy?.emitToTab(targetId, method, params),
       isOwnerAlive: owner => !!this.sessions.get(owner) && !this.sessions.get(owner)!.disposed,
       onDownloadEvent: message => this.proxy.onDownloadEvent(message),
       onDisconnected: () => this._onDisconnected(shared),
@@ -280,7 +282,7 @@ export class Gateway implements SessionHost, ProxyHost {
         void this.groups?.setMuted(!visible).catch(e => console.error(`sound: ${(e as Error).message}`));
         this._onFrontVisibility(visible);
       },
-    }, [popupInterceptScript, permissionScript, passkeyScript], connecting => this._attaching = connecting);
+    }, this._pageScripts(), connecting => this._attaching = connecting);
     // Before anything that may order a window in (the home window in _setUpTabs).
     shared.showGatePath = this.options.showGate;
     this.shared = shared;
@@ -292,6 +294,14 @@ export class Gateway implements SessionHost, ProxyHost {
     await this._setUpTabs(saved);
     this._dockAppliedAt = 0;
     await this._applyDockTile();
+  }
+
+  // The scripts every page gets (see pagehooks.ts). Their secret names come
+  // from the profile's link secret, so they stay the same across restarts
+  // (a document keeps the hook it got).
+  private _pageScripts() {
+    const names = hookNames(this._linkSecret);
+    return { isolated: [popupInterceptScript, isolatedChannel(names)], main: [mainWorldHook(names)], worker: workerHook(names), names };
   }
 
   // A tab became a session's (it opened it, its page opened it, a fork copy).

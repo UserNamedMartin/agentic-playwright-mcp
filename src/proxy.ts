@@ -150,6 +150,14 @@ export class CdpProxy {
       void this.shared.release(targetId);
   }
 
+  // SharedBrowser: an event for a tab's owner only (the page hook's console
+  // messages and page errors).
+  emitToTab(targetId: string, method: string, params: any) {
+    const owner = this.shared?.owners.get(targetId);
+    if (owner)
+      this._clients.get(owner)?.emitToTarget(targetId, method, params);
+  }
+
   // SharedBrowser: download events go to the session whose tab downloads.
   onDownloadEvent(message: CdpMessage) {
     const { method, params } = message;
@@ -492,6 +500,10 @@ class ProxyClient {
     }
     if (message.method === 'Page.frameNavigated')
       void this._checkNavigation(message).catch(() => {});
+    // The gateway tells console entries itself, in order with the page
+    // hook's (SharedBrowser._inOrder).
+    if (message.method === 'Log.entryAdded')
+      return;
     this._send(message);
   }
 
@@ -516,6 +528,13 @@ class ProxyClient {
     console.error(`${this.key}: left ${frame.url} (${reason})`);
     this._host.onNavigationBlocked(this.key, frame.url, reason);
     await this._real?.send('Page.navigate', { url: 'about:blank', frameId: frame.id }, message.sessionId);
+  }
+
+  // An event on the tab's own session, as if the browser had sent it.
+  emitToTarget(targetId: string, method: string, params: any) {
+    const sessionId = this._attached.get(targetId);
+    if (sessionId && !this._isSilentSession(sessionId))
+      this._send({ method, params, sessionId });
   }
 
   onDownloadEvent(message: CdpMessage) {

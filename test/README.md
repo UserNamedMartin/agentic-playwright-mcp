@@ -4,7 +4,7 @@ Two kinds of scripts:
 
 - self-contained pass/fail tests (`canary`, `matrix`, `robustness`,
   `reconnect-stall`, `leaks`, `config`, `hangs`, `reconnect`, `permissions`,
-  `passkeys`, `forks`, `downloads`, `paths`, `front`, `code-sign-clone`, `headed`): each starts its own browser, gateway and scratch
+  `passkeys`, `stealth`, `forks`, `downloads`, `paths`, `front`, `code-sign-clone`, `headed`): each starts its own browser, gateway and scratch
   `AGENTIC_PLAYWRIGHT_HOME`, prints one line per check and exits non-zero on
   failure. All but `headed` are headless; `headed` shows a window (macOS).
 - scripts used while developing the gateway: they talk to a running gateway
@@ -21,9 +21,11 @@ node dist/cli.js start test
 
 | Script | Checks |
 |---|---|
-| `reconnect.mjs [browser]` | self-contained (own headless browser, gateway and scratch home), pass/fail: tabs survive a dropped DevTools connection and a gateway restart, lazy session start, group titles follow `/rename`, same titles numbered, an older extension is reloaded, hidden tabs are muted |
+| `reconnect.mjs [browser]` | self-contained (own headless browser, gateway and scratch home), pass/fail: tabs survive a dropped DevTools connection and a gateway restart, lazy session start, group titles follow `/rename`, same titles numbered, an older extension is reloaded, hidden tabs are muted, a page's and its worker's console reach the agent across a gateway restart (each message once) |
 | `permissions.mjs [browser]` | self-contained, pass/fail: permission requests are reported, answered with `browser_permission`, held ones wait, unanswered ones time out |
 | `passkeys.mjs [browser]` | self-contained, pass/fail: passkey requests in a browser nobody can see are cancelled at once and reported; passkey autofill is left alone |
+| `stealth.mjs [browser]` | self-contained, pass/fail: the hook scripts parse and the hook is at work (the page's console reaches the agent); a probe page (main frame, cross-site frame, worker, a tab opened from a link) reports to the test server, never through the tools, what bot checks and lie detectors look at while an agent works with it, compared with the same page in a browser with no DevTools client: DevTools console leak (stack getter, `Error.prepareStackTrace`), window properties, each wrapped built-in's source text, name, length, prototype, descriptor, error messages and stacks (`Object.create`, wrong receiver), prototype cycles, `class extends`, another frame's toString, getters and Proxy traps in logged values |
+| `ab.mjs <dist/cli.js> <out.json>`, `ab.mjs --compare <a> <b>` | A/B against another build (a worktree of the last release): the same agent scenarios (console of every kind, page errors, a cross-site frame, a worker, a tab from a link, permissions, passkeys) recorded normalized; outputs must match except counters that depend on timing ("Console: N errors", "New console entries"); run each build a few times, the old one varies too |
 | `hangs.mjs [browser]` | self-contained, pass/fail: a cancelled call and a call past its timeout free the session queue at once; a raised `timeout` is honored; a call that waited behind another says so; given-up or cancelled `run_code` stops; after a reconnect a page stuck in a script is left out (and closed after the limit, `AGENTIC_SILENT_TAB_CLOSE_MS`), a page busy for a while comes back, a dialog left open is dismissed, a page with a stuck out-of-process frame stays |
 | `matrix.mjs [browser]` | self-contained, pass/fail: every tool across two sessions — works at all, does not reach the other session, leaves nothing behind when its chat ends |
 | `canary.mjs [browser]` | self-contained, pass/fail: chat B's pages carry a secret; chat A tries every known way to see or touch B (tools, run_code's context, raw CDP sessions, events, cookies, status page, internal addresses by every path, recorder, tracing) and every text and file A gets is searched for it; no call leaves a tab that is not A's; A's own popups, new pages and first-load routes work |
